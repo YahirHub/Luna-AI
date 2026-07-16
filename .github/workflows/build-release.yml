@@ -15,12 +15,17 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_initial: ${{ steps.version.outputs.is_initial }}
     steps:
-      - id: version
-        name: Calcular versión
+      - uses: actions/checkout@v4
+
+      - name: Calcular versión
+        id: version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')
+          set -euo pipefail
+
+          # gh release list necesita checkout para conocer el repo
+          LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' || true)
 
           if [ -z "$LATEST" ]; then
             echo "🔹 No hay releases previos — creando v1.0.0"
