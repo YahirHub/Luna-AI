@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { ChatMessage } from "./ai.ts";
-import { getAppDir } from "./utils.ts";
+import { getAppDir, getMexicoCityNow } from "./utils.ts";
 import type { MemoryManager } from "./memory.ts";
 import type { CompactionMetadata } from "./compaction.ts";
 import { summaryToTextBlock } from "./compaction.ts";
@@ -20,23 +20,7 @@ interface UserContextData {
 
 /** Retorna la hora actual en CDMX formateada legible. */
 export function getMexicoCityTime(): string {
-  const now = new Date();
-  const datePart = new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(now);
-
-  const timePart = new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(now);
-
-  return `Hoy es ${datePart}. Son las ${timePart} (hora Ciudad de Mexico, America/Mexico_City).`;
+  return getMexicoCityNow().text;
 }
 
 /** System prompt ESTÁTICO — nunca cambia, para que el proveedor pueda cachearlo. */

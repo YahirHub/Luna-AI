@@ -1,6 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import {
   estimateTextTokens,
+} from "../src/ai.ts";
+import {
   estimateMessageTokens,
   estimateRequestTokens,
   selectMessagesForCompaction,

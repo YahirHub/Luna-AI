@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { getAppDir } from "./utils.ts";
+import { getAppDir, getMexicoCityNow } from "./utils.ts";
 import type { WASocket } from "@whiskeysockets/baileys";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -20,35 +20,6 @@ export interface Reminder {
 /** Formato del archivo reminders.json. */
 interface RemindersFile {
   reminders: Reminder[];
-}
-
-/** Retorna la hora actual en CDMX como objeto { hour, minute, ymd }. */
-function getMexicoCityNow(): { hour: number; minute: number; ymd: string; ts: number } {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
-    hour: "numeric",
-    minute: "numeric",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(now);
-  const get = (type: string): string =>
-    parts.find((p) => p.type === type)?.value ?? "0";
-  const hour = parseInt(get("hour"), 10);
-  const minute = parseInt(get("minute"), 10);
-  const year = get("year");
-  const month = get("month").padStart(2, "0");
-  const day = get("day").padStart(2, "0");
-
-  return {
-    hour,
-    minute,
-    ymd: `${year}-${month}-${day}`,
-    ts: hour * 60 + minute,
-  };
 }
 
 // ─── ReminderManager ─────────────────────────────────────────────

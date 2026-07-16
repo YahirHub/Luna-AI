@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T18:27:54.299Z
-- Último registro: contexto/031-actualizar-logica-del-bot.md
-- Resumen: Actualizar lógica del bot.
-- Archivos del cambio: src/bot.ts
+- Última actualización: 2026-07-16T18:37:40.728Z
+- Último registro: contexto/032-actualizar-proveedores-y-modelos.md
+- Resumen: Actualizar proveedores y modelos.
+- Archivos del cambio: __tests__/compaction.test.ts, src/alarm.ts, src/compaction.ts, src/context.ts, src/models.ts, src/reminder.ts, src/utils.ts
 <!-- codewolf:auto-context:end -->

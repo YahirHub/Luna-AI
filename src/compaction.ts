@@ -9,6 +9,7 @@
  */
 
 import type { ChatMessage, ToolDefinition } from "./ai.ts";
+import { estimateTextTokens } from "./ai.ts";
 
 // ─── Tipos de compactación ───────────────────────────────────────
 
@@ -57,15 +58,6 @@ export interface CompactionSplit {
 }
 
 // ─── Estimación de tokens ────────────────────────────────────────
-
-/**
- * Estima tokens de un texto: caracteres / 3 (conservador).
- * Para texto en español/inglés mixto, esta es una aproximación
- * razonable para la mayoría de tokenizers (BPE/cl100k).
- */
-export function estimateTextTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
 
 /** Costo estructural por mensaje (rol, overhead JSON). */
 const STRUCTURAL_OVERHEAD = 8;

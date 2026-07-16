@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CONTEXTS_DIR } from "./context.ts";
+import { getMexicoCityNow } from "./utils.ts";
 import type { ToolDefinition } from "./ai.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -21,54 +22,6 @@ export interface RecurringAlarm {
 
 interface AlarmsFile {
   alarms: RecurringAlarm[];
-}
-
-/** Retorna la hora actual en CDMX con día de la semana. */
-function getMexicoCityNow(): {
-  hour: number;
-  minute: number;
-  ymd: string;
-  ts: number;
-  dayOfWeek: number;
-} {
-  const now = new Date();
-
-  const formatter = new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
-    hour: "numeric",
-    minute: "numeric",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(now);
-  const get = (type: string): string =>
-    parts.find((p) => p.type === type)?.value ?? "0";
-  const hour = parseInt(get("hour"), 10);
-  const minute = parseInt(get("minute"), 10);
-  const year = get("year");
-  const month = get("month").padStart(2, "0");
-  const day = get("day").padStart(2, "0");
-
-  // Día de la semana en CDMX (0=domingo, 6=sábado)
-  const dayName = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Mexico_City",
-    weekday: "long",
-  }).format(now);
-  const dayMap: Record<string, number> = {
-    "Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3,
-    "Thursday": 4, "Friday": 5, "Saturday": 6,
-  };
-  const dayOfWeek = dayMap[dayName] ?? 0;
-
-  return {
-    hour,
-    minute,
-    ymd: `${year}-${month}-${day}`,
-    ts: hour * 60 + minute,
-    dayOfWeek,
-  };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
