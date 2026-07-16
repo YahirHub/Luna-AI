@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T16:08:52.655Z
-- Último registro: contexto/021-actualizar-build-release-yml.md
+- Última actualización: 2026-07-16T16:17:11.255Z
+- Último registro: contexto/023-actualizar-build-release-yml.md
 - Resumen: Actualizar build-release.yml.
 - Archivos del cambio: .github/workflows/build-release.yml
 <!-- codewolf:auto-context:end -->
