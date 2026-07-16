@@ -24,13 +24,15 @@ export interface PendingAction {
 /** Formato del archivo users.json. */
 interface UsersFile {
   users: UserRecord[];
+  /** Sesiones activas: JID -> nombre de usuario. Se persiste para que sobreviva a reinicios. */
+  sessions?: Record<string, string>;
 }
 
 // ─── AuthManager ─────────────────────────────────────────────────
 
 export class AuthManager {
   private users: UserRecord[] = [];
-  /** Mapa: JID del remitente → nombre de usuario. */
+  /** Mapa: JID del remitente → nombre de usuario. Persistido en disco. */
   private sessions = new Map<string, string>();
   /** Mapa: JID del remitente → acción pendiente. */
   private pendingActions = new Map<string, PendingAction>();
@@ -60,17 +62,26 @@ export class AuthManager {
         const raw = readFileSync(this.usersPath, "utf-8");
         const data = JSON.parse(raw) as UsersFile;
         this.users = data.users ?? [];
+        // Restaurar sesiones activas
+        if (data.sessions) {
+          this.sessions = new Map(Object.entries(data.sessions));
+        }
       }
     } catch (err) {
       console.warn("[auth] Error al cargar usuarios, comenzando de cero:", err);
       this.users = [];
+      this.sessions = new Map();
     }
   }
 
   private save(): void {
     this.ensureDir();
     try {
-      const data: UsersFile = { users: this.users };
+      const sessionsObj: Record<string, string> = {};
+      for (const [jid, username] of this.sessions) {
+        sessionsObj[jid] = username;
+      }
+      const data: UsersFile = { users: this.users, sessions: sessionsObj };
       writeFileSync(this.usersPath, JSON.stringify(data, null, 2), "utf-8");
     } catch (err) {
       console.error("[auth] Error al guardar usuarios:", err);
@@ -156,6 +167,7 @@ export class AuthManager {
         }
       }
       this.sessions.set(jid, user.username);
+      this.save();
       return true;
     }
     return false;
@@ -182,6 +194,7 @@ export class AuthManager {
   /** Cierra la sesión de un JID. */
   logout(jid: string): void {
     this.sessions.delete(jid);
+    this.save();
   }
 
   // ── Baneo ────────────────────────────────────────────────────

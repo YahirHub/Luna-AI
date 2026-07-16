@@ -9,7 +9,7 @@ import {
 import { downloadAndSaveImage } from "./media.ts";
 import { fetchFreeModels, chatCompletion, chatCompletionWithTools } from "./ai.ts";
 import type { AiConfig } from "./ai.ts";
-import { ContextManager } from "./context.ts";
+import { ContextManager, STATIC_SYSTEM_PROMPT_CONTENT } from "./context.ts";
 import { AuthManager } from "./auth.ts";
 import type { PendingAction } from "./auth.ts";
 import {
@@ -83,41 +83,19 @@ async function onReminderDue(
   }
 
   const model = contextManager.getModel(reminder.jid);
-  const memory = memoryManager.getContent(reminder.jid);
 
-  // Hora actual real en CDMX (no la hora programada)
-  const nowCDMX = new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
+  // Contexto dinámico con hora actual + memoria
+  const dynamicCtx = contextManager.buildDynamicContext(reminder.jid);
 
-  // Construir mensaje para la API pidiendo que prepare el recordatorio
+  // Construir mensaje para la API: system prompt estático + user msg con contexto dinámico
   const reminderMessages: import("./ai.ts").ChatMessage[] = [
     {
       role: "system",
-      content: [
-        "Eres Luna, una amiga virtual mexicana.",
-        "",
-        `Hoy es ${nowCDMX}.`,
-        "",
-        "=== LO QUE RECUERDO DE ESTA PERSONA ===",
-        memory || "No hay informacion guardada aun.",
-        "=== FIN DE MI MEMORIA ===",
-        "",
-        "PREPARA UN MENSAJE CORTO Y AMIGABLE PARA RECORDARLE ALGO IMPORTANTE.",
-        "Usa emojis, se cálida, como una amiga recordando algo.",
-        "⚠️ NO uses Markdown. NO uses # ni ** ni * ni `.",
-      ].join("\n"),
+      content: STATIC_SYSTEM_PROMPT_CONTENT,
     },
     {
       role: "user",
-      content: `Es hora de recordar: ${reminder.text}`,
+      content: `${dynamicCtx}\n\n---\n\nEs hora de recordar: ${reminder.text}`,
     },
   ];
 
@@ -822,13 +800,19 @@ async function handleAiChat(
     return;
   }
 
-  // Refrescar system prompt para que tenga hora/fecha actual
-  contextManager.refreshSystemPrompt(remoteJid);
-
   const userMessage = { role: "user" as const, content: userText };
   contextManager.addMessage(remoteJid, userMessage);
 
   const messages = contextManager.getMessages(remoteJid);
+
+  // Inyectar contexto dinámico (hora + memoria) en el último user message,
+  // usando shallow clone para no contaminar el contexto persistido
+  const dynamicCtx = contextManager.buildDynamicContext(remoteJid);
+  const apiMessages = messages.map((m) => ({ ...m }));
+  const lastMsg = apiMessages[apiMessages.length - 1];
+  if (lastMsg && lastMsg.role === "user") {
+    lastMsg.content = `${dynamicCtx}\n\n---\n\n${lastMsg.content}`;
+  }
 
   // Activar typing mientras la API procesa
   await sock.sendPresenceUpdate("composing", remoteJid).catch(() => {});
@@ -845,7 +829,15 @@ async function handleAiChat(
       }
       // Intentar como tool de recordatorios
       if (["create_reminder", "delete_reminder", "list_reminders"].includes(name)) {
-        return executeReminderTool(name, args, reminderManager, remoteJid);
+        const result = await executeReminderTool(name, args, reminderManager, remoteJid);
+        // Persistir en el contexto para que el modelo lo recuerde
+        if (!result.startsWith("Error:") && contextManager) {
+          contextManager.addMessage(remoteJid, {
+            role: "assistant",
+            content: result,
+          });
+        }
+        return result;
       }
       return `Error: funcion desconocida "${name}"`;
     };
@@ -861,7 +853,7 @@ async function handleAiChat(
     const shownNotifs = new Set<string>();
 
     const result = await chatCompletionWithTools(
-      messages,
+      apiMessages,
       model,
       aiConfig,
       ALL_TOOLS,
@@ -886,16 +878,10 @@ async function handleAiChat(
     // Preparar respuesta final
     let finalText = result.content;
 
-    // Si se modificó la memoria, refrescar system prompt
-    if (result.toolsCalled.includes("memory_write")) {
-      contextManager.refreshSystemPrompt(remoteJid);
-    }
-
-    // Si se llamaron herramientas, quitar notificaciones previas del texto
-    // (porque ya se enviaron como mensajes separados)
-    if (result.toolsCalled.length > 0 && shownNotifs.size > 0) {
-      // El contenido ya está limpio — el AI ya sabe lo que pasó
-    }
+    // La memoria ya está actualizada en disco vía el tool call.
+    // El contexto dinámico con la memoria fresca se inyectará en el
+    // próximo user message via buildDynamicContext().
+    // En esta misma ronda el modelo ya ve el resultado del tool call.
 
     // Simular escritura antes de enviar
     const typingDelay = 3000 + Math.floor(Math.random() * 2000);

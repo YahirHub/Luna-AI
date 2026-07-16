@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthManager } from "../src/auth.ts";
@@ -174,6 +175,26 @@ describe("AuthManager — login y sesiones", () => {
 
     auth.logout("jid1@s.whatsapp.net");
     expect(auth.isLoggedIn("jid1@s.whatsapp.net")).toBe(false);
+  });
+
+  it("las sesiones persisten al recargar desde disco", async () => {
+    const sessionPath = join(tmpdir(), `codewolf-auth-session-test-${Date.now()}.json`);
+
+    // Crear usuario e iniciar sesión
+    const auth1 = new AuthManager(sessionPath);
+    await auth1.createAdmin("persist", "password");
+    await auth1.login("jid999@s.whatsapp.net", "persist", "password");
+    expect(auth1.isLoggedIn("jid999@s.whatsapp.net")).toBe(true);
+    expect(auth1.getUsername("jid999@s.whatsapp.net")).toBe("persist");
+
+    // Simular reinicio: crear nueva instancia que lee el mismo archivo
+    const auth2 = new AuthManager(sessionPath);
+    expect(auth2.isLoggedIn("jid999@s.whatsapp.net")).toBe(true);
+    expect(auth2.getUsername("jid999@s.whatsapp.net")).toBe("persist");
+    expect(auth2.userExists()).toBe(true);
+
+    // Limpiar
+    try { unlinkSync(sessionPath); } catch {}
   });
 });
 

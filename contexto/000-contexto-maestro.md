@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T16:17:11.255Z
-- Último registro: contexto/023-actualizar-build-release-yml.md
-- Resumen: Actualizar build-release.yml.
-- Archivos del cambio: .github/workflows/build-release.yml
+- Última actualización: 2026-07-16T17:21:34.917Z
+- Último registro: contexto/025-actualizar-logica-del-bot.md
+- Resumen: Actualizar lógica del bot.
+- Archivos del cambio: __tests__/auth.test.ts, src/auth.ts, src/bot.ts
 <!-- codewolf:auto-context:end -->
