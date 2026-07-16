@@ -5,7 +5,7 @@ import { estimateTokens } from "./ai.ts";
 import { getAppDir } from "./utils.ts";
 import type { MemoryManager } from "./memory.ts";
 
-const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
+export const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
 
 /** Datos persistidos por usuario. */
 interface UserContextData {

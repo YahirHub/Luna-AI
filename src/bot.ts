@@ -22,6 +22,11 @@ import {
   REMINDER_TOOLS,
   executeReminderTool,
 } from "./reminder.ts";
+import {
+  AlarmManager,
+  ALARM_TOOLS,
+  executeAlarmTool,
+} from "./alarm.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -40,8 +45,14 @@ const memoryManager = new MemoryManager();
 /** Gestor de recordatorios. */
 const reminderManager = new ReminderManager();
 
-/** Tools combinadas (memoria + recordatorios). */
-const ALL_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS];
+/** Gestor de alarmas recurrentes. */
+const alarmManager = new AlarmManager();
+
+// Variable para guardar el socket actual (para alarmas)
+let currentSock: WASocket | null = null;
+
+/** Tools combinadas (memoria + recordatorios + alarmas). */
+const ALL_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
 
 /** Inicializa el módulo AI con la configuración. */
 export function initAi(config: AiConfig): void {
@@ -49,8 +60,9 @@ export function initAi(config: AiConfig): void {
   contextManager = new ContextManager("");
   contextManager.setMemoryManager(memoryManager);
 
-  // Iniciar verificador de recordatorios
+  // Iniciar verificadores
   reminderManager.startChecker(onReminderDue);
+  alarmManager.startChecker(onAlarmDue);
 
   fetchFreeModels(config)
     .then((models) => {
@@ -70,6 +82,67 @@ export function initAi(config: AiConfig): void {
  */
 export function setSocket(sock: WASocket): void {
   reminderManager.setSock(sock);
+  currentSock = sock;
+}
+
+/** Callback cuando una alarma recurrente debe dispararse. */
+async function onAlarmDue(
+  alarm: import("./alarm.ts").RecurringAlarm,
+): Promise<void> {
+  const sock = currentSock;
+  if (!sock || !aiConfig || !contextManager) {
+    console.warn("[alarm] No se puede disparar: sock/aiConfig/contextManager no disponible");
+    return;
+  }
+
+  const model = contextManager.getModel(alarm.jid);
+  const dynamicCtx = contextManager.buildDynamicContext(alarm.jid);
+
+  const alarmMessages: import("./ai.ts").ChatMessage[] = [
+    {
+      role: "system",
+      content: STATIC_SYSTEM_PROMPT_CONTENT,
+    },
+    {
+      role: "user",
+      content: `${dynamicCtx}\n\n---\n\n⏰ ALARMA RECURRENTE:\n${alarm.text}`,
+    },
+  ];
+
+  try {
+    const response = await chatCompletion(alarmMessages, model, aiConfig);
+    const dayName = new Intl.DateTimeFormat("es-MX", {
+      timeZone: "America/Mexico_City",
+      weekday: "long",
+    }).format(new Date());
+
+    const finalText = `⏰ ALARMA RECURRENTE (${dayName})\n\n${response}`;
+
+    await sock.sendPresenceUpdate("composing", alarm.jid).catch(() => {});
+    const delayMs = 2000 + Math.floor(Math.random() * 2000);
+    await new Promise<void>((r) => setTimeout(r, delayMs));
+
+    await sock.sendMessage(alarm.jid, { text: finalText });
+    await sock.sendPresenceUpdate("paused", alarm.jid).catch(() => {});
+
+    console.log(
+      `[alarm] Alarma disparada para ${alarm.jid}: "${alarm.text}"`,
+    );
+  } catch (err) {
+    console.error("[alarm] Error al enviar alarma via AI:", err);
+    // Fallback: texto plano
+    try {
+      await sock.sendPresenceUpdate("composing", alarm.jid).catch(() => {});
+      const delayMs = 2000 + Math.floor(Math.random() * 2000);
+      await new Promise<void>((r) => setTimeout(r, delayMs));
+      await sock.sendMessage(alarm.jid, {
+        text: `⏰ ALARMA RECURRENTE\n\n${alarm.text}`,
+      });
+      await sock.sendPresenceUpdate("paused", alarm.jid).catch(() => {});
+    } catch (sendErr) {
+      console.error("[alarm] Error al enviar alarma fallback:", sendErr);
+    }
+  }
 }
 
 /** Callback cuando un recordatorio debe dispararse. */
@@ -839,6 +912,17 @@ async function handleAiChat(
         }
         return result;
       }
+      // Intentar como tool de alarmas recurrentes
+      if (["create_alarm", "delete_alarm", "list_alarms", "toggle_alarm"].includes(name)) {
+        const result = await executeAlarmTool(name, args, alarmManager, remoteJid);
+        if (!result.startsWith("Error:") && contextManager) {
+          contextManager.addMessage(remoteJid, {
+            role: "assistant",
+            content: result,
+          });
+        }
+        return result;
+      }
       return `Error: funcion desconocida "${name}"`;
     };
 
@@ -849,6 +933,10 @@ async function handleAiChat(
     toolNotifTexts.set("list_reminders", "📋 Consultando recordatorios...");
     toolNotifTexts.set("memory_write", "📝 Escribiendo en memoria...");
     toolNotifTexts.set("memory_read", "🔍 Leyendo memoria...");
+    toolNotifTexts.set("create_alarm", "⏰ Creando alarma recurrente...");
+    toolNotifTexts.set("delete_alarm", "🗑️ Eliminando alarma...");
+    toolNotifTexts.set("list_alarms", "📋 Consultando alarmas...");
+    toolNotifTexts.set("toggle_alarm", "🔄 Cambiando estado de alarma...");
 
     const shownNotifs = new Set<string>();
 
