@@ -1,0 +1,161 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  # ─── Determinar la versión del release ──────────────────────────────
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_initial: ${{ steps.version.outputs.is_initial }}
+    steps:
+      - id: version
+        name: Calcular versión
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')
+
+          if [ -z "$LATEST" ]; then
+            echo "🔹 No hay releases previos — creando v1.0.0"
+            echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
+            echo "is_initial=true" >> "$GITHUB_OUTPUT"
+          else
+            BASE="${LATEST#v}"
+            MAJOR=$(echo "$BASE" | cut -d. -f1)
+            MINOR=$(echo "$BASE" | cut -d. -f2)
+            PATCH=$(echo "$BASE" | cut -d. -f3)
+            NEW_PATCH=$((PATCH + 1))
+            NEW="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+            echo "🔹 Último release: ${LATEST} → Nuevo: ${NEW}"
+            echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+            echo "is_initial=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─── Build Linux amd64 ──────────────────────────────────────────────
+  build-linux-amd64:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Instalar dependencias
+        run: bun install
+
+      - name: Compilar binario
+        run: |
+          bun build ./src/index.ts \
+            --compile \
+            --bytecode \
+            --compile-exec-argv=--no-warnings \
+            --outfile ./dist/luna-ai-linux-amd64
+
+      - name: Verificar binario
+        run: |
+          file ./dist/luna-ai-linux-amd64
+          chmod +x ./dist/luna-ai-linux-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-ai-linux-amd64
+          path: ./dist/luna-ai-linux-amd64
+          if-no-files-found: error
+
+  # ─── Build Linux arm64 ──────────────────────────────────────────────
+  build-linux-arm64:
+    needs: version
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Instalar dependencias
+        run: bun install
+
+      - name: Compilar binario
+        run: |
+          bun build ./src/index.ts \
+            --compile \
+            --bytecode \
+            --compile-exec-argv=--no-warnings \
+            --outfile ./dist/luna-ai-linux-arm64
+
+      - name: Verificar binario
+        run: |
+          file ./dist/luna-ai-linux-arm64
+          chmod +x ./dist/luna-ai-linux-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-ai-linux-arm64
+          path: ./dist/luna-ai-linux-arm64
+          if-no-files-found: error
+
+  # ─── Build Windows amd64 ────────────────────────────────────────────
+  build-windows-amd64:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Instalar dependencias
+        run: bun install
+
+      - name: Compilar binario
+        shell: bash
+        run: |
+          bun build ./src/index.ts --compile --bytecode --compile-exec-argv=--no-warnings --outfile ./dist/luna-ai-windows-amd64.exe
+
+      - name: Verificar binario
+        shell: pwsh
+        run: |
+          Get-Item ./dist/luna-ai-windows-amd64.exe | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-ai-windows-amd64
+          path: ./dist/luna-ai-windows-amd64.exe
+          if-no-files-found: error
+
+  # ─── Crear Release y subir binarios ─────────────────────────────────
+  release:
+    needs: [version, build-linux-amd64, build-linux-arm64, build-windows-amd64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: luna-ai-*
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Preparar binarios
+        run: |
+          chmod +x ./artifacts/luna-ai-linux-* || true
+          echo "📦 Binarios listos para release:"
+          ls -lh ./artifacts/
+
+      - name: Crear Release y subir assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.version.outputs.version }}" \
+            ./artifacts/* \
+            --title "${{ needs.version.outputs.version }}" \
+            --generate-notes

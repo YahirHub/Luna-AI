@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T16:01:32.880Z
-- Último registro: contexto/020-implementar-bot-de-whatsapp-con-baileys.md
-- Resumen: Implementar bot de WhatsApp con Baileys.
-- Archivos del cambio: README.md
+- Última actualización: 2026-07-16T16:08:52.655Z
+- Último registro: contexto/021-actualizar-build-release-yml.md
+- Resumen: Actualizar build-release.yml.
+- Archivos del cambio: .github/workflows/build-release.yml
 <!-- codewolf:auto-context:end -->
