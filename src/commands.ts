@@ -63,19 +63,36 @@ const handlers = new Map<string, CommandHandler>();
 /** Descripciones de comandos para el menú de ayuda. */
 const descriptions = new Map<string, string>();
 
-/** Registra un comando con su descripción para el menú !ayuda. */
+/** Set de comandos exclusivos para administradores. */
+const adminCommands = new Set<string>();
+
+/**
+ * Registra un comando con su descripción para el menú !ayuda.
+ * @param adminOnly Si es true, solo los administradores ven este comando en !ayuda.
+ */
 export function registerCommand(
   name: string,
   description: string,
   handler: CommandHandler,
+  adminOnly = false,
 ): void {
-  handlers.set(name.toLowerCase(), handler);
-  descriptions.set(name.toLowerCase(), description);
+  const key = name.toLowerCase();
+  handlers.set(key, handler);
+  descriptions.set(key, description);
+  if (adminOnly) {
+    adminCommands.add(key);
+  }
 }
 
-/** Obtiene la lista de comandos registrados con sus descripciones. */
-export function getCommands(): Array<{ name: string; description: string }> {
+/**
+ * Obtiene la lista de comandos registrados con sus descripciones.
+ * @param isAdmin Si es false, se excluyen los comandos marcados como adminOnly.
+ */
+export function getCommands(
+  isAdmin: boolean = true,
+): Array<{ name: string; description: string }> {
   return Array.from(descriptions.entries())
+    .filter(([name]) => isAdmin || !adminCommands.has(name))
     .map(([name, description]) => ({ name, description }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }

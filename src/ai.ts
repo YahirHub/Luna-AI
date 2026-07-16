@@ -154,9 +154,10 @@ export async function chatCompletion(
   model: string,
   config: AiConfig,
   maxRetries = 3,
+  maxTokens?: number,
 ): Promise<string> {
   const result = await rawChatRequest(
-    { model, messages },
+    { model, messages, max_tokens: maxTokens },
     config,
     maxRetries,
   );
@@ -268,12 +269,35 @@ export async function fetchFreeModels(config: AiConfig): Promise<string[]> {
 }
 
 /**
- * Estima tokens de forma aproximada: caracteres / 4.
+ * Estima tokens de un texto: caracteres / 3 (conservador para
+ * texto mixto español/inglés con tokenizers tipo BPE/cl100k).
  */
-export function estimateTokens(messages: ChatMessage[]): number {
+export function estimateTextTokens(text: string): number {
+  return Math.ceil(text.length / 3);
+}
+
+/** Costo estructural por mensaje. */
+const MSG_OVERHEAD = 8;
+
+/**
+ * Estima tokens de un array de mensajes.
+ * Fórmula: chars/3 + overhead estructural + tool_calls.
+ */
+export function estimateTokensAccurate(messages: ChatMessage[]): number {
   let total = 0;
   for (const msg of messages) {
-    total += Math.ceil(msg.content.length / 4) + 4;
+    const contentTokens = estimateTextTokens(msg.content ?? "");
+    total += contentTokens + MSG_OVERHEAD;
+
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      for (const tc of msg.tool_calls) {
+        total += 40 + estimateTextTokens(tc.function.name);
+        total += estimateTextTokens(tc.function.arguments);
+      }
+    }
+    if (msg.tool_call_id) {
+      total += 20;
+    }
   }
   return total;
 }

@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T17:37:55.866Z
-- Último registro: contexto/026-actualizar-logica-del-bot.md
+- Última actualización: 2026-07-16T18:27:54.299Z
+- Último registro: contexto/031-actualizar-logica-del-bot.md
 - Resumen: Actualizar lógica del bot.
-- Archivos del cambio: __tests__/alarm.test.ts, src/alarm.ts, src/bot.ts, src/context.ts
+- Archivos del cambio: src/bot.ts
 <!-- codewolf:auto-context:end -->

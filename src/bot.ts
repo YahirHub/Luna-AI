@@ -27,6 +27,14 @@ import {
   ALARM_TOOLS,
   executeAlarmTool,
 } from "./alarm.ts";
+import { modelCatalog } from "./models.ts";
+import {
+  selectMessagesForCompaction,
+  buildCompactionPrompt,
+  parseCompactedResponse,
+  estimateRequestTokens,
+} from "./compaction.ts";
+import { estimateTokensAccurate } from "./ai.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -51,8 +59,135 @@ const alarmManager = new AlarmManager();
 // Variable para guardar el socket actual (para alarmas)
 let currentSock: WASocket | null = null;
 
+/** JIDs actualmente en proceso de compactación (para ignorar mensajes entrantes). */
+const compactingJids = new Set<string>();
+
 /** Tools combinadas (memoria + recordatorios + alarmas). */
 const ALL_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
+
+// ─── Compactación de contexto ──────────────────────────────────
+
+/** Función externa (inyectada) para obtener la memoria de un JID. */
+function getMemoryContent(jid: string): string {
+  try {
+    return memoryManager.getContent(jid);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Verifica si el contexto del usuario necesita compactación y la ejecuta
+ * usando el modelo LLM para generar un resumen estructurado.
+ * Mientras compacta, ignora mensajes entrantes del mismo JID.
+ */
+async function ensureContextCompaction(sock: WASocket, jid: string): Promise<void> {
+  if (!contextManager || !aiConfig) return;
+
+  const modelId = contextManager.getModel(jid);
+  const messages = contextManager.getMessages(jid);
+
+  if (messages.length <= 2) return; // Solo system + 1 msg
+
+  // Estimar tokens actuales (incluyendo tools)
+  const currentTokens = estimateTokensAccurate(messages);
+  const toolsTokens = estimateRequestTokens([], ALL_TOOLS);
+
+  // Obtener presupuesto efectivo del modelo
+  const effectiveBudget = modelCatalog.getEffectiveBudget(modelId, toolsTokens);
+  const triggerTokens = Math.floor(effectiveBudget * 0.85);
+
+  if (currentTokens < triggerTokens) {
+    return; // No necesita compactación
+  }
+
+  // Marcar como "compactando" para ignorar mensajes entrantes
+  compactingJids.add(jid);
+  try {
+    // Notificar al usuario
+    sock.sendMessage(jid, { text: "🧹 Espera un momento, estoy limpiando mi memoria..." }).catch(() => {});
+
+    console.log(
+      `[compact] Contexto de ${jid}: ~${currentTokens} tokens, ` +
+      `presupuesto ${effectiveBudget}, activando compactación...`,
+    );
+
+    // 1. Seleccionar mensajes para compactar
+    const split = selectMessagesForCompaction({
+      messages,
+      preserveRecentTurns: 10,
+      targetTokens: Math.floor(effectiveBudget * 0.55),
+    });
+
+    if (split.messagesToCompact.length === 0) {
+      console.log("[compact] No hay mensajes que compactar");
+      return;
+    }
+
+    // 2. Obtener memoria persistente para el prompt de compactación
+    const persistentMemory = getMemoryContent(jid);
+
+    // 3. Construir prompt para el LLM compactador
+    const previousSummary = contextManager.getCompactionSummary(jid);
+    const compactionMessages = buildCompactionPrompt({
+      previousSummary: previousSummary ?? null,
+      messagesToCompact: split.messagesToCompact,
+      persistentMemory,
+    });
+
+    // 4. Llamar al LLM para que genere el resumen
+    // max_tokens generoso para que el modelo pueda completar el JSON
+    try {
+      const compactRaw = await chatCompletion(
+        compactionMessages,
+        modelId,
+        aiConfig,
+        2,
+        4096,
+      );
+
+      const parsedSummary = parseCompactedResponse(compactRaw);
+
+      if (parsedSummary) {
+        const tokensAfter = estimateTokensAccurate(split.messagesToKeep);
+        contextManager.applyCompaction(
+          jid,
+          split.messagesToKeep,
+          parsedSummary,
+          currentTokens,
+          tokensAfter,
+          split.messagesToCompact.length,
+        );
+
+        console.log(
+          `[compact] Compactación exitosa para ${jid}: ` +
+          `${currentTokens} → ~${tokensAfter} tokens ` +
+          `(${split.messagesToCompact.length} mensajes compactados)`,
+        );
+      } else {
+        console.warn(
+          "[compact] No se pudo parsear el resumen del LLM, " +
+          "conservando contexto original",
+        );
+        // Log del raw response para debugging (truncado a 500 chars)
+        console.warn(
+          "[compact] Raw response (primeros 500 chars):",
+          compactRaw.slice(0, 500),
+        );
+        console.warn(
+          "[compact] Raw response (últimos 200 chars):",
+          compactRaw.slice(-200),
+        );
+      }
+    } catch (err) {
+      console.error("[compact] Error al compactar con LLM:", err);
+      // Si falla la compactación, no borramos mensajes — el contexto original
+      // se conserva intacto
+    }
+  } finally {
+    compactingJids.delete(jid);
+  }
+}
 
 /** Inicializa el módulo AI con la configuración. */
 export function initAi(config: AiConfig): void {
@@ -228,8 +363,10 @@ async function sendWithTyping(
 registerCommand(
   "ayuda",
   "Muestra todos los comandos disponibles",
-  () => {
-    const cmds = getCommands();
+  (_cmd, senderJid) => {
+    const sessionUsername = authManager.getUsername(senderJid);
+    const isAdmin = sessionUsername ? authManager.isAdmin(sessionUsername) : false;
+    const cmds = getCommands(isAdmin);
     const lista = cmds
       .map((c) => `!${c.name} — ${c.description}`)
       .join("\n");
@@ -399,6 +536,7 @@ registerCommand(
       ].join("\n"),
     };
   },
+  true,
 );
 
 registerCommand(
@@ -425,6 +563,7 @@ registerCommand(
     authManager.banUser(target);
     return { text: `🚫 Usuario ${target} ha sido baneado.` };
   },
+  true,
 );
 
 registerCommand(
@@ -448,6 +587,7 @@ registerCommand(
     authManager.unbanUser(target);
     return { text: `✅ Usuario ${target} ha sido desbaneado.` };
   },
+  true,
 );
 
 registerCommand(
@@ -480,6 +620,7 @@ registerCommand(
       text: ["👥 USUARIOS REGISTRADOS", "", ...lines].join("\n"),
     };
   },
+  true,
 );
 
 // ─── Procesamiento de flujo interactivo de auth ─────────────────
@@ -836,6 +977,13 @@ export async function handleMessage(
     return;
   }
 
+  // ── Ignorar mensajes si el JID está en compactación ─────────────
+  if (compactingJids.has(remoteJid)) {
+    // El usuario ya recibió una notificación de "espera", ignoramos
+    // mensajes adicionales hasta que termine la compactación
+    return;
+  }
+
   // ── Chat AI (mensajes sin prefijo) ─────────────────────────────
   if (!aiConfig || !contextManager) {
     await sendWithTyping(
@@ -873,14 +1021,23 @@ async function handleAiChat(
     return;
   }
 
-  const userMessage = { role: "user" as const, content: userText };
-  contextManager.addMessage(remoteJid, userMessage);
+  // Ejecutar todo el procesamiento con lock exclusivo por JID
+  // para evitar que dos mensajes simultáneos corrompan el contexto
+  const cm = contextManager;
+  const cfg = aiConfig;
+  await cm.withLock(remoteJid, async () => {
 
-  const messages = contextManager.getMessages(remoteJid);
+  const userMessage = { role: "user" as const, content: userText };
+  cm.addMessage(remoteJid, userMessage);
+
+  // Verificar si necesita compactación antes de llamar a la API
+  await ensureContextCompaction(sock, remoteJid);
+
+  const messages = cm.getMessages(remoteJid);
 
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
   // usando shallow clone para no contaminar el contexto persistido
-  const dynamicCtx = contextManager.buildDynamicContext(remoteJid);
+  const dynamicCtx = cm.buildDynamicContext(remoteJid);
   const apiMessages = messages.map((m) => ({ ...m }));
   const lastMsg = apiMessages[apiMessages.length - 1];
   if (lastMsg && lastMsg.role === "user") {
@@ -904,8 +1061,8 @@ async function handleAiChat(
       if (["create_reminder", "delete_reminder", "list_reminders"].includes(name)) {
         const result = await executeReminderTool(name, args, reminderManager, remoteJid);
         // Persistir en el contexto para que el modelo lo recuerde
-        if (!result.startsWith("Error:") && contextManager) {
-          contextManager.addMessage(remoteJid, {
+        if (!result.startsWith("Error:")) {
+          cm.addMessage(remoteJid, {
             role: "assistant",
             content: result,
           });
@@ -915,8 +1072,8 @@ async function handleAiChat(
       // Intentar como tool de alarmas recurrentes
       if (["create_alarm", "delete_alarm", "list_alarms", "toggle_alarm"].includes(name)) {
         const result = await executeAlarmTool(name, args, alarmManager, remoteJid);
-        if (!result.startsWith("Error:") && contextManager) {
-          contextManager.addMessage(remoteJid, {
+        if (!result.startsWith("Error:")) {
+          cm.addMessage(remoteJid, {
             role: "assistant",
             content: result,
           });
@@ -943,7 +1100,7 @@ async function handleAiChat(
     const result = await chatCompletionWithTools(
       apiMessages,
       model,
-      aiConfig,
+      cfg!,
       ALL_TOOLS,
       toolExecutor,
       3,
@@ -961,7 +1118,7 @@ async function handleAiChat(
       role: "assistant",
       content: result.content,
     };
-    contextManager.addMessage(remoteJid, assistantMessage);
+    cm.addMessage(remoteJid, assistantMessage);
 
     // Preparar respuesta final
     let finalText = result.content;
@@ -980,6 +1137,57 @@ async function handleAiChat(
     console.error("[ai] Error en chat (agotados reintentos):", err);
     const errorMsg =
       err instanceof Error ? err.message : "Error desconocido";
+
+    // Detectar error de desbordamiento de contexto y compactar de emergencia
+    const isOverflow = /context_length_exceeded|maximum context length|prompt is too long|too many tokens|context.*exceed|request.*too large/i.test(errorMsg);
+    if (isOverflow) {
+      console.warn("[compact] Desbordamiento de contexto detectado, compactación de emergencia...");
+      try {
+        const msgs = cm.getMessages(remoteJid);
+        const emergencySplit = selectMessagesForCompaction({
+          messages: msgs,
+          preserveRecentTurns: 6,
+          targetTokens: 0, // fuerza el máximo de compactación
+        });
+
+        if (emergencySplit.messagesToCompact.length > 0) {
+          // Compactación simple (sin LLM) para emergencia
+          const systemMsg = msgs[0];
+          const kept = emergencySplit.messagesToKeep;
+          if (systemMsg && systemMsg.role === "system") {
+            const summaryText = `[Compactación de emergencia: ${emergencySplit.messagesToCompact.length} mensajes antiguos resumidos automáticamente]`;
+            const emergencyMessages = [
+              systemMsg,
+              { role: "user" as const, content: summaryText },
+              ...kept.slice(1), // sin el system duplicado
+            ];
+            cm.applyCompaction(
+              remoteJid,
+              emergencyMessages,
+              {
+                durableFacts: [],
+                preferences: [],
+                currentTopics: ["Conversación compactada por emergencia"],
+                verifiedToolActions: [],
+                unverifiedClaims: [],
+                pendingTasks: [],
+                decisions: [],
+                importantConstraints: [],
+                recentState: "Conversación interrumpida por desbordamiento de contexto. Se compactó de emergencia.",
+                unresolvedQuestions: [],
+              },
+              estimateTokensAccurate(msgs),
+              estimateTokensAccurate(emergencyMessages),
+              emergencySplit.messagesToCompact.length,
+            );
+            console.log("[compact] Compactación de emergencia aplicada");
+          }
+        }
+      } catch (emergencyErr) {
+        console.error("[compact] Error en compactación de emergencia:", emergencyErr);
+      }
+    }
+
     await sendWithTyping(
       sock,
       remoteJid,
@@ -988,6 +1196,8 @@ async function handleAiChat(
   } finally {
     await sock.sendPresenceUpdate("paused", remoteJid).catch(() => {});
   }
+
+  }); // fin de withLock
 }
 
 // ─── Media ───────────────────────────────────────────────────────

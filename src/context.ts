@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { ChatMessage } from "./ai.ts";
-import { estimateTokens } from "./ai.ts";
 import { getAppDir } from "./utils.ts";
 import type { MemoryManager } from "./memory.ts";
+import type { CompactionMetadata } from "./compaction.ts";
+import { summaryToTextBlock } from "./compaction.ts";
 
 export const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
 
@@ -13,13 +14,9 @@ interface UserContextData {
   model: string;
   messages: ChatMessage[];
   awaitingModelSelection: boolean;
+  /** Metadatos de compactación (undefined si nunca se ha compactado). */
+  compaction?: CompactionMetadata;
 }
-
-/** Límite de tokens antes de compactar. */
-const MAX_TOKENS = 100_000;
-
-/** Fracción de mensajes recientes a conservar (último 25%). */
-const KEEP_RECENT_FRACTION = 0.25;
 
 /** Retorna la hora actual en CDMX formateada legible. */
 export function getMexicoCityTime(): string {
@@ -127,9 +124,33 @@ export class ContextManager {
   private contexts = new Map<string, UserContextData>();
   private defaultModel: string;
   private memoryManager: MemoryManager | null = null;
+  /** Locks por JID para evitar condiciones de carrera. */
+  private locks = new Map<string, Promise<void>>();
 
   constructor(defaultModel: string) {
     this.defaultModel = defaultModel;
+  }
+
+  /**
+   * Ejecuta una operación asíncrona con lock exclusivo por JID.
+   * Garantiza que dos procesos no lean-modifiquen-escriban el mismo
+   * contexto simultáneamente.
+   */
+  async withLock<T>(jid: string, fn: () => Promise<T>): Promise<T> {
+    // Esperar el lock anterior si existe
+    const prev = this.locks.get(jid) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.locks.set(jid, next);
+
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   /** Asigna el MemoryManager para inyectar memoria en los system prompts. */
@@ -157,8 +178,8 @@ export class ContextManager {
   }
 
   /**
-   * Construye el contexto dinámico (hora actual + memoria) para inyectar
-   * en el último user message antes de enviarlo a la API, sin alterar
+   * Construye el contexto dinámico (hora actual + memoria + resumen compactado)
+   * para inyectar en el último user message antes de enviarlo a la API, sin alterar
    * el contexto persistido en disco.
    */
   buildDynamicContext(jid: string): string {
@@ -167,6 +188,11 @@ export class ContextManager {
     const parts: string[] = [timeStr];
     if (memory && memory.trim()) {
       parts.push("", "=== LO QUE RECUERDO ===", memory.trim(), "=== FIN DE MI MEMORIA ===");
+    }
+    // Incluir resumen compactado si existe
+    const summary = this.getCompactionSummaryText(jid);
+    if (summary) {
+      parts.push("", summary);
     }
     return parts.join("\n");
   }
@@ -216,7 +242,7 @@ export class ContextManager {
     return fresh;
   }
 
-  /** Guarda el contexto a disco. */
+  /** Guarda el contexto a disco (escritura directa). */
   saveContext(jid: string): void {
     const ctx = this.contexts.get(jid);
     if (!ctx) {
@@ -230,17 +256,32 @@ export class ContextManager {
     }
   }
 
-  /** Añade un mensaje al contexto y guarda. Compacta si es necesario. */
+  /** Guarda el contexto con escritura atómica (temp file + rename). */
+  saveContextAtomically(jid: string): void {
+    const ctx = this.contexts.get(jid);
+    if (!ctx) {
+      return;
+    }
+    ensureUserDir(jid);
+    const finalPath = contextFilePath(jid);
+    const tempPath = `${finalPath}.tmp`;
+    try {
+      writeFileSync(tempPath, JSON.stringify(ctx, null, 2), "utf-8");
+      renameSync(tempPath, finalPath);
+    } catch (err) {
+      console.error(`[ctx] Error al guardar contexto atómicamente de ${jid}:`, err);
+    }
+  }
+
+  /**
+   * Añade un mensaje al contexto y guarda.
+   * NOTA: La compactación se maneja externamente desde bot.ts.
+   * addMessage solo persiste el mensaje.
+   */
   addMessage(jid: string, message: ChatMessage): void {
     const ctx = this.loadContext(jid);
     ctx.messages.push(message);
-
-    const tokens = estimateTokens(ctx.messages);
-    if (tokens > MAX_TOKENS) {
-      this.compactContext(jid);
-    }
-
-    this.saveContext(jid);
+    this.saveContextAtomically(jid);
   }
 
   /** Obtiene los mensajes del contexto. */
@@ -282,59 +323,58 @@ export class ContextManager {
   /**
    * Reinicia la conversación: borra mensajes pero conserva
    * el system prompt estático (la memoria se inyecta dinámicamente).
+   * También resetea la compactación.
    */
   clearConversation(jid: string): void {
     const ctx = this.loadContext(jid);
     ctx.messages = [this.makeSystemPrompt()];
+    ctx.compaction = undefined;
     this.saveContext(jid);
     console.log(`[ctx] Conversación reiniciada para ${jid}`);
   }
 
-  /** Compacta el contexto: resume mensajes antiguos y conserva los recientes. */
-  private compactContext(jid: string): void {
+  /**
+   * Almacena el resultado de una compactación en el contexto del usuario.
+   * Reemplaza los mensajes antiguos por el system prompt + los mensajes recientes.
+   */
+  applyCompaction(
+    jid: string,
+    messagesToKeep: ChatMessage[],
+    summary: import("./compaction.ts").CompactedSummary,
+    tokensBefore: number,
+    tokensAfter: number,
+    compactedCount: number,
+  ): void {
     const ctx = this.loadContext(jid);
-    const messages = ctx.messages;
 
-    if (messages.length <= 2) {
-      return;
+    const prev = ctx.compaction;
+    ctx.messages = messagesToKeep;
+    ctx.compaction = {
+      version: 1,
+      count: (prev?.count ?? 0) + 1,
+      summary,
+      lastCompactedAt: new Date().toISOString(),
+      messagesCompacted: (prev?.messagesCompacted ?? 0) + compactedCount,
+      estimatedTokensBefore: tokensBefore,
+      estimatedTokensAfter: tokensAfter,
+    };
+
+    this.saveContextAtomically(jid);
+  }
+
+  /** Retorna el resumen compactado del usuario, o null si nunca se compactó. */
+  getCompactionSummary(jid: string): import("./compaction.ts").CompactedSummary | null {
+    return this.loadContext(jid).compaction?.summary ?? null;
+  }
+
+  /** Retorna el resumen compactado como texto legible, o string vacío. */
+  getCompactionSummaryText(jid: string): string {
+    try {
+      const summary = this.getCompactionSummary(jid);
+      if (!summary) return "";
+      return summaryToTextBlock(summary);
+    } catch {
+      return "";
     }
-
-    const systemMsg = messages[0];
-    if (!systemMsg || systemMsg.role !== "system") {
-      return;
-    }
-
-    const nonSystem = messages.slice(1);
-    const keepCount = Math.max(2, Math.ceil(nonSystem.length * KEEP_RECENT_FRACTION));
-    const toCompact = nonSystem.slice(0, nonSystem.length - keepCount);
-    const recent = nonSystem.slice(nonSystem.length - keepCount);
-
-    if (toCompact.length === 0) {
-      return;
-    }
-
-    const summaryLines: string[] = [];
-    for (const msg of toCompact) {
-      const role = msg.role === "user" ? "Usuario" : "Asistente";
-      const preview = msg.content.slice(0, 200).replace(/\n/g, " ");
-      summaryLines.push(`${role}: ${preview}${msg.content.length > 200 ? "..." : ""}`);
-    }
-
-    const compactSummary =
-      `[Resumen de la conversación anterior]\n${summaryLines.join("\n")}\n` +
-      `[Fin del resumen. Continúa la conversación reciente:]`;
-
-    ctx.messages = [
-      systemMsg,
-      { role: "user" as const, content: compactSummary },
-      ...recent,
-    ];
-
-    const newTokens = estimateTokens(ctx.messages);
-    console.log(
-      `[ctx] Contexto compactado para ${jid}: ` +
-      `${messages.length} → ${ctx.messages.length} mensajes, ` +
-      `~${newTokens} tokens`,
-    );
   }
 }
