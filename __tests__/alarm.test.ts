@@ -37,6 +37,8 @@ describe("AlarmManager — creación", () => {
     const alarm = am.createAlarm(TEST_JID, "poner crema a Thowi", 9, 30, [1, 2, 3, 4, 5]);
 
     expect(alarm.text).toBe("poner crema a Thowi");
+    expect(alarm.deliveryMessage).toContain("poner crema a Thowi");
+    expect(alarm.deliveryMessage).toContain("⏰");
     expect(alarm.hour).toBe(9);
     expect(alarm.minute).toBe(30);
     expect(alarm.jid).toBe(TEST_JID);
@@ -45,6 +47,25 @@ describe("AlarmManager — creación", () => {
     expect(alarm.lastFiredDate).toBe("");
     expect(alarm.id).toBeDefined();
     expect(alarm.createdAt).toBeDefined();
+  });
+
+  it("persiste el mensaje preparado y lo conserva después de reiniciar", () => {
+    const dir = join(tmpdir(), `codewolf-alarm-copy-${Date.now()}`);
+    TEST_DIRS.push(dir);
+    const first = new AlarmManager(dir);
+    first.createAlarm(
+      TEST_JID,
+      "tomar agua",
+      9,
+      0,
+      [1, 2, 3, 4, 5],
+      "¡Vamos! 💧 Es hora de tomar agua.",
+    );
+
+    const reloaded = new AlarmManager(dir);
+    expect(reloaded.getUserAlarms(TEST_JID)[0]?.deliveryMessage).toBe(
+      "¡Vamos! 💧 Es hora de tomar agua.",
+    );
   });
 
   it("createAlarm asigna id único a cada alarma", () => {
@@ -279,6 +300,7 @@ describe("ALARM_TOOLS — definiciones", () => {
     const tool = ALARM_TOOLS.find((t) => t.function.name === "create_alarm")!;
     const required = (tool.function.parameters as any)?.required;
     expect(required).toContain("text");
+    expect(required).toContain("delivery_message");
     expect(required).toContain("hour");
     expect(required).toContain("minute");
     expect(required).toContain("daysOfWeek");
@@ -302,7 +324,13 @@ describe("executeAlarmTool", () => {
     const am = createIsolatedAlarmManager();
     const result = await executeAlarmTool(
       "create_alarm",
-      { text: "poner gotas a Thowi", hour: 8, minute: 0, daysOfWeek: [1, 2, 3, 4, 5] },
+      {
+        text: "poner gotas a Thowi",
+        delivery_message: "¡Oye! 😊 Ya toca ponerle las gotas a Thowi.",
+        hour: 8,
+        minute: 0,
+        daysOfWeek: [1, 2, 3, 4, 5],
+      },
       am,
       TEST_JID,
     );
@@ -315,6 +343,9 @@ describe("executeAlarmTool", () => {
 
     const alarms = am.getUserAlarms(TEST_JID);
     expect(alarms).toHaveLength(1);
+    expect(alarms[0]?.deliveryMessage).toBe(
+      "¡Oye! 😊 Ya toca ponerle las gotas a Thowi.",
+    );
   });
 
   it("create_alarm con text vacío retorna error", async () => {

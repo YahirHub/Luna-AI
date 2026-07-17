@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import { ReminderManager, REMINDER_TOOLS, executeReminderTool, determineReminderDate } from "../src/reminder.ts";
 
@@ -37,6 +37,8 @@ describe("ReminderManager — creación", () => {
     const reminder = rm.createReminder(TEST_JID, "ir por mi hermana", 8, 44);
 
     expect(reminder.text).toBe("ir por mi hermana");
+    expect(reminder.deliveryMessage).toContain("ir por mi hermana");
+    expect(reminder.deliveryMessage).toContain("😊");
     expect(reminder.hour).toBe(8);
     expect(reminder.minute).toBe(44);
     expect(reminder.jid).toBe(TEST_JID);
@@ -44,6 +46,54 @@ describe("ReminderManager — creación", () => {
     expect(reminder.id).toBeDefined();
     expect(reminder.id.length).toBeGreaterThan(0);
     expect(reminder.createdAt).toBeDefined();
+  });
+
+  it("persiste el mensaje preparado y lo conserva después de reiniciar", () => {
+    const dir = join(tmpdir(), `codewolf-reminder-copy-${Date.now()}`);
+    const path = join(dir, "reminders.json");
+    TEST_DIRS.push(dir);
+
+    const first = new ReminderManager(path);
+    first.createReminder(
+      TEST_JID,
+      "tomar medicamentos",
+      10,
+      37,
+      "2026-07-17",
+      "¡Hey! 😊 Ya es hora de tomar tus medicamentos 💊",
+    );
+
+    const reloaded = new ReminderManager(path);
+    expect(reloaded.getAll()[0]?.deliveryMessage).toBe(
+      "¡Hey! 😊 Ya es hora de tomar tus medicamentos 💊",
+    );
+  });
+
+  it("migra recordatorios antiguos sin deliveryMessage", () => {
+    const dir = join(tmpdir(), `codewolf-reminder-migration-${Date.now()}`);
+    const path = join(dir, "reminders.json");
+    TEST_DIRS.push(dir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        reminders: [{
+          id: "legacy",
+          jid: TEST_JID,
+          text: "comprar leche",
+          hour: 12,
+          minute: 0,
+          date: "2026-07-17",
+          createdAt: "2026-07-17T00:00:00.000Z",
+          fired: false,
+        }],
+      }),
+    );
+
+    const migrated = new ReminderManager(path).getAll()[0];
+    expect(migrated?.deliveryMessage).toContain("comprar leche");
+    const persisted = JSON.parse(readFileSync(path, "utf8"));
+    expect(persisted.reminders[0].deliveryMessage).toContain("comprar leche");
   });
 
   it("createReminder asigna id unico a cada recordatorio", () => {
@@ -154,6 +204,7 @@ describe("REMINDER_TOOLS — definiciones", () => {
     const tool = REMINDER_TOOLS.find((t) => t.function.name === "create_reminder")!;
     const required = (tool.function.parameters as any)?.required;
     expect(required).toContain("text");
+    expect(required).toContain("delivery_message");
     expect(required).toContain("hour");
     expect(required).toContain("minute");
   });
@@ -258,7 +309,12 @@ describe("executeReminderTool", () => {
     const rm = createIsolatedReminder();
     const result = await executeReminderTool(
       "create_reminder",
-      { text: "comprar leche", hour: 18, minute: 30 },
+      {
+        text: "comprar leche",
+        delivery_message: "¡Oye! 😊 No olvides comprar la leche.",
+        hour: 18,
+        minute: 30,
+      },
       rm,
       TEST_JID,
     );
@@ -270,6 +326,7 @@ describe("executeReminderTool", () => {
     const all = rm.getAll();
     expect(all).toHaveLength(1);
     expect(all[0]?.text).toBe("comprar leche");
+    expect(all[0]?.deliveryMessage).toBe("¡Oye! 😊 No olvides comprar la leche.");
   });
 
   it("create_reminder con text vacio retorna error", async () => {

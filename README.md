@@ -12,8 +12,8 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Reconexión automática y sesión persistente.
 - Conversación con contexto por usuario y compactación automática.
 - Memoria duradera separada del historial conversacional.
-- Recordatorios de una sola vez y alarmas recurrentes.
-- Las alarmas entregadas se agregan al contexto persistente con fecha, texto configurado y respuesta enviada.
+- Recordatorios de una sola vez y alarmas recurrentes con mensaje de entrega persistido desde su creación.
+- Los recordatorios y alarmas entregados se agregan al contexto persistente con fecha, texto configurado y respuesta enviada.
 - OpenCode Free integrado como proveedor LLM predeterminado.
 - Proveedor LLM personalizado opcional mediante `/setup-provider`.
 - Búsqueda web con Tavily, Brave Search, Exa, Linkup, Firecrawl, SerpApi y Zenserp.
@@ -282,14 +282,18 @@ persistent/agent-config.json
 
 La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda solicita hasta 15 y permite un flujo de investigación más amplio.
 
-## Alarmas y contexto persistente
+## Recordatorios, alarmas y contexto persistente
 
-Cuando una alarma recurrente se entrega correctamente por WhatsApp, Luna agrega dos mensajes al contexto del usuario en una sola escritura:
+Al crear un recordatorio o una alarma, Luna guarda un `deliveryMessage` autocontenido con su personalidad. El modelo que ejecuta `create_reminder` o `create_alarm` puede prepararlo en ese momento; si no lo hace, Luna genera localmente un mensaje seguro. Este texto queda en `reminders.json` o `alarms.json` y no depende de que el proveedor LLM continúe disponible cuando llegue la hora.
 
-1. Un evento automático con el texto de la alarma, el día programado y la fecha/hora real de entrega en `America/Mexico_City`.
-2. El texto exacto que Luna envió al usuario.
+Al dispararse una notificación:
 
-Esto permite que preguntas posteriores como “¿qué alarma me enviaste hoy?” tengan contexto conversacional. Si WhatsApp confirma la entrega pero falla la escritura en disco, la alarma no se reenvía únicamente por ese fallo; el error se registra para diagnóstico.
+1. Si existe modelo y proveedor, Luna recibe el mensaje persistido y puede usarlo tal cual o reformularlo sin cambiar la acción ni los datos importantes.
+2. Si el proveedor falla, no existe modelo o la respuesta está vacía o solo repite el título, se envía el mensaje persistido.
+3. WhatsApp nunca recibe únicamente `⏰ RECORDATORIO` o un cuerpo vacío.
+4. Después de una entrega confirmada se agregan al contexto el evento automático y el texto exacto enviado.
+
+Esto permite preguntas posteriores como “¿qué recordatorio me enviaste hoy?” o “¿qué alarma sonó?” con contexto conversacional. Los registros antiguos que no tengan `deliveryMessage` se migran automáticamente al arrancar.
 
 ## Ejecución
 
@@ -428,7 +432,7 @@ src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
 ├── agent-config.ts          # Configuración persistente y flujo /config
 ├── research-agent.ts        # Subagente aislado, progreso y tools internas
-├── scheduled-context.ts     # Registro de alarmas entregadas en el contexto
+├── scheduled-context.ts     # Registro de recordatorios y alarmas entregados
 ├── media.ts                 # Validación y descarga en memoria de audio/imágenes
 ├── whisper-config.ts        # Catálogo, persistencia y descarga segura de modelos
 ├── whisper-setup.ts         # Flujo administrativo !setup-whisper
@@ -451,7 +455,8 @@ src/
 ├── auth.ts                  # Usuarios, sesiones y permisos
 ├── bot.ts                   # Orquestación, comandos y ejecución de tools
 ├── context.ts               # Contexto persistente y compactación
-├── scheduled-messages.ts    # Entrega de recordatorios y alarmas
+├── scheduled-copy.ts        # Mensajes persistidos y fallback local de Luna
+├── scheduled-messages.ts    # Entrega robusta de recordatorios y alarmas
 ├── storage.ts               # Persistencia atómica
 ├── memory.ts                # Memoria persistente
 ├── reminder.ts              # Recordatorios

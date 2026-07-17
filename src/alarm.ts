@@ -4,6 +4,10 @@ import { CONTEXTS_DIR } from "./context.ts";
 import { getMexicoCityNow } from "./utils.ts";
 import type { ToolDefinition } from "./ai.ts";
 import {
+  buildAlarmDeliveryMessage,
+  normalizePreparedScheduledMessage,
+} from "./scheduled-copy.ts";
+import {
   readJsonFile,
   sanitizePathSegment,
   writeJsonFileAtomically,
@@ -15,6 +19,8 @@ export interface RecurringAlarm {
   id: string;
   jid: string;
   text: string;
+  /** Cuerpo autocontenido preparado al crear la alarma. */
+  deliveryMessage: string;
   hour: number;
   minute: number;
   /** Días de la semana: 0=domingo, 1=lunes, ..., 6=sábado */
@@ -75,7 +81,24 @@ export class AlarmManager {
     try {
       const data = readJsonFile<AlarmsFile>(path);
       if (Array.isArray(data?.alarms)) {
-        this.alarms.push(...data.alarms);
+        let migrated = false;
+        const alarms = data.alarms.map((alarm) => {
+          const fallback = buildAlarmDeliveryMessage(String(alarm.text ?? ""));
+          const deliveryMessage = normalizePreparedScheduledMessage(
+            alarm.deliveryMessage,
+            fallback,
+          );
+          if (alarm.deliveryMessage !== deliveryMessage) migrated = true;
+          return { ...alarm, deliveryMessage };
+        });
+        this.alarms.push(...alarms);
+        if (migrated) {
+          try {
+            writeJsonFileAtomically(path, { alarms });
+          } catch (error) {
+            console.warn(`[alarm] No se pudo persistir la migración de ${path}:`, error);
+          }
+        }
       }
     } catch (err) {
       console.warn(`[alarm] Error al leer ${path}:`, err);
@@ -113,11 +136,16 @@ export class AlarmManager {
     hour: number,
     minute: number,
     daysOfWeek: number[],
+    deliveryMessage?: string,
   ): RecurringAlarm {
     const alarm: RecurringAlarm = {
       id: crypto.randomUUID(),
       jid,
       text,
+      deliveryMessage: normalizePreparedScheduledMessage(
+        deliveryMessage,
+        buildAlarmDeliveryMessage(text),
+      ),
       hour,
       minute,
       daysOfWeek: [...new Set(daysOfWeek)].sort((a, b) => a - b),
@@ -293,7 +321,15 @@ export const ALARM_TOOLS: ToolDefinition[] = [
         properties: {
           text: {
             type: "string",
-            description: "Texto de la alarma: qué hay que recordar",
+            description: "Texto exacto de la alarma: qué hay que recordar",
+          },
+          delivery_message: {
+            type: "string",
+            description:
+              "Mensaje final y autocontenido que Luna enviará cada vez que suene. " +
+              "Escríbelo desde ahora con la personalidad cálida de Luna, conserva exactamente " +
+              "la acción, nombres, cantidades y datos importantes, y evita referencias que " +
+              "dependan de la conversación anterior.",
           },
           hour: {
             type: "number",
@@ -313,7 +349,7 @@ export const ALARM_TOOLS: ToolDefinition[] = [
               "[1,3,5] = lunes, miércoles y viernes.",
           },
         },
-        required: ["text", "hour", "minute", "daysOfWeek"],
+        required: ["text", "delivery_message", "hour", "minute", "daysOfWeek"],
       },
     },
   },
@@ -431,6 +467,10 @@ export async function executeAlarmTool(
       const text = String(args.text ?? "").trim();
       const hour = Number(args.hour);
       const minute = Number(args.minute);
+      const deliveryMessage = normalizePreparedScheduledMessage(
+        args.delivery_message,
+        buildAlarmDeliveryMessage(text),
+      );
       const daysOfWeek = Array.isArray(args.daysOfWeek)
         ? [
             ...new Set(
@@ -461,14 +501,22 @@ export async function executeAlarmTool(
         return "Error: daysOfWeek debe contener al menos un día (0-6).";
       }
 
-      const alarm = alarmManager.createAlarm(jid, text, hour, minute, daysOfWeek);
+      const alarm = alarmManager.createAlarm(
+        jid,
+        text,
+        hour,
+        minute,
+        daysOfWeek,
+        deliveryMessage,
+      );
       const timeStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
       const dayNames = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
       const daysStr = alarm.daysOfWeek.map((d) => dayNames[d]).join(", ");
 
       return (
         `✅ Alarma recurrente creada (ID: ${alarm.id.slice(0, 8)}). ` +
-        `Te avisaré "${text}" a las ${timeStr} los días: ${daysStr}.`
+        `Te avisaré "${text}" a las ${timeStr} los días: ${daysStr}. ` +
+        `Mensaje de entrega guardado: "${alarm.deliveryMessage}"`
       );
     }
 

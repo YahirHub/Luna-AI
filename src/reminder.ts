@@ -2,6 +2,10 @@ import { join } from "node:path";
 import { getAppDir, getMexicoCityNow, isValidYmdDate } from "./utils.ts";
 import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
 import type { WASocket } from "@whiskeysockets/baileys";
+import {
+  buildReminderDeliveryMessage,
+  normalizePreparedScheduledMessage,
+} from "./scheduled-copy.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -9,6 +13,8 @@ export interface Reminder {
   id: string;
   jid: string;
   text: string;
+  /** Cuerpo autocontenido preparado al crear el recordatorio. */
+  deliveryMessage: string;
   hour: number;
   minute: number;
   /** Fecha en formato YYYY-MM-DD. Si es "any", se registró sin fecha fija. */
@@ -43,7 +49,24 @@ export class ReminderManager {
   private load(): void {
     try {
       const data = readJsonFile<RemindersFile>(this.filePath);
-      this.reminders = Array.isArray(data?.reminders) ? data.reminders : [];
+      const stored = Array.isArray(data?.reminders) ? data.reminders : [];
+      let migrated = false;
+      this.reminders = stored.map((reminder) => {
+        const fallback = buildReminderDeliveryMessage(String(reminder.text ?? ""));
+        const deliveryMessage = normalizePreparedScheduledMessage(
+          reminder.deliveryMessage,
+          fallback,
+        );
+        if (reminder.deliveryMessage !== deliveryMessage) migrated = true;
+        return { ...reminder, deliveryMessage };
+      });
+      if (migrated) {
+        try {
+          this.save();
+        } catch (error) {
+          console.warn("[reminder] No se pudo persistir la migración de mensajes:", error);
+        }
+      }
     } catch (err) {
       console.warn("[reminder] Error al cargar recordatorios:", err);
       this.reminders = [];
@@ -92,6 +115,7 @@ export class ReminderManager {
     hour: number,
     minute: number,
     date?: string,
+    deliveryMessage?: string,
   ): Reminder {
     const now = getMexicoCityNow();
     let targetDate = date;
@@ -104,6 +128,10 @@ export class ReminderManager {
       id: crypto.randomUUID(),
       jid,
       text,
+      deliveryMessage: normalizePreparedScheduledMessage(
+        deliveryMessage,
+        buildReminderDeliveryMessage(text),
+      ),
       hour,
       minute,
       date: targetDate,
@@ -289,7 +317,15 @@ export const REMINDER_TOOLS: import("./ai.ts").ToolDefinition[] = [
           text: {
             type: "string",
             description:
-              "Texto del recordatorio: que es lo que hay que recordar",
+              "Texto exacto del recordatorio: qué hay que recordar",
+          },
+          delivery_message: {
+            type: "string",
+            description:
+              "Mensaje final y autocontenido que Luna enviará cuando llegue la hora. " +
+              "Escríbelo desde ahora con la personalidad cálida de Luna, conserva exactamente " +
+              "la acción, nombres, cantidades y datos importantes, y no uses referencias como " +
+              "'eso que me dijiste' porque puede enviarse sin acceso al modelo.",
           },
           hour: {
             type: "number",
@@ -307,7 +343,7 @@ export const REMINDER_TOOLS: import("./ai.ts").ToolDefinition[] = [
               "o manana si ya paso.",
           },
         },
-        required: ["text", "hour", "minute"],
+        required: ["text", "delivery_message", "hour", "minute"],
       },
     },
   },
@@ -416,6 +452,10 @@ export async function executeReminderTool(
       const hour = Number(args.hour);
       const minute = Number(args.minute);
       const date = typeof args.date === "string" ? args.date : undefined;
+      const deliveryMessage = normalizePreparedScheduledMessage(
+        args.delivery_message,
+        buildReminderDeliveryMessage(text),
+      );
 
       if (!text) {
         return "Error: el texto del recordatorio es obligatorio.";
@@ -433,11 +473,19 @@ export async function executeReminderTool(
         return "Error: la fecha debe ser una fecha real en formato YYYY-MM-DD.";
       }
 
-      const reminder = reminderManager.createReminder(jid, text, hour, minute, date);
+      const reminder = reminderManager.createReminder(
+        jid,
+        text,
+        hour,
+        minute,
+        date,
+        deliveryMessage,
+      );
       const timeStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
       return (
         `✅ Recordatorio creado exitosamente (ID: ${reminder.id.slice(0, 8)}). ` +
-        `Te recordare "${text}" a las ${timeStr} del ${reminder.date}.`
+        `Te recordare "${text}" a las ${timeStr} del ${reminder.date}. ` +
+        `Mensaje de entrega guardado: "${reminder.deliveryMessage}"`
       );
     }
 

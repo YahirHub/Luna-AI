@@ -66,7 +66,10 @@ import {
 import { estimateTokensAccurate } from "./ai.ts";
 import { sendWithTyping, startContinuousTyping } from "./messaging.ts";
 import { deliverScheduledMessage } from "./scheduled-messages.ts";
-import { recordAlarmDeliveryInContext } from "./scheduled-context.ts";
+import {
+  recordAlarmDeliveryInContext,
+  recordReminderDeliveryInContext,
+} from "./scheduled-context.ts";
 import {
   AgentConfigFlowManager,
   loadAgentConfig,
@@ -375,8 +378,8 @@ export function setSocket(sock: WASocket | null): void {
 async function onAlarmDue(
   alarm: import("./alarm.ts").RecurringAlarm,
 ): Promise<void> {
-  if (!currentSock || !llmConfig || !contextManager) {
-    throw new Error("Socket o configuración no disponible para entregar la alarma.");
+  if (!currentSock) {
+    throw new Error("Socket no disponible para entregar la alarma.");
   }
 
   const dayName = new Intl.DateTimeFormat("es-MX", {
@@ -387,32 +390,37 @@ async function onAlarmDue(
   const deliveredText = await deliverScheduledMessage({
     sock: currentSock,
     jid: alarm.jid,
-    model: contextManager.getModel(alarm.jid),
-    llmConfig,
-    dynamicContext: contextManager.buildDynamicContext(alarm.jid),
-    prompt: `⏰ ALARMA RECURRENTE:
-${alarm.text}`,
-    fallbackText: alarm.text,
+    model: contextManager?.getModel(alarm.jid),
+    llmConfig: llmConfig ?? undefined,
+    dynamicContext: contextManager?.buildDynamicContext(alarm.jid),
+    prompt: [
+      "Debes entregar ahora esta alarma recurrente.",
+      `Contenido obligatorio: ${alarm.text}`,
+      `Día actual: ${dayName}`,
+    ].join("\n"),
+    fallbackText: alarm.deliveryMessage,
     title: `⏰ ALARMA RECURRENTE (${dayName})`,
     logLabel: "alarm",
   });
 
   // La entrega real se incorpora al historial persistente. Un fallo de disco
   // no debe provocar que WhatsApp reciba la misma alarma nuevamente.
-  try {
-    await contextManager.withLock(alarm.jid, async () => {
-      if (contextManager) {
-        recordAlarmDeliveryInContext(
-          contextManager,
-          alarm.jid,
-          alarm.text,
-          dayName,
-          deliveredText,
-        );
-      }
-    });
-  } catch (error) {
-    console.error(`[alarm] La alarma se entregó, pero no pudo agregarse al contexto de ${alarm.jid}:`, error);
+  if (contextManager) {
+    try {
+      await contextManager.withLock(alarm.jid, async () => {
+        if (contextManager) {
+          recordAlarmDeliveryInContext(
+            contextManager,
+            alarm.jid,
+            alarm.text,
+            dayName,
+            deliveredText,
+          );
+        }
+      });
+    } catch (error) {
+      console.error(`[alarm] La alarma se entregó, pero no pudo agregarse al contexto de ${alarm.jid}:`, error);
+    }
   }
 
   console.log(`[alarm] Alarma disparada para ${alarm.jid}`);
@@ -423,21 +431,49 @@ async function onReminderDue(
   reminder: import("./reminder.ts").Reminder,
   sock: WASocket | null,
 ): Promise<void> {
-  if (!sock || !llmConfig || !contextManager) {
-    throw new Error("Socket o configuración no disponible para entregar el recordatorio.");
+  if (!sock) {
+    throw new Error("Socket no disponible para entregar el recordatorio.");
   }
 
-  await deliverScheduledMessage({
+  const deliveredText = await deliverScheduledMessage({
     sock,
     jid: reminder.jid,
-    model: contextManager.getModel(reminder.jid),
-    llmConfig,
-    dynamicContext: contextManager.buildDynamicContext(reminder.jid),
-    prompt: `Es hora de recordar: ${reminder.text}`,
-    fallbackText: reminder.text,
+    model: contextManager?.getModel(reminder.jid),
+    llmConfig: llmConfig ?? undefined,
+    dynamicContext: contextManager?.buildDynamicContext(reminder.jid),
+    prompt: [
+      "Debes entregar ahora este recordatorio de una sola vez.",
+      `Contenido obligatorio: ${reminder.text}`,
+      `Fecha programada: ${reminder.date}`,
+      `Hora programada: ${String(reminder.hour).padStart(2, "0")}:${String(reminder.minute).padStart(2, "0")}`,
+    ].join("\n"),
+    fallbackText: reminder.deliveryMessage,
     title: "⏰ RECORDATORIO",
     logLabel: "reminder",
   });
+
+  if (contextManager) {
+    try {
+      const scheduledTime = `${String(reminder.hour).padStart(2, "0")}:${String(reminder.minute).padStart(2, "0")}`;
+      await contextManager.withLock(reminder.jid, async () => {
+        if (contextManager) {
+          recordReminderDeliveryInContext(
+            contextManager,
+            reminder.jid,
+            reminder.text,
+            reminder.date,
+            scheduledTime,
+            deliveredText,
+          );
+        }
+      });
+    } catch (error) {
+      console.error(
+        `[reminder] El recordatorio se entregó, pero no pudo agregarse al contexto de ${reminder.jid}:`,
+        error,
+      );
+    }
+  }
 
   console.log(`[reminder] Recordatorio disparado para ${reminder.jid}`);
 }
