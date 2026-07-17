@@ -11,4 +11,11 @@ describe("mensajes multimedia visibles", () => {
     expect(source).not.toContain("TRANSCRIPCIÓN LOCAL");
     expect(source).not.toContain("TEXTO EXTRAÍDO");
   });
+
+  it("obliga a confirmar transcripciones ambiguas antes de ejecutar acciones", async () => {
+    const contextSource = await Bun.file(new URL("../src/context.ts", import.meta.url)).text();
+    expect(contextSource).toContain("TRANSCRIPCIONES AUTOMÁTICAS");
+    expect(contextSource).toContain("confirma primero cuando la transcripción");
+    expect(contextSource).toContain("Solo ejecuta una acción directamente cuando la transcripción sea clara");
+  });
 });

@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { MediaWorkerRequest, MediaWorkerResponse } from "./protocol.ts";
+import { loadWhisperConfig } from "../whisper-config.ts";
 
 export type MediaProcessingResult = { text: string; durationSeconds?: number };
 
@@ -11,7 +12,6 @@ type PendingJob = {
 
 type MediaSubprocess = ReturnType<typeof Bun.spawn>;
 
-const JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_PENDING_JOBS = 3;
 
 function mediaChildCommand(): string[] {
@@ -106,11 +106,14 @@ export class MediaProcessorClient {
     };
 
     return new Promise((resolve, reject) => {
+      const timeoutSeconds = type === "transcribe-audio"
+        ? loadWhisperConfig().timeoutSeconds + 30
+        : 15 * 60;
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("El procesamiento multimedia excedió 15 minutos y fue cancelado."));
+        reject(new Error(`El procesamiento multimedia excedió ${timeoutSeconds} segundos y fue cancelado.`));
         this.restartChild();
-      }, JOB_TIMEOUT_MS);
+      }, timeoutSeconds * 1000);
 
       this.pending.set(id, { resolve, reject, timeout });
 

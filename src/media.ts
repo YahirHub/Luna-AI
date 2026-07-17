@@ -76,7 +76,10 @@ export async function downloadImageForOcr(message: WAMessage): Promise<Downloade
   return downloadValidatedMedia(message, mimeType, image.fileLength, MAX_IMAGE_SIZE_BYTES);
 }
 
-export async function downloadAudioForTranscription(message: WAMessage): Promise<DownloadedMedia> {
+export async function downloadAudioForTranscription(
+  message: WAMessage,
+  maxDurationSeconds = MAX_AUDIO_DURATION_SECONDS,
+): Promise<DownloadedMedia> {
   const audio = message.message?.audioMessage;
   if (!audio) throw new Error("El mensaje no contiene audio.");
   const mimeType = (audio.mimetype ?? "audio/ogg; codecs=opus").toLowerCase();
@@ -84,8 +87,8 @@ export async function downloadAudioForTranscription(message: WAMessage): Promise
     throw new Error("La transcripción local solo admite notas de voz OGG/Opus.");
   }
   const duration = numericMessageValue(audio.seconds);
-  if (duration !== null && duration > MAX_AUDIO_DURATION_SECONDS) {
-    throw new Error(`El audio supera el límite de ${MAX_AUDIO_DURATION_SECONDS} segundos.`);
+  if (duration !== null && duration > maxDurationSeconds) {
+    throw new Error(`El audio supera el límite de ${maxDurationSeconds} segundos.`);
   }
   return downloadValidatedMedia(message, mimeType, audio.fileLength, MAX_AUDIO_SIZE_BYTES);
 }

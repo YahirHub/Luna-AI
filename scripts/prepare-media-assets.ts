@@ -6,7 +6,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -15,6 +14,10 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  ensureLinuxSharedLibraryAliases,
+  walkRuntimeFiles,
+} from "./whisper-linux-libs.ts";
 
 const ROOT = process.cwd();
 const RUNTIME_DIR = join(ROOT, "assets", "runtime");
@@ -344,21 +347,6 @@ function updateManifestModel(manifest: WhisperRuntimeManifest): WhisperRuntimeMa
   return updated;
 }
 
-function walkFiles(root: string): string[] {
-  const result: string[] = [];
-  const pending = [root];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!current) continue;
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      const path = join(current, entry.name);
-      if (entry.isDirectory()) pending.push(path);
-      else if (entry.isFile()) result.push(path);
-    }
-  }
-  return result;
-}
-
 function quotePowerShellLiteral(path: string): string {
   return `'${path.replaceAll("'", "''")}'`;
 }
@@ -407,6 +395,55 @@ function libraryDirectories(files: string[]): string[] {
   )].sort();
 }
 
+function repairWhisperRuntime(manifest: WhisperRuntimeManifest): WhisperRuntimeManifest {
+  const aliases = ensureLinuxSharedLibraryAliases(WHISPER_BIN_DIR);
+  for (const alias of aliases) {
+    console.log(`[media-assets] Alias Linux restaurado: ${relative(WHISPER_DIR, alias)}`);
+  }
+
+  const files = walkRuntimeFiles(WHISPER_BIN_DIR);
+  const libraryDirs = libraryDirectories(files);
+  const updated = {
+    ...manifest,
+    model: expectedModelRelativePath(),
+    libraryDirs,
+    preparedAt: aliases.length > 0 || manifest.model !== expectedModelRelativePath()
+      ? new Date().toISOString()
+      : manifest.preparedAt,
+  };
+
+  if (JSON.stringify(updated) !== JSON.stringify(manifest)) {
+    writeFileSync(WHISPER_MANIFEST_PATH, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+  }
+  return updated;
+}
+
+async function validateWhisperRuntime(manifest: WhisperRuntimeManifest): Promise<void> {
+  if (process.platform !== "linux") return;
+
+  const executable = join(WHISPER_DIR, manifest.executable);
+  const libraryDirs = manifest.libraryDirs.map((path) => join(WHISPER_DIR, path));
+  const libraryPath = libraryDirs.join(":");
+  const child = Bun.spawn([executable, "--help"], {
+    cwd: dirname(executable),
+    env: {
+      ...process.env,
+      PATH: [libraryPath, process.env.PATH ?? ""].filter(Boolean).join(":"),
+      LD_LIBRARY_PATH: [libraryPath, process.env.LD_LIBRARY_PATH ?? ""].filter(Boolean).join(":"),
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdoutPromise = child.stdout ? new Response(child.stdout).text() : Promise.resolve("");
+  const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
+  const exitCode = await child.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+  if (exitCode !== 0) {
+    const detail = stderr.trim() || stdout.trim() || `código ${exitCode}`;
+    throw new Error(`El runtime Linux de whisper.cpp no puede iniciar: ${detail.slice(-1_500)}`);
+  }
+}
+
 async function prepareWhisperBinary(): Promise<void> {
   const assetName = platformAssetName();
   const cachedManifest = readManifest();
@@ -416,7 +453,8 @@ async function prepareWhisperBinary(): Promise<void> {
     release = await fetchLatestWhisperRelease();
   } catch (error) {
     if (manifestIsUsable(cachedManifest)) {
-      const updatedManifest = updateManifestModel(cachedManifest);
+      const updatedManifest = repairWhisperRuntime(updateManifestModel(cachedManifest));
+      await validateWhisperRuntime(updatedManifest);
       console.warn(`[media-assets] No se pudo consultar la release latest; usando ${updatedManifest.version}: ${String(error)}`);
       return;
     }
@@ -433,7 +471,8 @@ async function prepareWhisperBinary(): Promise<void> {
     && cachedManifest.assetName === asset.name
     && cachedManifest.assetDigest === assetSha256
   ) {
-    updateManifestModel(cachedManifest);
+    const updatedManifest = repairWhisperRuntime(updateManifestModel(cachedManifest));
+    await validateWhisperRuntime(updatedManifest);
     console.log(`[media-assets] Reutilizando whisper.cpp ${release.tag_name} (${asset.name}).`);
     return;
   }
@@ -453,7 +492,7 @@ async function prepareWhisperBinary(): Promise<void> {
 
   console.log(`[media-assets] Extrayendo whisper.cpp ${release.tag_name}...`);
   await extractArchive(archivePath, WHISPER_BIN_DIR, asset.name);
-  const files = walkFiles(WHISPER_BIN_DIR);
+  const files = walkRuntimeFiles(WHISPER_BIN_DIR);
   const executable = findWhisperExecutable(files);
   const manifest: WhisperRuntimeManifest = {
     schemaVersion: 1,
@@ -468,6 +507,8 @@ async function prepareWhisperBinary(): Promise<void> {
     preparedAt: new Date().toISOString(),
   };
   writeFileSync(WHISPER_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  const repairedManifest = repairWhisperRuntime(manifest);
+  await validateWhisperRuntime(repairedManifest);
   console.log(`[media-assets] whisper.cpp ${release.tag_name} preparado para ${process.platform}/${process.arch}.`);
 }
 

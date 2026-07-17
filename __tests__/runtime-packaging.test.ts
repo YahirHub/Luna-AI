@@ -10,5 +10,6 @@ describe("empaquetado del runtime multimedia", () => {
     expect(packageJson.scripts.build).toContain("package:runtime");
     expect(source).toContain('"dist", "runtime", "whisper"');
     expect(source).toContain("manifest.json");
+    expect(source).toContain("ensureLinuxSharedLibraryAliases");
   });
 });

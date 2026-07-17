@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/039-procesamiento-multimedia-local.md
-- Resumen: Integrar OCR local y transcripción OGG/Opus mediante el runtime oficial latest de whisper.cpp, distribuido junto al ejecutable Bun.
-- Archivos del cambio: package.json, bun.lock, Dockerfile, workflow, README, entrypoint, src/media-processing/*, scripts de preparación/empaquetado, pruebas y contexto
+- Último registro: contexto/041-corregir-bibliotecas-whisper-linux.md
+- Resumen: Reparar aliases SONAME, configurar el entorno de whisper-cli y validar las bibliotecas compartidas de los releases Linux.
+- Archivos del cambio: whisper-native, preparación y empaquetado del runtime, helper Linux, pruebas, README y contexto
 <!-- codewolf:auto-context:end -->
