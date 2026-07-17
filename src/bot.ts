@@ -56,6 +56,16 @@ import {
 import { estimateTokensAccurate } from "./ai.ts";
 import { sendWithTyping } from "./messaging.ts";
 import { deliverScheduledMessage } from "./scheduled-messages.ts";
+import { recordAlarmDeliveryInContext } from "./scheduled-context.ts";
+import {
+  AgentConfigFlowManager,
+  loadAgentConfig,
+  type SearchDepth,
+} from "./agent-config.ts";
+import { SearchSetupManager } from "./search/search-setup.ts";
+import { WEB_SEARCH_TOOL, executeWebSearchTool } from "./search/search-tools.ts";
+import { READ_URL_TOOL, executeReadUrlTool } from "./search/read-url.ts";
+import { RESEARCH_WEB_TOOL, runResearchSubagent } from "./research-agent.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -72,6 +82,11 @@ let availableModels: string[] = [];
 
 /** Flujo temporal para configurar el proveedor desde WhatsApp. */
 const providerSetupManager = new ProviderSetupManager();
+
+/** Configuración persistente de herramientas y subagentes. */
+let agentConfig = loadAgentConfig();
+const agentConfigFlowManager = new AgentConfigFlowManager();
+const searchSetupManager = new SearchSetupManager();
 
 /** Gestor de autenticación y sesiones de usuario. */
 const authManager = new AuthManager();
@@ -91,8 +106,19 @@ let currentSock: WASocket | null = null;
 /** JIDs actualmente en proceso de compactación (para ignorar mensajes entrantes). */
 const compactingJids = new Set<string>();
 
-/** Tools combinadas (memoria + recordatorios + alarmas). */
-const ALL_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
+/** Tools base y herramientas opcionales según /config. */
+const BASE_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
+
+function getAvailableTools(): import("./ai.ts").ToolDefinition[] {
+  const tools = [...BASE_TOOLS];
+  if (agentConfig.webSearchEnabled) {
+    tools.push(WEB_SEARCH_TOOL, READ_URL_TOOL);
+  }
+  if (agentConfig.webSearchEnabled && agentConfig.researchSubagentEnabled) {
+    tools.push(RESEARCH_WEB_TOOL);
+  }
+  return tools;
+}
 
 const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["create_reminder", "⏰ Creando recordatorio..."],
@@ -104,6 +130,9 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["delete_alarm", "🗑️ Eliminando alarma..."],
   ["list_alarms", "📋 Consultando alarmas..."],
   ["toggle_alarm", "🔄 Cambiando estado de alarma..."],
+  ["web_search", "🔎 Buscando en internet..."],
+  ["read_url", "📖 Verificando una fuente..."],
+  ["research_web", "🕵️ Investigando con un subagente..."],
 ]);
 
 // ─── Compactación de contexto ──────────────────────────────────
@@ -132,7 +161,7 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
 
   // Estimar tokens actuales (incluyendo tools)
   const currentTokens = estimateTokensAccurate(messages);
-  const toolsTokens = estimateRequestTokens([], ALL_TOOLS);
+  const toolsTokens = estimateRequestTokens([], getAvailableTools());
 
   // Obtener presupuesto efectivo del modelo
   const effectiveBudget = modelCatalog.getEffectiveBudget(modelId, toolsTokens);
@@ -349,7 +378,7 @@ async function onAlarmDue(
     weekday: "long",
   }).format(new Date());
 
-  await deliverScheduledMessage({
+  const deliveredText = await deliverScheduledMessage({
     sock: currentSock,
     jid: alarm.jid,
     model: contextManager.getModel(alarm.jid),
@@ -361,6 +390,24 @@ ${alarm.text}`,
     title: `⏰ ALARMA RECURRENTE (${dayName})`,
     logLabel: "alarm",
   });
+
+  // La entrega real se incorpora al historial persistente. Un fallo de disco
+  // no debe provocar que WhatsApp reciba la misma alarma nuevamente.
+  try {
+    await contextManager.withLock(alarm.jid, async () => {
+      if (contextManager) {
+        recordAlarmDeliveryInContext(
+          contextManager,
+          alarm.jid,
+          alarm.text,
+          dayName,
+          deliveredText,
+        );
+      }
+    });
+  } catch (error) {
+    console.error(`[alarm] La alarma se entregó, pero no pudo agregarse al contexto de ${alarm.jid}:`, error);
+  }
 
   console.log(`[alarm] Alarma disparada para ${alarm.jid}`);
 }
@@ -392,6 +439,20 @@ async function onReminderDue(
 function isAdminSession(jid: string): boolean {
   const username = authManager.getUsername(jid);
   return Boolean(username && authManager.isAdmin(username));
+}
+
+const SLASH_COMMANDS = new Set([
+  "setup-provider",
+  "setup-search",
+  "config",
+]);
+
+function formatCommandName(name: string): string {
+  return `${SLASH_COMMANDS.has(name) ? "/" : "!"}${name}`;
+}
+
+function parseSearchDepth(value: unknown): SearchDepth | undefined {
+  return value === "deep" || value === "standard" ? value : undefined;
 }
 
 function providerSetupPrompt(step: ProviderSetupStep): string {
@@ -450,7 +511,7 @@ registerCommand(
     const isAdmin = sessionUsername ? authManager.isAdmin(sessionUsername) : false;
     const cmds = getCommands(isAdmin);
     const lista = cmds
-      .map((c) => `${c.name === "setup-provider" ? "/" : "!"}${c.name} — ${c.description}`)
+      .map((c) => `${formatCommandName(c.name)} — ${c.description}`)
       .join("\n");
 
     return {
@@ -489,6 +550,14 @@ registerCommand(
     if (providerSetupManager.has(senderJid)) {
       providerSetupManager.cancel(senderJid);
       return { text: "❌ Configuración del proveedor cancelada." };
+    }
+    if (searchSetupManager.has(senderJid)) {
+      searchSetupManager.cancel(senderJid);
+      return { text: "❌ Configuración de búsqueda cancelada." };
+    }
+    if (agentConfigFlowManager.has(senderJid)) {
+      agentConfigFlowManager.cancel(senderJid);
+      return { text: "❌ Configuración del agente cancelada." };
     }
     if (contextManager?.isAwaitingModelSelection(senderJid)) {
       contextManager.clearAwaitingModelSelection(senderJid);
@@ -595,6 +664,33 @@ registerCommand(
   true,
 );
 
+registerCommand(
+  "config",
+  "Configura herramientas, búsqueda y subagente (solo administrador)",
+  (_cmd, senderJid) => {
+    if (!isAdminSession(senderJid)) {
+      return { text: "⚠️ Solo el administrador puede cambiar la configuración global." };
+    }
+    agentConfig = loadAgentConfig();
+    agentConfigFlowManager.start(senderJid);
+    return { text: agentConfigFlowManager.render(agentConfig) };
+  },
+  true,
+);
+
+function startSearchSetup(senderJid: string): { text: string } {
+  if (!isAdminSession(senderJid)) {
+    return { text: "⚠️ Solo el administrador puede configurar motores de búsqueda." };
+  }
+  return { text: searchSetupManager.start(senderJid) };
+}
+
+registerCommand(
+  "setup-search",
+  "Configura motores de búsqueda y fallback (solo administrador)",
+  (_cmd, senderJid) => startSearchSetup(senderJid),
+  true,
+);
 // ─── Comandos de autenticación ────────────────────────────────────
 
 registerCommand(
@@ -1032,6 +1128,45 @@ async function handlePendingProviderSetup(
   }
 }
 
+async function handlePendingAgentConfig(
+  sock: WASocket,
+  jid: string,
+  text: string,
+): Promise<void> {
+  try {
+    const result = agentConfigFlowManager.submit(jid, text, agentConfig);
+    agentConfig = result.config;
+    await sendWithTyping(sock, jid, result.text);
+  } catch (error) {
+    await sendWithTyping(
+      sock,
+      jid,
+      `❌ ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function handlePendingSearchSetup(
+  sock: WASocket,
+  message: WAMessage,
+  jid: string,
+  text: string,
+): Promise<void> {
+  try {
+    const result = await searchSetupManager.submit(jid, text);
+    if (result.secretInput) {
+      await deleteSensitiveIncomingMessage(sock, message);
+    }
+    await sendWithTyping(sock, jid, result.text);
+  } catch (error) {
+    await sendWithTyping(
+      sock,
+      jid,
+      `❌ ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 // ─── Procesamiento de mensajes ───────────────────────────────────
 
 export async function handleMessage(
@@ -1142,6 +1277,46 @@ export async function handleMessage(
     }
   }
 
+  // ── Configuración interactiva del agente ───────────────────────
+  if (agentConfigFlowManager.has(remoteJid)) {
+    if (!isAdminSession(remoteJid)) {
+      agentConfigFlowManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      return;
+    }
+    if (command && command.name === "cancelar") {
+      agentConfigFlowManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "❌ Configuración del agente cancelada.");
+      return;
+    }
+    if (command) {
+      agentConfigFlowManager.cancel(remoteJid);
+    } else {
+      await handlePendingAgentConfig(sock, remoteJid, text);
+      return;
+    }
+  }
+
+  // ── Configuración interactiva de búsqueda ─────────────────────
+  if (searchSetupManager.has(remoteJid)) {
+    if (!isAdminSession(remoteJid)) {
+      searchSetupManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      return;
+    }
+    if (command && command.name === "cancelar") {
+      searchSetupManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "❌ Configuración de búsqueda cancelada.");
+      return;
+    }
+    if (command) {
+      searchSetupManager.cancel(remoteJid);
+    } else {
+      await handlePendingSearchSetup(sock, message, remoteJid, text);
+      return;
+    }
+  }
+
   // ── Verificar si espera selección de modelo ────────────────────
   if (contextManager?.isAwaitingModelSelection(remoteJid)) {
     if (isPositiveInteger(text.trim())) {
@@ -1186,7 +1361,7 @@ export async function handleMessage(
         : false;
       const cmds = getCommands(isAdmin);
       const lista = cmds
-        .map((c) => `${c.name === "setup-provider" ? "/" : "!"}${c.name}`)
+        .map((c) => formatCommandName(c.name))
         .join(", ");
       await sendWithTyping(
         sock,
@@ -1251,6 +1426,8 @@ async function handleAiChat(
   // para evitar que dos mensajes simultáneos corrompan el contexto
   const cm = contextManager;
   const cfg = llmConfig;
+  const agentConfigSnapshot = { ...agentConfig };
+  const activeTools = getAvailableTools();
   await cm.withLock(remoteJid, async () => {
 
   const userMessage = { role: "user" as const, content: userText };
@@ -1306,6 +1483,25 @@ async function handleAiChat(
         }
         return result;
       }
+      if (name === "web_search") {
+        return executeWebSearchTool(
+          args,
+          agentConfigSnapshot.defaultSearchDepth,
+        );
+      }
+      if (name === "read_url") {
+        return executeReadUrlTool(args);
+      }
+      if (name === "research_web") {
+        const query = typeof args.query === "string" ? args.query : "";
+        return runResearchSubagent({
+          query,
+          model,
+          llmConfig: cfg,
+          agentConfig: agentConfigSnapshot,
+          depth: parseSearchDepth(args.depth),
+        });
+      }
       return `Error: funcion desconocida "${name}"`;
     };
 
@@ -1316,7 +1512,7 @@ async function handleAiChat(
       apiMessages,
       model,
       cfg,
-      ALL_TOOLS,
+      activeTools,
       toolExecutor,
       3,
       (toolName) => {

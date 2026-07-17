@@ -23,7 +23,7 @@ export interface ScheduledMessageOptions {
  */
 export async function deliverScheduledMessage(
   options: ScheduledMessageOptions,
-): Promise<void> {
+): Promise<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: STATIC_SYSTEM_PROMPT_CONTENT },
     {
@@ -39,11 +39,13 @@ export async function deliverScheduledMessage(
     console.error(`[${options.logLabel}] Falló la generación con LLM; usando fallback:`, err);
   }
 
+  const deliveredText = `${options.title}\n\n${body}`;
   await sendWithTyping(
     options.sock,
     options.jid,
-    `${options.title}\n\n${body}`,
+    deliveredText,
     2_000,
     4_000,
   );
+  return deliveredText;
 }

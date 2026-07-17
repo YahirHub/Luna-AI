@@ -37,6 +37,11 @@ describe("parseCommand", () => {
     expect(result!.name).toBe("setup-provider");
   });
 
+  it("parses search configuration and agent commands", () => {
+    expect(parseCommand("/config")?.name).toBe("config");
+    expect(parseCommand("/setup-search")?.name).toBe("setup-search");
+  });
+
   it("parses command with arguments", () => {
     const result = parseCommand("!ping extra arg");
     expect(result).not.toBeNull();
@@ -148,6 +153,18 @@ describe("registerCommand and dispatchCommand", () => {
     );
 
     expect(result?.text).toBe("found");
+  });
+});
+
+
+describe("superficie pública de búsqueda", () => {
+  it("no expone comandos para ejecutar búsquedas manualmente", async () => {
+    const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
+
+    expect(source).toContain('registerCommand(\n  "setup-search"');
+    expect(source).not.toContain('registerCommand(\n  "buscar"');
+    expect(source).not.toContain('registerCommand(\n  "search"');
+    expect(source).not.toContain('registerCommand(\n  "search-setup"');
   });
 });
 

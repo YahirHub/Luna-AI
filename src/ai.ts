@@ -46,13 +46,21 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
+  const onAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) {
+    controller.abort(externalSignal.reason);
+  } else {
+    externalSignal?.addEventListener("abort", onAbort, { once: true });
+  }
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -69,6 +77,7 @@ interface RawRequestOptions {
   tools?: ToolDefinition[];
   temperature?: number;
   max_tokens?: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -120,6 +129,7 @@ async function rawChatRequest(
         url,
         { method: "POST", headers, body: bodyStr },
         config.requestTimeoutMs,
+        body.signal,
       );
 
       if (!response.ok) {
@@ -153,6 +163,9 @@ async function rawChatRequest(
       };
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      if (body.signal?.aborted) {
+        throw lastError;
+      }
       if (attempt < maxRetries && shouldRetry(lastError)) {
         const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
         console.warn(
@@ -192,6 +205,11 @@ export async function chatCompletion(
  * Si el modelo llama a herramientas, las ejecuta vía executeTool y
  * continúa en loop hasta que el modelo responda sin tool_calls.
  */
+export interface ToolChatRuntimeOptions {
+  maxRounds?: number;
+  signal?: AbortSignal;
+}
+
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
   model: string,
@@ -200,13 +218,15 @@ export async function chatCompletionWithTools(
   executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
   maxRetries = 3,
   onToolCall?: (name: string) => void,
+  runtimeOptions: ToolChatRuntimeOptions = {},
 ): Promise<{ content: string; toolsCalled: string[] }> {
   let currentMessages = [...messages];
   const toolsCalled: string[] = [];
+  const maxRounds = Math.min(10, Math.max(1, runtimeOptions.maxRounds ?? 5));
 
-  for (let round = 0; round < 5; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     const result = await rawChatRequest(
-      { model, messages: currentMessages, tools },
+      { model, messages: currentMessages, tools, signal: runtimeOptions.signal },
       config,
       maxRetries,
     );

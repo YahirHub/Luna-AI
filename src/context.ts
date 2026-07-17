@@ -107,6 +107,15 @@ export const STATIC_SYSTEM_PROMPT_CONTENT = [
   "- Para eliminar un recordatorio: usa delete_reminder con el texto o ID",
   "- Cuando edites un recordatorio: elimina el viejo con delete_reminder y crea uno nuevo con create_reminder",
   "",
+  "BÚSQUEDA WEB Y SUBAGENTE:",
+  "- Decide automáticamente cuándo una consulta necesita información actual o verificación externa",
+  "- Usa web_search para consultas actuales y read_url para verificar las fuentes importantes",
+  "- Usa research_web cuando la pregunta requiera varias búsquedas, comparar fuentes o investigar un tema amplio",
+  "- No existe un comando público para buscar: no le pidas al usuario que invoque la búsqueda manualmente",
+  "- No inventes fuentes, URLs, fechas ni resultados de búsqueda",
+  "- Si las herramientas indican que no hay motores configurados, explica que el administrador debe usar /setup-search",
+  "- Las configuraciones de búsqueda y subagente pueden estar desactivadas desde /config",
+  "",
   "⚠️ REGLAS DE FORMATO (WhatsApp):",
   "- NO uses Markdown. Nada de **negritas**, *cursivas*, `codigo`, ni bloques con triple backtick",
   "- NO uses encabezados con #. Escribe títulos con emojis como prefijo",
@@ -279,9 +288,21 @@ export class ContextManager {
    * addMessage solo persiste el mensaje.
    */
   addMessage(jid: string, message: ChatMessage): void {
+    this.addMessages(jid, [message]);
+  }
+
+  /** Añade varios mensajes y los persiste en una sola escritura. */
+  addMessages(jid: string, messages: ChatMessage[]): void {
+    if (messages.length === 0) return;
     const ctx = this.loadContext(jid);
-    ctx.messages.push(message);
-    this.saveContextAtomically(jid);
+    const previousLength = ctx.messages.length;
+    ctx.messages.push(...messages);
+    try {
+      this.saveContextAtomically(jid);
+    } catch (error) {
+      ctx.messages.splice(previousLength);
+      throw error;
+    }
   }
 
   /** Obtiene los mensajes del contexto. */

@@ -1,23 +1,27 @@
 <p align="center">
-  <img src="assets/luna-ai.png" alt="Luna AI, gatita negra y morada" width="420">
+  <img src="assets/luna-ai.png" alt="Luna AI, gatita negra, gris y morada" width="420">
 </p>
 
 # Luna AI
 
-Bot de WhatsApp en TypeScript y Bun con personalidad de gatita, contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, selección de modelos y control de acceso.
+Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, búsqueda web multiproveedor, subagente investigador, selección de modelos y control de acceso.
 
 ## Funciones principales
 
-- Vinculación de WhatsApp mediante número telefónico o código QR.
+- Vinculación de WhatsApp mediante código QR o número telefónico.
 - Reconexión automática y sesión persistente.
-- Conversación con contexto y compactación automática.
-- Memoria duradera separada por usuario.
+- Conversación con contexto por usuario y compactación automática.
+- Memoria duradera separada del historial conversacional.
 - Recordatorios de una sola vez y alarmas recurrentes.
+- Las alarmas entregadas se agregan al contexto persistente con fecha, texto configurado y respuesta enviada.
+- OpenCode Free integrado como proveedor LLM predeterminado.
+- Proveedor LLM personalizado opcional mediante `/setup-provider`.
+- Búsqueda web con Tavily, Brave Search, Exa, Linkup, Firecrawl, SerpApi y Zenserp.
+- Fallback automático entre motores configurados.
+- Lectura segura de fuentes públicas mediante una herramienta interna.
+- Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
+- Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
 - Administrador, usuarios, sesiones y bloqueo de cuentas.
-- OpenCode Free integrado y activo automáticamente sin configuración manual.
-- Configuración opcional de un proveedor personalizado desde WhatsApp con `/setup-provider`.
-- Catálogo remoto de modelos gratuitos con respaldo local si `/models` falla.
-- Límites de contexto por coincidencia de modelo y fallback conservador para modelos desconocidos.
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
 
@@ -25,7 +29,8 @@ Bot de WhatsApp en TypeScript y Bun con personalidad de gatita, contexto persist
 
 - Bun 1.3.14 para desarrollo o compilación local.
 - Una cuenta de WhatsApp para vincular el bot.
-- Opcional: un proveedor personalizado compatible con chat completions de OpenAI.
+- Opcional: claves de uno o más motores de búsqueda.
+- Opcional: un proveedor LLM compatible con la API de chat completions de OpenAI.
 
 ## Instalación local
 
@@ -36,64 +41,158 @@ bun install
 bun run start --qr
 ```
 
-`bun install` debe generar `bun.lock`. Versiona ese lockfile para que desarrollo, CI y Docker resuelvan las mismas dependencias.
+`bun install` debe generar `bun.lock`. Versiona el lockfile para que desarrollo, CI y Docker resuelvan las mismas dependencias.
 
 ## Primera configuración
 
-La primera ejecución no requiere crear archivos de configuración ni contratar un proveedor.
+No es necesario crear `.env` ni archivos JSON manualmente.
 
 1. Inicia Luna y vincula WhatsApp.
-2. Envía `!setup` al número vinculado para crear la primera cuenta administradora.
-3. Inicia sesión y conversa normalmente: Luna usa **OpenCode Free** de forma automática.
-4. Usa `!modelos` para consultar y seleccionar los modelos gratuitos disponibles.
+2. Envía `!setup` para crear la primera cuenta administradora.
+3. Inicia sesión con `!login`.
+4. Conversa normalmente: Luna usa OpenCode Free de forma automática.
+5. Configura búsqueda web con `/setup-search` cuando necesites acceso a internet.
 
-El proveedor integrado consulta:
+## Proveedor LLM predeterminado
+
+OpenCode Free se activa cuando no existe una configuración personalizada.
 
 ```text
 Chat completions: https://opencode.ai/zen/v1/chat/completions
 Modelos:          https://opencode.ai/zen/v1/models
 ```
 
-Solo se aceptan IDs terminados en `-free`. Si el endpoint de modelos no responde, Luna conserva este catálogo local de emergencia:
+Solo se aceptan IDs terminados en `-free`. Si el catálogo remoto falla, Luna usa una lista local de emergencia.
 
-```text
-deepseek-v4-flash-free
-mimo-v2.5-free
-hy3-free
-nemotron-3-ultra-free
-north-mini-code-free
-```
-
-El modelo inicial para chats nuevos es `deepseek-v4-flash-free`. Los modelos desconocidos usan límites conservadores para evitar desbordar el contexto.
+El modelo inicial para chats nuevos es `deepseek-v4-flash-free`. Los modelos desconocidos usan límites conservadores para reducir el riesgo de desbordar el contexto.
 
 ### Proveedor personalizado opcional
 
-`/setup-provider` **no es obligatorio**. Solo se usa cuando el administrador quiere reemplazar OpenCode Free por otro proveedor.
-
-Para volver posteriormente al proveedor integrado sin editar archivos:
+El administrador puede ejecutar:
 
 ```text
-/setup-provider gratis
+/setup-provider
 ```
 
-El flujo de proveedor personalizado solicita:
+El flujo solicita:
 
 1. Endpoint completo de chat completions.
 2. Endpoint completo del catálogo de modelos.
 3. Modelo predeterminado.
-4. API key, o `sin-clave` cuando no sea necesaria.
+4. API key, o `sin-clave`.
 
-Al completar el flujo se genera:
+Al terminar se genera automáticamente:
 
 ```text
 persistent/llm.config.json
 ```
 
-La configuración personalizada se aplica en caliente y tiene prioridad en los siguientes reinicios. Si el archivo no existe o es inválido, Luna vuelve automáticamente a OpenCode Free.
+La configuración se aplica en caliente y tiene prioridad en reinicios posteriores. Si falta o es inválida, Luna vuelve automáticamente a OpenCode Free.
 
-En un proveedor personalizado, `!modelos` usa todos los IDs válidos devueltos por su endpoint, sin aplicar el filtro `-free`. Si ese catálogo falla, se mantiene el modelo predeterminado configurado.
+Para restaurar el proveedor gratuito:
 
-Por seguridad, Luna intenta eliminar del chat el mensaje que contiene la API key. Realiza este flujo únicamente en una conversación privada.
+```text
+/setup-provider gratis
+```
+
+Luna intenta eliminar del chat el mensaje que contiene la API key. Aun así, realiza la configuración únicamente en una conversación privada.
+
+## Búsqueda web
+
+La búsqueda no requiere modificar Docker ni crear archivos manualmente. El administrador abre:
+
+```text
+/setup-search
+```
+
+El menú permite:
+
+- Guardar, reemplazar o eliminar la API key de cada motor.
+- Activar o desactivar motores.
+- Elegir el motor predeterminado.
+- Definir el orden de fallback.
+- Probar una conexión individual.
+- Probar todos los motores activos.
+
+Motores incluidos:
+
+| Motor | Uso |
+|---|---|
+| Tavily | Resultados optimizados para agentes y contenido resumido. |
+| Brave Search | Índice web independiente y contexto para LLM. |
+| Exa | Búsqueda semántica y contenido de resultados. |
+| Linkup | Búsqueda web estructurada. |
+| Firecrawl | Búsqueda y extracción de contenido web. |
+| SerpApi | Resultados orgánicos de buscadores. |
+| Zenserp | Resultados orgánicos de buscadores. |
+
+Las preferencias se guardan en:
+
+```text
+persistent/search.json
+```
+
+Las credenciales se guardan por separado en:
+
+```text
+persistent/search-auth.json
+```
+
+Ambos archivos permanecen dentro del volumen persistente y están excluidos de Git. Las API keys no se agregan al contexto, no se muestran completas y no se escriben en logs.
+
+Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`.
+
+## Herramientas internas y subagente investigador
+
+Cuando la búsqueda está habilitada, Luna decide por sí misma cuándo utilizar:
+
+- Búsqueda web: obtiene resultados normalizados con títulos, URLs, fragmentos y metadatos.
+- Lectura de fuentes: consulta texto de una página pública para verificarla.
+- Investigación delegada: crea un subagente aislado que busca y compara fuentes.
+
+El subagente:
+
+- Hereda el proveedor y modelo LLM seleccionados por el usuario.
+- Trabaja con un contexto aislado; no recibe todo el chat principal.
+- Prioriza documentación oficial y fuentes primarias.
+- Puede realizar varias búsquedas y verificar páginas.
+- Devuelve una síntesis breve con URLs completas.
+- Tiene límite de rondas y timeout configurable.
+- Usa una búsqueda directa como fallback si el gateway LLM ignora function calling.
+
+La búsqueda no se expone como comando para los usuarios. Luna analiza cada mensaje y decide automáticamente si necesita una búsqueda rápida, leer una fuente o delegar la investigación al subagente. La consulta normal y la respuesta final quedan en el contexto persistente como cualquier conversación.
+
+## `/config`
+
+El administrador puede modificar el comportamiento del agente desde WhatsApp:
+
+```text
+/config
+```
+
+Opciones disponibles:
+
+1. Activar o desactivar búsqueda web directa.
+2. Activar o desactivar el subagente investigador.
+3. Cambiar la profundidad predeterminada entre estándar y profunda.
+4. Cambiar el timeout del investigador entre 60, 120, 180 y 300 segundos.
+
+La configuración se guarda inmediatamente en:
+
+```text
+persistent/agent-config.json
+```
+
+La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda solicita hasta 15 y permite un flujo de investigación más amplio.
+
+## Alarmas y contexto persistente
+
+Cuando una alarma recurrente se entrega correctamente por WhatsApp, Luna agrega dos mensajes al contexto del usuario en una sola escritura:
+
+1. Un evento automático con el texto de la alarma, el día programado y la fecha/hora real de entrega en `America/Mexico_City`.
+2. El texto exacto que Luna envió al usuario.
+
+Esto permite que preguntas posteriores como “¿qué alarma me enviaste hoy?” tengan contexto conversacional. Si WhatsApp confirma la entrega pero falla la escritura en disco, la alarma no se reenvía únicamente por ese fallo; el error se registra para diagnóstico.
 
 ## Ejecución
 
@@ -103,7 +202,7 @@ Inicio normal:
 bun run start
 ```
 
-Forzar vinculación mediante QR:
+Vinculación mediante QR:
 
 ```bash
 bun run start --qr
@@ -115,17 +214,15 @@ Desarrollo con recarga:
 bun run dev
 ```
 
-Opcionalmente puede cambiarse la ubicación donde `/setup-provider` guardará la configuración:
+Puede cambiarse la ubicación de la configuración LLM personalizada:
 
 ```bash
 bun run start --llm-config ./persistent/proveedor-secundario.json
 ```
 
-También se admite `--llm-config=./persistent/proveedor-secundario.json`.
-
 ## Docker
 
-El `Dockerfile` inicia el binario con `--qr`, por lo que una instalación nueva muestra automáticamente el código de vinculación en los logs del contenedor.
+El `Dockerfile` inicia el binario con `--qr`. Una instalación nueva muestra el código de vinculación en los logs del contenedor.
 
 ### Linux o macOS
 
@@ -147,9 +244,7 @@ docker run --rm -it `
   luna-ai
 ```
 
-Después de vincular WhatsApp, crea el administrador con `!setup`. OpenCode Free funciona de inmediato; `/setup-provider` solo es necesario para sustituirlo por un proveedor personalizado. Cuando se usa, `persistent/llm.config.json` se guarda dentro del volumen `luna-ai-data`.
-
-El entrypoint prepara los permisos como root y después ejecuta el bot con un usuario sin privilegios.
+El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda y credenciales. No es necesario montar archivos adicionales.
 
 Para revisar el QR o los logs:
 
@@ -157,28 +252,24 @@ Para revisar el QR o los logs:
 docker logs -f luna-ai
 ```
 
-Para detenerlo cuando se ejecute sin `--rm`:
-
-```bash
-docker stop luna-ai
-```
-
 ## Comandos del bot
 
-Los prefijos `!` y `/` son aceptados por el parser. La documentación usa `/setup-provider` para distinguir el flujo de configuración administrativa.
+Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo recomendado.
 
 | Comando | Descripción |
 |---|---|
-| `!ayuda` | Muestra los comandos permitidos para la sesión actual. |
+| `!ayuda` | Muestra los comandos permitidos para la sesión. |
 | `!ping` | Responde con `pong`. |
 | `!id` | Muestra el JID de WhatsApp. |
-| `!cancelar` o `/cancelar` | Cancela el flujo interactivo actual. |
+| `/cancelar` | Cancela el flujo interactivo actual. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
 | `!modelos` | Actualiza el catálogo y permite seleccionar un modelo. |
 | `!setup` | Crea la primera cuenta administradora. |
 | `!login` | Inicia sesión. |
-| `/setup-provider` | Sustituye opcionalmente OpenCode Free por un proveedor personalizado; solo administrador. |
-| `/setup-provider gratis` | Elimina el override personalizado y restaura OpenCode Free. |
+| `/setup-provider` | Configura un proveedor LLM personalizado; solo administrador. |
+| `/setup-provider gratis` | Restaura OpenCode Free. |
+| `/setup-search` | Configura motores, claves y fallback; solo administrador. |
+| `/config` | Configura herramientas y subagente; solo administrador. |
 | `!adduser` | Crea un usuario; solo administrador. |
 | `!banuser` | Bloquea un usuario; solo administrador. |
 | `!desban` | Desbloquea un usuario; solo administrador. |
@@ -190,41 +281,64 @@ Los prefijos `!` y `/` son aceptados por el parser. La documentación usa `/setu
 persistent/
 ├── auth_info_baileys/       # Sesión de WhatsApp
 ├── contexts/<jid>/
-│   ├── context.json         # Conversación, modelo y compactación
+│   ├── context.json         # Conversación, alarmas entregadas, modelo y compactación
 │   ├── memory.md            # Memoria duradera del usuario
 │   └── alarms.json          # Alarmas recurrentes
-├── llm.config.json          # Solo existe si se configura un proveedor personalizado
+├── agent-config.json        # Configuración de herramientas y subagente
+├── search.json              # Motores, estados, predeterminado y fallback
+├── search-auth.json         # API keys de búsqueda; secreto
+├── llm.config.json          # Solo si existe proveedor LLM personalizado
 ├── reminders.json           # Recordatorios de una sola vez
 ├── users.json               # Usuarios y sesiones del bot
 └── uploads/                 # Imágenes recibidas
 ```
 
-`persistent/` no debe versionarse ni exponerse públicamente. Contiene la sesión de WhatsApp, hashes de contraseña, conversaciones y, cuando se configura, la API key del proveedor personalizado.
+`persistent/` no debe versionarse ni exponerse públicamente.
+
+## Seguridad de búsqueda
+
+- `/setup-search` y `/config` requieren una sesión administradora.
+- No existe un comando público para ejecutar búsquedas; las herramientas solo pueden ser llamadas por el agente.
+- Las claves se almacenan separadas de las preferencias.
+- Luna intenta borrar el mensaje entrante que contiene una clave.
+- `read_url` solo acepta HTTP y HTTPS.
+- Rechaza credenciales embebidas en URLs.
+- Rechaza localhost, dominios internos y direcciones privadas o reservadas.
+- Valida cada redirección antes de seguirla.
+- Limita la descarga a 2 MB, la lectura a 50 000 caracteres y el tiempo a 20 segundos.
+- Solo procesa contenido textual, HTML, JSON o XML.
+- Las consultas enviadas a un motor externo están sujetas a la política de privacidad de ese proveedor.
 
 ## Estructura relevante
 
 ```text
 assets/
-└── luna-ai.png              # Mascota de Luna AI
+└── luna-ai.png
 
 src/
-├── ai.ts                    # Solicitudes, tools, timeout y catálogo genérico
+├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
+├── agent-config.ts          # Configuración persistente y flujo /config
+├── research-agent.ts        # Subagente investigador aislado
+├── scheduled-context.ts     # Registro de alarmas entregadas en el contexto
+├── search/
+│   ├── read-url.ts          # Lectura de páginas con protecciones SSRF
+│   ├── search-config.ts     # Tipos, proveedores y normalización
+│   ├── search-runtime.ts    # Adaptadores y fallback multiproveedor
+│   ├── search-setup.ts      # Flujo /setup-search
+│   ├── search-storage.ts    # Preferencias y credenciales separadas
+│   └── search-tools.ts      # Tool web_search
 ├── providers/
-│   └── opencode-free.ts     # Endpoints, filtro, fallback y límites de modelos gratuitos
-├── llm-config.ts            # Proveedor personalizado y flujo /setup-provider
+│   └── opencode-free.ts     # Proveedor LLM gratuito integrado
+├── llm-config.ts            # Proveedor personalizado y /setup-provider
 ├── auth.ts                  # Usuarios, sesiones y permisos
-├── bot.ts                   # Orquestación, comandos y /setup-provider
-├── commands.ts              # Parser y registro de comandos
-├── connection.ts            # WhatsApp y reconexión
+├── bot.ts                   # Orquestación, comandos y ejecución de tools
 ├── context.ts               # Contexto persistente y compactación
-├── messaging.ts             # Envío con presencia de escritura
-├── scheduled-messages.ts    # Entrega común de recordatorios y alarmas
-├── storage.ts               # Persistencia atómica y rutas seguras
-├── media.ts                 # Descarga y validación de imágenes
-├── memory.ts                # Memoria persistente por usuario
-├── reminder.ts              # Recordatorios de una sola vez
+├── scheduled-messages.ts    # Entrega de recordatorios y alarmas
+├── storage.ts               # Persistencia atómica
+├── memory.ts                # Memoria persistente
+├── reminder.ts              # Recordatorios
 ├── alarm.ts                 # Alarmas recurrentes
-└── index.ts                 # Entrada, configuración y vinculación
+└── index.ts                 # Entrada y vinculación
 ```
 
 ## Calidad y compilación
@@ -235,34 +349,27 @@ bun test
 bun run build
 ```
 
-El workflow de GitHub genera binarios para Linux amd64, Linux arm64 y Windows amd64. La configuración LLM no se incrusta en los binarios ni en los releases.
+El workflow de GitHub genera binarios para Linux amd64, Linux arm64 y Windows amd64. Ninguna credencial se incrusta en los binarios ni en los releases.
 
 ## Pruebas manuales importantes
 
-1. Iniciar sin `persistent/llm.config.json` y confirmar que el log indique `OpenCode Free`.
-2. Vincular WhatsApp, crear la cuenta administradora con `!setup` e iniciar sesión.
-3. Enviar un mensaje normal y confirmar que no solicite `/setup-provider`.
-4. Ejecutar `!modelos` y comprobar que solo aparezcan IDs terminados en `-free`.
-5. Interrumpir el endpoint de modelos y confirmar que aparezca el catálogo local de emergencia.
-6. Seleccionar un modelo gratuito y comprobar que se conserve en el contexto del chat.
-7. Ejecutar `/setup-provider`, cancelarlo y confirmar que OpenCode Free continúe funcionando.
-8. Completar `/setup-provider` y confirmar que el proveedor personalizado se aplique sin reiniciar.
-9. Reiniciar conservando el volumen y confirmar que el proveedor personalizado tenga prioridad.
-10. Ejecutar `/setup-provider gratis` y confirmar que se elimine el override sin detener el bot.
-11. Corromper temporalmente `llm.config.json` y comprobar que Luna vuelva a OpenCode Free.
+1. Iniciar sin `persistent/llm.config.json` y confirmar que OpenCode Free esté activo.
+2. Vincular WhatsApp, crear la cuenta administradora e iniciar sesión.
+3. Crear una alarma próxima, esperar su entrega y comprobar que aparezca en `contexts/<jid>/context.json`.
+4. Preguntar después por la alarma y verificar que el asistente recuerde el evento.
+5. Abrir `/setup-search`, configurar un motor y probar la conexión.
+6. Configurar dos motores, forzar el fallo del predeterminado y verificar el fallback.
+7. Enviar una pregunta sobre información actual sin usar comandos y confirmar que Luna decida llamar `web_search` o `research_web`.
+8. Confirmar que la respuesta incluya las fuentes necesarias sin exponer nombres de herramientas internas.
+9. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
+10. Desactivar búsqueda y subagente desde `/config` y comprobar que las herramientas desaparezcan.
+11. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
 
 ## Limpieza segura en Windows
-
-Para retirar archivos de configuración obsoletos de una copia anterior:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\eliminar-configuracion-obsoleta.ps1 -WhatIf
-powershell -ExecutionPolicy Bypass -File .\scripts\eliminar-configuracion-obsoleta.ps1
-```
-
-La limpieza general elimina dependencias, builds, cobertura y temporales. No toca `persistent/`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\limpiar-archivos-innecesarios.ps1 -WhatIf
 powershell -ExecutionPolicy Bypass -File .\scripts\limpiar-archivos-innecesarios.ps1
 ```
+
+El script no toca `persistent/`.
