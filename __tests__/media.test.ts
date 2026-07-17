@@ -1,71 +1,76 @@
-import { describe, it, expect } from "bun:test";
-import { isAllowedImageMime, isWithinSizeLimit } from "../src/media.ts";
+import { describe, expect, it } from "bun:test";
+import type { WAMessage } from "@whiskeysockets/baileys";
+import {
+  buildAudioContextText,
+  buildImageContextText,
+  getMediaCaption,
+  getMediaKind,
+  isAllowedAudioMime,
+  isAllowedImageMime,
+  isWithinSizeLimit,
+} from "../src/media.ts";
 
-describe("isAllowedImageMime", () => {
-  it("accepts image/jpeg", () => {
+describe("formatos multimedia", () => {
+  it("acepta JPEG y PNG para OCR", () => {
     expect(isAllowedImageMime("image/jpeg")).toBe(true);
+    expect(isAllowedImageMime("IMAGE/PNG")).toBe(true);
   });
 
-  it("accepts image/png", () => {
-    expect(isAllowedImageMime("image/png")).toBe(true);
-  });
-
-  it("accepts image/webp", () => {
-    expect(isAllowedImageMime("image/webp")).toBe(true);
-  });
-
-  it("accepts image/gif", () => {
-    expect(isAllowedImageMime("image/gif")).toBe(true);
-  });
-
-  it("rejects application/pdf", () => {
+  it("rechaza formatos que los decodificadores embebidos no procesan", () => {
+    expect(isAllowedImageMime("image/webp")).toBe(false);
+    expect(isAllowedImageMime("image/gif")).toBe(false);
     expect(isAllowedImageMime("application/pdf")).toBe(false);
   });
 
-  it("rejects video/mp4", () => {
-    expect(isAllowedImageMime("video/mp4")).toBe(false);
-  });
-
-  it("rejects text/plain", () => {
-    expect(isAllowedImageMime("text/plain")).toBe(false);
-  });
-
-  it("rejects empty string", () => {
-    expect(isAllowedImageMime("")).toBe(false);
-  });
-
-  it("rejects unknown image subtype", () => {
-    expect(isAllowedImageMime("image/bmp")).toBe(false);
+  it("acepta notas OGG/Opus con parámetros MIME", () => {
+    expect(isAllowedAudioMime("audio/ogg; codecs=opus")).toBe(true);
+    expect(isAllowedAudioMime("audio/opus")).toBe(true);
+    expect(isAllowedAudioMime("audio/mpeg")).toBe(false);
   });
 });
 
-describe("isWithinSizeLimit", () => {
-  it("accepts file exactly at limit (10 MB)", () => {
-    expect(isWithinSizeLimit(10 * 1024 * 1024)).toBe(true);
+describe("límites", () => {
+  it("acepta el tamaño exacto y rechaza un byte adicional", () => {
+    const limit = 12 * 1024 * 1024;
+    expect(isWithinSizeLimit(limit, limit)).toBe(true);
+    expect(isWithinSizeLimit(limit + 1, limit)).toBe(false);
   });
 
-  it("accepts small file (1 KB)", () => {
-    expect(isWithinSizeLimit(1024)).toBe(true);
+  it("rechaza números negativos y no finitos", () => {
+    expect(isWithinSizeLimit(-1)).toBe(false);
+    expect(isWithinSizeLimit(Number.POSITIVE_INFINITY)).toBe(false);
+  });
+});
+
+describe("detección y contexto", () => {
+  it("detecta imagen, audio y pie de imagen", () => {
+    const image = {
+      message: { imageMessage: { caption: "  revisa esta factura  " } },
+    } as unknown as WAMessage;
+    const audio = { message: { audioMessage: {} } } as unknown as WAMessage;
+
+    expect(getMediaKind(image)).toBe("image");
+    expect(getMediaCaption(image)).toBe("revisa esta factura");
+    expect(getMediaKind(audio)).toBe("audio");
   });
 
-  it("accepts zero bytes", () => {
-    expect(isWithinSizeLimit(0)).toBe(true);
+  it("marca la transcripción como entrada local", () => {
+    expect(buildAudioContextText("  comprar leche  ")).toBe(
+      "[Transcripción de audio generada por el sistema]\ncomprar leche",
+    );
   });
 
-  it("rejects file over limit (10 MB + 1 byte)", () => {
-    expect(isWithinSizeLimit(10 * 1024 * 1024 + 1)).toBe(false);
+  it("coloca primero la intención del usuario y después el OCR", () => {
+    expect(buildImageContextText("Total: $120", "¿cuándo vence?")).toBe(
+      "[Mensaje del usuario adjunto a la imagen]\n¿cuándo vence?\n\n" +
+        "[Texto extraído de la imagen por el sistema]\nTotal: $120",
+    );
   });
 
-  it("rejects very large file (100 MB)", () => {
-    expect(isWithinSizeLimit(100 * 1024 * 1024)).toBe(false);
-  });
-
-  it("handles typical image sizes", () => {
-    // 500 KB JPEG
-    expect(isWithinSizeLimit(500 * 1024)).toBe(true);
-    // 5 MB PNG
-    expect(isWithinSizeLimit(5 * 1024 * 1024)).toBe(true);
-    // 15 MB TIFF-like (rejected since over 10 MB)
-    expect(isWithinSizeLimit(15 * 1024 * 1024)).toBe(false);
+  it("marca explícitamente cuando el OCR no produjo contenido", () => {
+    expect(buildImageContextText("", "describe el problema")).toBe(
+      "[Mensaje del usuario adjunto a la imagen]\ndescribe el problema\n\n" +
+        "[La extracción de texto de la imagen no produjo contenido legible]",
+    );
   });
 });

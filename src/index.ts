@@ -184,7 +184,17 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
+async function bootstrap(): Promise<void> {
+  if (process.argv.includes("--media-worker")) {
+    const { runMediaProcessorChild } = await import("./media-processing/worker.ts");
+    await runMediaProcessorChild();
+    process.exit(0);
+  }
+
+  await main();
+}
+
+bootstrap().catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`❌ Error fatal: ${message}`);
   process.exit(1);

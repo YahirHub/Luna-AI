@@ -60,3 +60,5 @@ coverage/
 tmp/
 temp/
 *.tmp
+
+assets/runtime/
