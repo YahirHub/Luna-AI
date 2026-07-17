@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { unlinkSync } from "node:fs";
+import { rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthManager } from "../src/auth.ts";
@@ -77,6 +77,19 @@ describe("AuthManager — creación de admin", () => {
     const auth = createIsolatedAuth();
     await auth.createAdmin("admin", "pass1234");
     expect(auth.createAdmin("admin", "otra")).rejects.toThrow();
+  });
+});
+
+describe("AuthManager — consistencia de persistencia", () => {
+  it("revierte el usuario en memoria cuando no puede guardar", async () => {
+    const blocker = join(tmpdir(), `codewolf-auth-blocker-${Date.now()}`);
+    writeFileSync(blocker, "no es un directorio");
+    const auth = new AuthManager(join(blocker, "users.json"));
+
+    await expect(auth.createAdmin("admin", "pass1234")).rejects.toThrow();
+    expect(auth.userExists()).toBe(false);
+
+    rmSync(blocker, { force: true });
   });
 });
 
@@ -314,5 +327,22 @@ describe("AuthManager — pending actions", () => {
     auth.clearPendingAction("jid1@s.whatsapp.net");
     expect(auth.getPendingAction("jid1@s.whatsapp.net")).toBeUndefined();
     expect(auth.getPendingAction("jid2@s.whatsapp.net")).toBeDefined();
+  });
+});
+
+describe("AuthManager — persistencia de baneo", () => {
+  it("no restaura una sesión eliminada por banUser", async () => {
+    const path = join(tmpdir(), `luna-auth-ban-persist-${Date.now()}.json`);
+    const auth = new AuthManager(path);
+    await auth.createAdmin("admin", "pass1234");
+    await auth.login("jid-ban@s.whatsapp.net", "admin", "pass1234");
+
+    auth.banUser("admin");
+
+    const reloaded = new AuthManager(path);
+    expect(reloaded.isLoggedIn("jid-ban@s.whatsapp.net")).toBe(false);
+    expect(reloaded.findUser("admin")?.banned).toBe(true);
+
+    try { unlinkSync(path); } catch {}
   });
 });

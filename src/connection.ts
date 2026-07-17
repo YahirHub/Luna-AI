@@ -83,7 +83,7 @@ export async function connectToWhatsApp(
 
   // ── Mensajes entrantes ─────────────────────────────────────────
 
-  sock.ev.on("messages.upsert", (m) => {
+  sock.ev.on("messages.upsert", (m: { type: string; messages: WAMessage[] }) => {
     if (m.type !== "notify") {
       return;
     }
@@ -99,7 +99,11 @@ export async function connectToWhatsApp(
   let pairingCodeRequested = false;
 
   const connectionResult = await new Promise<boolean>((resolve) => {
-    sock.ev.on("connection.update", async (update) => {
+    sock.ev.on("connection.update", async (update: {
+      connection?: "open" | "connecting" | "close";
+      qr?: string;
+      lastDisconnect?: { error?: unknown };
+    }) => {
       const { connection, qr, lastDisconnect } = update;
 
       if (connection === "open") {
@@ -147,6 +151,7 @@ export async function connectToWhatsApp(
             `${dim("Abre WhatsApp → Ajustes → Dispositivos vinculados → Vincular un dispositivo → Introduce este código")}`,
           );
         } catch (err: unknown) {
+          pairingCodeRequested = false;
           console.error(
             "\n❌ Error al solicitar código de vinculación:",
             err instanceof Error ? err.message : String(err),
@@ -155,6 +160,7 @@ export async function connectToWhatsApp(
       }
 
       if (connection === "close") {
+        setSocket(null);
         const statusCode = (
           lastDisconnect?.error as {
             output?: { statusCode?: number };

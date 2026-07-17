@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
+import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -24,8 +24,24 @@ export interface PendingAction {
 /** Formato del archivo users.json. */
 interface UsersFile {
   users: UserRecord[];
-  /** Sesiones activas: JID -> nombre de usuario. Se persiste para que sobreviva a reinicios. */
+  /** Sesiones activas: JID -> nombre de usuario. */
   sessions?: Record<string, string>;
+}
+
+function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function isUserRecord(value: unknown): value is UserRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<UserRecord>;
+  return (
+    typeof record.username === "string" &&
+    typeof record.passwordHash === "string" &&
+    (record.role === "admin" || record.role === "user") &&
+    typeof record.banned === "boolean" &&
+    typeof record.createdAt === "string"
+  );
 }
 
 // ─── AuthManager ─────────────────────────────────────────────────
@@ -38,10 +54,6 @@ export class AuthManager {
   private pendingActions = new Map<string, PendingAction>();
   private readonly usersPath: string;
 
-  /**
-   * @param testPath Opcional. Ruta personalizada para el archivo de usuarios
-   *                (usado en tests para evitar contaminar datos reales).
-   */
   constructor(testPath?: string) {
     this.usersPath = testPath ?? join(getAppDir(), "persistent", "users.json");
     this.load();
@@ -49,24 +61,29 @@ export class AuthManager {
 
   // ── Persistencia ─────────────────────────────────────────────
 
-  private ensureDir(): void {
-    const dir = dirname(this.usersPath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-  }
-
   private load(): void {
     try {
-      if (existsSync(this.usersPath)) {
-        const raw = readFileSync(this.usersPath, "utf-8");
-        const data = JSON.parse(raw) as UsersFile;
-        this.users = data.users ?? [];
-        // Restaurar sesiones activas
-        if (data.sessions) {
-          this.sessions = new Map(Object.entries(data.sessions));
-        }
-      }
+      const data = readJsonFile<UsersFile>(this.usersPath);
+      if (!data) return;
+
+      this.users = Array.isArray(data.users)
+        ? data.users.filter(isUserRecord).map((user) => ({
+            ...user,
+            username: normalizeUsername(user.username),
+          }))
+        : [];
+
+      const validUsers = new Map(this.users.map((user) => [user.username, user]));
+      const restoredSessions = Object.entries(data.sessions ?? {}).filter(
+        ([jid, username]) => {
+          if (typeof username !== "string") return false;
+          const user = validUsers.get(normalizeUsername(username));
+          return Boolean(jid && user && !user.banned);
+        },
+      );
+      this.sessions = new Map(
+        restoredSessions.map(([jid, username]) => [jid, normalizeUsername(username)]),
+      );
     } catch (err) {
       console.warn("[auth] Error al cargar usuarios, comenzando de cero:", err);
       this.users = [];
@@ -75,126 +92,121 @@ export class AuthManager {
   }
 
   private save(): void {
-    this.ensureDir();
+    const sessions = Object.fromEntries(this.sessions);
+    writeJsonFileAtomically(this.usersPath, { users: this.users, sessions });
+  }
+
+  /** Revierte usuarios y sesiones si el cambio no puede persistirse. */
+  private persistMutation<T>(mutate: () => T): T {
+    const usersSnapshot = this.users.map((user) => ({ ...user }));
+    const sessionsSnapshot = new Map(this.sessions);
     try {
-      const sessionsObj: Record<string, string> = {};
-      for (const [jid, username] of this.sessions) {
-        sessionsObj[jid] = username;
-      }
-      const data: UsersFile = { users: this.users, sessions: sessionsObj };
-      writeFileSync(this.usersPath, JSON.stringify(data, null, 2), "utf-8");
+      const result = mutate();
+      this.save();
+      return result;
     } catch (err) {
-      console.error("[auth] Error al guardar usuarios:", err);
+      this.users = usersSnapshot;
+      this.sessions = sessionsSnapshot;
+      throw err;
     }
   }
 
   // ── Consultas ────────────────────────────────────────────────
 
-  /** Retorna true si existe al menos un usuario registrado. */
   userExists(): boolean {
     return this.users.length > 0;
   }
 
-  /** Busca un usuario por nombre (case-insensitive). */
   findUser(username: string): UserRecord | undefined {
-    return this.users.find((u) => u.username === username.toLowerCase());
+    const normalized = normalizeUsername(username);
+    return this.users.find((user) => user.username === normalized);
   }
 
-  /** Retorna true si el usuario tiene rol admin. */
   isAdmin(username: string): boolean {
-    const user = this.findUser(username);
-    return user?.role === "admin";
+    return this.findUser(username)?.role === "admin";
   }
 
   // ── Gestión de usuarios ──────────────────────────────────────
 
-  /** Crea el primer usuario administrador. */
   async createAdmin(username: string, password: string): Promise<void> {
-    const normalized = username.toLowerCase();
-    // Prevenir duplicados
-    if (this.findUser(normalized)) {
-      throw new Error(`El usuario '${normalized}' ya existe.`);
-    }
-    const hash = await Bun.password.hash(password);
-    this.users.push({
-      username: normalized,
-      passwordHash: hash,
-      role: "admin",
-      banned: false,
-      createdAt: new Date().toISOString(),
-    });
-    this.save();
+    await this.createUser(username, password, "admin");
   }
 
-  /** Agrega un nuevo usuario (no admin). */
-  async addUser(username: string, password: string, role: "admin" | "user"): Promise<void> {
-    const normalized = username.toLowerCase();
-    // Prevenir duplicados
+  async addUser(
+    username: string,
+    password: string,
+    role: "admin" | "user",
+  ): Promise<void> {
+    await this.createUser(username, password, role);
+  }
+
+  private async createUser(
+    username: string,
+    password: string,
+    role: "admin" | "user",
+  ): Promise<void> {
+    const normalized = normalizeUsername(username);
+    if (!normalized) {
+      throw new Error("El nombre de usuario no puede estar vacío.");
+    }
     if (this.findUser(normalized)) {
       throw new Error(`El usuario '${normalized}' ya existe.`);
     }
-    const hash = await Bun.password.hash(password);
-    this.users.push({
+
+    const passwordHash = await Bun.password.hash(password);
+    const user: UserRecord = {
       username: normalized,
-      passwordHash: hash,
+      passwordHash,
       role,
       banned: false,
       createdAt: new Date().toISOString(),
-    });
-    this.save();
+    };
+    this.persistMutation(() => this.users.push(user));
   }
 
-  /** Obtiene una copia profunda de la lista de usuarios. */
   getUserList(): UserRecord[] {
-    return this.users.map((u) => ({ ...u }));
+    return this.users.map((user) => ({ ...user }));
   }
 
   // ── Sesiones ─────────────────────────────────────────────────
 
-  /** Verifica credenciales e inicia sesión. Retorna true si es exitoso. */
   async login(jid: string, username: string, password: string): Promise<boolean> {
     const user = this.findUser(username);
-    if (!user || user.banned) {
-      return false;
-    }
+    if (!user || user.banned) return false;
+
     const match = await Bun.password.verify(password, user.passwordHash);
-    if (match) {
-      // Sesión única por usuario: remover sesiones existentes
-      const canonical = user.username; // siempre minúsculas
-      for (const [existingJid, u] of this.sessions) {
-        if (u === canonical) {
+    if (!match) return false;
+
+    this.persistMutation(() => {
+      for (const [existingJid, existingUsername] of this.sessions) {
+        if (existingUsername === user.username) {
           this.sessions.delete(existingJid);
         }
       }
       this.sessions.set(jid, user.username);
-      this.save();
-      return true;
-    }
-    return false;
+    });
+    return true;
   }
 
-  /** Retorna true si el JID tiene una sesión activa. */
   isLoggedIn(jid: string): boolean {
     return this.sessions.has(jid);
   }
 
-  /** Obtiene el nombre de usuario de la sesión activa para un JID. */
   getUsername(jid: string): string | undefined {
     return this.sessions.get(jid);
   }
 
-  /** Obtiene el JID de la sesión activa para un nombre de usuario. */
   getJid(username: string): string | undefined {
-    for (const [jid, u] of this.sessions) {
-      if (u === username) return jid;
+    const normalized = normalizeUsername(username);
+    for (const [jid, activeUsername] of this.sessions) {
+      if (activeUsername === normalized) return jid;
     }
     return undefined;
   }
 
-  /** Cierra la sesión de un JID. */
   logout(jid: string): void {
-    this.sessions.delete(jid);
-    this.save();
+    if (!this.sessions.has(jid)) return;
+    this.persistMutation(() => this.sessions.delete(jid));
   }
 
   // ── Baneo ────────────────────────────────────────────────────
@@ -203,38 +215,35 @@ export class AuthManager {
   banUser(username: string): void {
     const user = this.findUser(username);
     if (!user) return;
-    user.banned = true;
-    this.save();
-    // Eliminar todas las sesiones de este username
-    const canonical = user.username; // siempre minúsculas
-    for (const [jid, u] of this.sessions) {
-      if (u === canonical) {
-        this.sessions.delete(jid);
+
+    this.persistMutation(() => {
+      user.banned = true;
+      for (const [jid, activeUsername] of this.sessions) {
+        if (activeUsername === user.username) {
+          this.sessions.delete(jid);
+        }
       }
-    }
+    });
   }
 
-  /** Desbanea a un usuario. */
   unbanUser(username: string): void {
     const user = this.findUser(username);
     if (!user) return;
-    user.banned = false;
-    this.save();
+    this.persistMutation(() => {
+      user.banned = false;
+    });
   }
 
   // ── Acciones pendientes (flujo interactivo) ──────────────────
 
-  /** Obtiene la acción pendiente para un JID. */
   getPendingAction(jid: string): PendingAction | undefined {
     return this.pendingActions.get(jid);
   }
 
-  /** Establece una acción pendiente para un JID. */
   setPendingAction(jid: string, action: PendingAction): void {
     this.pendingActions.set(jid, action);
   }
 
-  /** Elimina la acción pendiente para un JID. */
   clearPendingAction(jid: string): void {
     this.pendingActions.delete(jid);
   }

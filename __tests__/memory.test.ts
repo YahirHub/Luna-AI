@@ -189,3 +189,17 @@ describe("MEMORY_TOOLS — definiciones", () => {
     }
   });
 });
+
+describe("MemoryManager — límites", () => {
+  it("rechaza contenido que excede el límite persistente", async () => {
+    const { MAX_MEMORY_CHARS } = await import("../src/memory.ts");
+    const mm = createIsolatedMemory();
+    const result = await executeMemoryTool(
+      "memory_write",
+      { content: "x".repeat(MAX_MEMORY_CHARS + 1), mode: "overwrite" },
+      mm,
+      TEST_JID,
+    );
+    expect(result).toContain("Error");
+  });
+});

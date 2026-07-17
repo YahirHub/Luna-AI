@@ -1,5 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { normalizePhoneNumber, isValidPhoneNumber } from "../src/utils.ts";
+import {
+  normalizePhoneNumber,
+  isValidPhoneNumber,
+  isValidYmdDate,
+} from "../src/utils.ts";
 
 describe("normalizePhoneNumber", () => {
   it("removes spaces, dashes, and parentheses", () => {
@@ -78,5 +82,18 @@ describe("normalizePhoneNumber + isValidPhoneNumber integration", () => {
       const normalized = normalizePhoneNumber(input);
       expect(isValidPhoneNumber(normalized)).toBe(true);
     }
+  });
+});
+
+describe("isValidYmdDate", () => {
+  it("acepta fechas calendario reales", () => {
+    expect(isValidYmdDate("2026-02-28")).toBe(true);
+    expect(isValidYmdDate("2028-02-29")).toBe(true);
+  });
+
+  it("rechaza formato o fechas imposibles", () => {
+    expect(isValidYmdDate("2026-02-29")).toBe(false);
+    expect(isValidYmdDate("2026-13-01")).toBe(false);
+    expect(isValidYmdDate("16/07/2026")).toBe(false);
   });
 });

@@ -1,10 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { ChatMessage } from "./ai.ts";
 import { getAppDir, getMexicoCityNow } from "./utils.ts";
 import type { MemoryManager } from "./memory.ts";
 import type { CompactionMetadata } from "./compaction.ts";
 import { summaryToTextBlock } from "./compaction.ts";
+import {
+  readJsonFile,
+  sanitizePathSegment,
+  writeJsonFileAtomically,
+} from "./storage.ts";
 
 export const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
 
@@ -16,6 +20,52 @@ interface UserContextData {
   awaitingModelSelection: boolean;
   /** Metadatos de compactación (undefined si nunca se ha compactado). */
   compaction?: CompactionMetadata;
+}
+
+const VALID_MESSAGE_ROLES = new Set(["system", "user", "assistant", "tool"]);
+
+function normalizePersistedMessage(value: unknown): ChatMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.role !== "string" || !VALID_MESSAGE_ROLES.has(raw.role)) {
+    return null;
+  }
+
+  const role = raw.role as ChatMessage["role"];
+  const toolCalls = Array.isArray(raw.tool_calls)
+    ? raw.tool_calls.filter((call) => {
+        if (!call || typeof call !== "object") return false;
+        const candidate = call as Record<string, unknown>;
+        const fn = candidate.function as Record<string, unknown> | undefined;
+        return (
+          typeof candidate.id === "string" &&
+          candidate.type === "function" &&
+          fn != null &&
+          typeof fn.name === "string" &&
+          typeof fn.arguments === "string"
+        );
+      }) as ChatMessage["tool_calls"]
+    : undefined;
+
+  const content = typeof raw.content === "string"
+    ? raw.content
+    : role === "assistant" && toolCalls?.length
+      ? ""
+      : null;
+  if (content === null) return null;
+
+  if (role === "tool" && typeof raw.tool_call_id !== "string") {
+    return null;
+  }
+
+  return {
+    role,
+    content,
+    ...(typeof raw.tool_call_id === "string"
+      ? { tool_call_id: raw.tool_call_id }
+      : {}),
+    ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+  };
 }
 
 /** Retorna la hora actual en CDMX formateada legible. */
@@ -76,30 +126,13 @@ function buildSystemPrompt(): ChatMessage {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-function safeJid(jid: string): string {
-  return jid.replace(/[^a-zA-Z0-9@._-]/g, "_");
-}
-
 function contextFilePath(jid: string): string {
-  return join(CONTEXTS_DIR, safeJid(jid), "context.json");
+  return join(CONTEXTS_DIR, sanitizePathSegment(jid), "context.json");
 }
 
 /** Ruta al archivo memory.md de un usuario. */
 export function getMemoryPath(jid: string): string {
-  return join(CONTEXTS_DIR, safeJid(jid), "memory.md");
-}
-
-function ensureUserDir(jid: string): void {
-  const dir = join(CONTEXTS_DIR, safeJid(jid));
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-}
-
-function ensureContextsDir(): void {
-  if (!existsSync(CONTEXTS_DIR)) {
-    mkdirSync(CONTEXTS_DIR, { recursive: true });
-  }
+  return join(CONTEXTS_DIR, sanitizePathSegment(jid), "memory.md");
 }
 
 // ─── Gestor de contextos ─────────────────────────────────────────
@@ -112,6 +145,11 @@ export class ContextManager {
   private locks = new Map<string, Promise<void>>();
 
   constructor(defaultModel: string) {
+    this.defaultModel = defaultModel;
+  }
+
+  /** Actualiza el modelo inicial sin modificar selecciones ya persistidas. */
+  setDefaultModel(defaultModel: string): void {
     this.defaultModel = defaultModel;
   }
 
@@ -134,6 +172,9 @@ export class ContextManager {
       return await fn();
     } finally {
       release();
+      if (this.locks.get(jid) === next) {
+        this.locks.delete(jid);
+      }
     }
   }
 
@@ -149,11 +190,6 @@ export class ContextManager {
     } catch {
       return "";
     }
-  }
-
-  /** Actualiza el modelo por defecto sin crear nueva instancia. */
-  setDefaultModel(model: string): void {
-    this.defaultModel = model;
   }
 
   /** Construye el system prompt estático (sin datos dinámicos). */
@@ -188,32 +224,31 @@ export class ContextManager {
       return cached;
     }
 
-    ensureContextsDir();
-    const path = contextFilePath(jid);
-
-    if (existsSync(path)) {
-      try {
-        const raw = readFileSync(path, "utf-8");
-        const data = JSON.parse(raw) as UserContextData;
-        // Asegurar que existe el directorio y memory.md del usuario
-        ensureUserDir(jid);
+    try {
+      const data = readJsonFile<UserContextData>(contextFilePath(jid));
+      if (data && Array.isArray(data.messages)) {
+        data.messages = data.messages
+          .map(normalizePersistedMessage)
+          .filter((message): message is ChatMessage => message !== null);
         this.memoryManager?.init(jid);
-        // Asegurar que el system prompt es el estático
-        const systemIdx = data.messages.findIndex((m) => m.role === "system");
+        const systemIdx = data.messages.findIndex((message) => message.role === "system");
         if (systemIdx >= 0) {
           data.messages[systemIdx] = this.makeSystemPrompt();
         } else {
           data.messages.unshift(this.makeSystemPrompt());
         }
+        data.jid = jid;
+        data.model = typeof data.model === "string" && data.model
+          ? data.model
+          : this.defaultModel;
+        data.awaitingModelSelection = data.awaitingModelSelection === true;
         this.contexts.set(jid, data);
         return data;
-      } catch {
-        console.warn(`[ctx] Error al leer contexto de ${jid}, creando nuevo`);
       }
+    } catch (err) {
+      console.warn(`[ctx] Error al leer contexto de ${jid}, creando nuevo:`, err);
     }
 
-    // Crear directorio y memoria del usuario
-    ensureUserDir(jid);
     this.memoryManager?.init(jid);
 
     const fresh: UserContextData = {
@@ -226,35 +261,16 @@ export class ContextManager {
     return fresh;
   }
 
-  /** Guarda el contexto a disco (escritura directa). */
+  /** Guarda el contexto con reemplazo atómico. */
   saveContext(jid: string): void {
-    const ctx = this.contexts.get(jid);
-    if (!ctx) {
-      return;
-    }
-    ensureUserDir(jid);
-    try {
-      writeFileSync(contextFilePath(jid), JSON.stringify(ctx, null, 2), "utf-8");
-    } catch (err) {
-      console.error(`[ctx] Error al guardar contexto de ${jid}:`, err);
-    }
+    const context = this.contexts.get(jid);
+    if (!context) return;
+    writeJsonFileAtomically(contextFilePath(jid), context);
   }
 
-  /** Guarda el contexto con escritura atómica (temp file + rename). */
+  /** Alias conservado para compatibilidad con el flujo de compactación. */
   saveContextAtomically(jid: string): void {
-    const ctx = this.contexts.get(jid);
-    if (!ctx) {
-      return;
-    }
-    ensureUserDir(jid);
-    const finalPath = contextFilePath(jid);
-    const tempPath = `${finalPath}.tmp`;
-    try {
-      writeFileSync(tempPath, JSON.stringify(ctx, null, 2), "utf-8");
-      renameSync(tempPath, finalPath);
-    } catch (err) {
-      console.error(`[ctx] Error al guardar contexto atómicamente de ${jid}:`, err);
-    }
+    this.saveContext(jid);
   }
 
   /**

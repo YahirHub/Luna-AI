@@ -3,17 +3,38 @@ import { join } from "node:path";
 import * as readline from "node:readline";
 import { runWithReconnect, getAuthDir } from "./connection.ts";
 import type { AuthMode } from "./connection.ts";
-import { handleMessage, initAi } from "./bot.ts";
+import { handleMessage, initLlm } from "./bot.ts";
+import {
+  getLlmConfigPath,
+  loadLlmConfigIfPresent,
+} from "./llm-config.ts";
 
-// ─── AI config (hardcoded — no .env necesario) ───────────────────
+// ─── Configuración LLM ───────────────────────────────────────────
 
-const AI_BASE_URL = "https://opencode.ai/zen/v1";
+function initLlmFromFile(): void {
+  const configPath = getLlmConfigPath();
 
-function initAiFromEnv(): void {
-  initAi({
-    baseUrl: AI_BASE_URL,
-    apiKey: process.env.AI_API_KEY ?? "",
-  });
+  try {
+    const config = loadLlmConfigIfPresent(configPath);
+    initLlm(config, configPath);
+
+    if (!config) {
+      console.log("🧠 Proveedor integrado activo: OpenCode Free");
+      console.log("   /setup-provider es opcional y permite usar un proveedor personalizado.\n");
+      return;
+    }
+
+    console.log(`🧠 Proveedor personalizado cargado: ${configPath}`);
+    console.log(`   Modelo predeterminado: ${config.defaultModel}`);
+    console.log("   El catálogo se actualizará en segundo plano.\n");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️ No se pudo cargar la configuración LLM: ${reason}`);
+    console.warn(
+      "   Se usará OpenCode Free y el administrador podrá reparar el proveedor con /setup-provider.\n",
+    );
+    initLlm(null, configPath);
+  }
 }
 
 // ─── Session detection ──────────────────────────────────────────
@@ -104,8 +125,8 @@ async function main(): Promise<void> {
   console.log(`\n${ANSI.bold}🤖 WhatsApp Bot${ANSI.reset}`);
   console.log(`${ANSI.gray}${"─".repeat(35)}${ANSI.reset}\n`);
 
-  // Inicializar AI (URL hardcodeada)
-  initAiFromEnv();
+  // Cargar el proveedor si ya fue configurado. Su ausencia no impide vincular WhatsApp.
+  initLlmFromFile();
 
   // Parsear flags
   const forceQr = process.argv.includes("--qr");
@@ -164,6 +185,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error("❌ Error fatal:", err);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`❌ Error fatal: ${message}`);
   process.exit(1);
 });

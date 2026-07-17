@@ -1,7 +1,6 @@
 # ─── Dependencies ─────────────────────────────────────────────────
 node_modules/
 .bun/
-bun.lock
 
 # ─── Build output ────────────────────────────────────────────────
 dist/
@@ -26,6 +25,10 @@ auth_info_baileys/
 auth/
 uploads/
 contexts/
+
+# ─── LLM configuration and secrets ───────────────────────────────
+llm.config.json
+llm.config.*.json
 
 # ─── Environment variables ───────────────────────────────────────
 .env

@@ -1,10 +1,4 @@
-/** Modelo devuelto por la API de OpenAI. */
-interface ApiModel {
-  id: string;
-  object: string;
-  created: number;
-  owned_by: string;
-}
+import type { LlmConfig } from "./llm-config.ts";
 
 /** Mensaje en formato OpenAI. */
 export interface ChatMessage {
@@ -13,12 +7,6 @@ export interface ChatMessage {
   tool_call_id?: string;
   /** Solo para mensajes assistant con tool_calls. */
   tool_calls?: ToolCall[];
-}
-
-/** Opciones para la API. */
-export interface AiConfig {
-  baseUrl: string;
-  apiKey: string;
 }
 
 // ─── Tool calling types ─────────────────────────────────────────
@@ -43,6 +31,38 @@ export interface ToolCall {
 
 // ─── Internal raw request helper ────────────────────────────────
 
+
+class HttpStatusError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpStatusError";
+    this.status = status;
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function shouldRetry(error: Error): boolean {
+  if (error instanceof HttpStatusError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  return true;
+}
+
 interface RawRequestOptions {
   model: string;
   messages: ChatMessage[];
@@ -56,13 +76,13 @@ interface RawRequestOptions {
  */
 async function rawChatRequest(
   body: RawRequestOptions,
-  config: AiConfig,
+  config: LlmConfig,
   maxRetries = 3,
 ): Promise<{
   content: string | null;
   tool_calls?: ToolCall[];
 }> {
-  const url = `${config.baseUrl}/chat/completions`;
+  const url = config.chatCompletionsUrl;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (config.apiKey) {
     headers["Authorization"] = `Bearer ${config.apiKey}`;
@@ -96,15 +116,16 @@ async function rawChatRequest(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: bodyStr,
-      });
+      const response = await fetchWithTimeout(
+        url,
+        { method: "POST", headers, body: bodyStr },
+        config.requestTimeoutMs,
+      );
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        throw new Error(
+        throw new HttpStatusError(
+          response.status,
           `Error (${response.status}): ${text.slice(0, 300)}`,
         );
       }
@@ -132,12 +153,14 @@ async function rawChatRequest(
       };
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxRetries) {
+      if (attempt < maxRetries && shouldRetry(lastError)) {
         const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
         console.warn(
           `[ai] Intento ${attempt}/${maxRetries} falló — reintentando en ${backoff}ms...`,
         );
         await new Promise((r) => setTimeout(r, backoff));
+      } else {
+        break;
       }
     }
   }
@@ -152,7 +175,7 @@ async function rawChatRequest(
 export async function chatCompletion(
   messages: ChatMessage[],
   model: string,
-  config: AiConfig,
+  config: LlmConfig,
   maxRetries = 3,
   maxTokens?: number,
 ): Promise<string> {
@@ -172,7 +195,7 @@ export async function chatCompletion(
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
   model: string,
-  config: AiConfig,
+  config: LlmConfig,
   tools: ToolDefinition[],
   executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
   maxRetries = 3,
@@ -238,16 +261,21 @@ export async function chatCompletionWithTools(
 }
 
 /**
- * Obtiene la lista de modelos de la API y filtra los que terminan en "-free".
+ * Obtiene la lista de modelos del endpoint configurado.
+ * No aplica filtros por sufijo, proveedor o nombre: el endpoint es la fuente
+ * de verdad y solo se descartan identificadores vacíos o duplicados.
  */
-export async function fetchFreeModels(config: AiConfig): Promise<string[]> {
-  const url = `${config.baseUrl}/models`;
+export async function fetchModels(config: LlmConfig): Promise<string[]> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (config.apiKey) {
     headers["Authorization"] = `Bearer ${config.apiKey}`;
   }
 
-  const response = await fetch(url, { headers });
+  const response = await fetchWithTimeout(
+    config.modelsUrl,
+    { headers },
+    config.requestTimeoutMs,
+  );
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
@@ -256,16 +284,50 @@ export async function fetchFreeModels(config: AiConfig): Promise<string[]> {
     );
   }
 
-  const data = (await response.json()) as { data?: ApiModel[] };
+  const payload = (await response.json()) as { data?: unknown };
 
-  if (!data.data || !Array.isArray(data.data)) {
-    throw new Error("Respuesta inesperada de /models");
+  if (!Array.isArray(payload.data)) {
+    throw new Error("Respuesta inesperada del endpoint de modelos");
   }
 
-  return data.data
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.endsWith("-free"))
-    .sort();
+  const ids = payload.data.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || !("id" in entry)) {
+      return [];
+    }
+    const id = (entry as { id?: unknown }).id;
+    return typeof id === "string" && id.trim() !== "" ? [id.trim()] : [];
+  });
+
+  return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
+}
+
+export interface ModelDiscoveryResult {
+  models: string[];
+  usedFallback: boolean;
+  error?: Error;
+}
+
+/**
+ * Consulta el catálogo y garantiza que siempre exista al menos el modelo
+ * predeterminado. El modelo configurado se mantiene como primera opción.
+ */
+export async function discoverModels(
+  config: LlmConfig,
+): Promise<ModelDiscoveryResult> {
+  try {
+    const discovered = await fetchModels(config);
+    const models = [
+      config.defaultModel,
+      ...discovered.filter((model) => model !== config.defaultModel),
+    ];
+    return { models, usedFallback: discovered.length === 0 };
+  } catch (error) {
+    return {
+      models: [config.defaultModel],
+      usedFallback: true,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
 }
 
 /**

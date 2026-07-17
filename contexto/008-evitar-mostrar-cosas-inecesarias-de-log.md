@@ -1,4 +1,4 @@
-﻿<!-- codewolf:auto-context:record -->
+<!-- codewolf:auto-context:record -->
 # 008 — Evitar mostrar cosas inecesarias de log
 
 # Fecha
@@ -23,6 +23,6 @@ Evitar mostrar cosas inecesarias de log.
 - Sesión existente detectada: salta el menú, conecta directo
 - Logger de Baileys silenciado al nivel fatal con pino — adiós a los JSON de "connected to WA", "connection errored", etc.
 - Solo se muestran los mensajes del bot con formato limpio y colores ANSI
-- AI_BASE_URL = "https://opencode.ai/zen/v1" configurado internamente — no necesita.env
-- AI_API_KEY opcional desde variable de entorno
+- El endpoint del proveedor se configuraba internamente
+- La API key era opcional mediante configuración externa
 

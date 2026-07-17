@@ -1,5 +1,5 @@
 # ─── Build stage: compilar a binario standalone ───────────────────
-FROM oven/bun:alpine AS build
+FROM oven/bun:1.3.14-alpine AS build
 
 WORKDIR /app
 

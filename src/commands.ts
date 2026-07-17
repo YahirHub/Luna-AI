@@ -81,6 +81,8 @@ export function registerCommand(
   descriptions.set(key, description);
   if (adminOnly) {
     adminCommands.add(key);
+  } else {
+    adminCommands.delete(key);
   }
 }
 

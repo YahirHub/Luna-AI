@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { getAppDir, getMexicoCityNow } from "./utils.ts";
+import { join } from "node:path";
+import { getAppDir, getMexicoCityNow, isValidYmdDate } from "./utils.ts";
+import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
 import type { WASocket } from "@whiskeysockets/baileys";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -15,6 +15,8 @@ export interface Reminder {
   date: string;
   createdAt: string;
   fired: boolean;
+  /** Se activa antes de enviar para poder reintentar tras fallos o reinicios. */
+  deliveryPending?: boolean;
 }
 
 /** Formato del archivo reminders.json. */
@@ -29,6 +31,7 @@ export class ReminderManager {
   private readonly filePath: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private sock: WASocket | null = null;
+  private checking = false;
 
   constructor(testPath?: string) {
     this.filePath = testPath ?? join(getAppDir(), "persistent", "reminders.json");
@@ -37,20 +40,10 @@ export class ReminderManager {
 
   // ── Persistencia ─────────────────────────────────────────────
 
-  private ensureDir(): void {
-    const dir = dirname(this.filePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-  }
-
   private load(): void {
     try {
-      if (existsSync(this.filePath)) {
-        const raw = readFileSync(this.filePath, "utf-8");
-        const data = JSON.parse(raw) as RemindersFile;
-        this.reminders = data.reminders ?? [];
-      }
+      const data = readJsonFile<RemindersFile>(this.filePath);
+      this.reminders = Array.isArray(data?.reminders) ? data.reminders : [];
     } catch (err) {
       console.warn("[reminder] Error al cargar recordatorios:", err);
       this.reminders = [];
@@ -58,12 +51,19 @@ export class ReminderManager {
   }
 
   private save(): void {
-    this.ensureDir();
+    writeJsonFileAtomically(this.filePath, { reminders: this.reminders });
+  }
+
+  /** Revierte el estado en memoria si la persistencia falla. */
+  private persistMutation<T>(mutate: () => T): T {
+    const snapshot = this.reminders.map((reminder) => ({ ...reminder }));
     try {
-      const data: RemindersFile = { reminders: this.reminders };
-      writeFileSync(this.filePath, JSON.stringify(data, null, 2), "utf-8");
+      const result = mutate();
+      this.save();
+      return result;
     } catch (err) {
-      console.error("[reminder] Error al guardar recordatorios:", err);
+      this.reminders = snapshot;
+      throw err;
     }
   }
 
@@ -109,15 +109,15 @@ export class ReminderManager {
       date: targetDate,
       createdAt: new Date().toISOString(),
       fired: false,
+      deliveryPending: false,
     };
 
-    this.reminders.push(reminder);
-    this.save();
+    this.persistMutation(() => this.reminders.push(reminder));
 
     console.log(
       `[reminder] Creado recordatorio #${reminder.id.slice(0, 8)} ` +
       `para ${jid} a las ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ` +
-      `del ${targetDate}: "${text}"`,
+      `del ${targetDate}`,
     );
 
     return reminder;
@@ -154,19 +154,30 @@ export class ReminderManager {
 
     return this.reminders.filter((r) => {
       if (r.fired) return false;
+      if (r.deliveryPending) return true;
       if (r.date !== now.ymd) return false;
       const rTs = r.hour * 60 + r.minute;
       return rTs >= windowStart && rTs <= now.ts;
     });
   }
 
+  /** Persiste que el recordatorio ya entró al proceso de entrega. */
+  private markDeliveryPending(id: string): void {
+    const reminder = this.reminders.find((item) => item.id === id);
+    if (!reminder || reminder.fired || reminder.deliveryPending) return;
+    this.persistMutation(() => {
+      reminder.deliveryPending = true;
+    });
+  }
+
   /** Marca un recordatorio como disparado. */
   markFired(id: string): void {
-    const idx = this.reminders.findIndex((r) => r.id === id);
-    if (idx >= 0) {
-      this.reminders[idx]!.fired = true;
-      this.save();
-    }
+    const reminder = this.reminders.find((item) => item.id === id);
+    if (!reminder) return;
+    this.persistMutation(() => {
+      reminder.fired = true;
+      reminder.deliveryPending = false;
+    });
   }
 
   /** Obtiene la lista completa (lectura). */
@@ -178,8 +189,7 @@ export class ReminderManager {
   deleteById(id: string): boolean {
     const idx = this.reminders.findIndex((r) => r.id === id);
     if (idx >= 0) {
-      this.reminders.splice(idx, 1);
-      this.save();
+      this.persistMutation(() => this.reminders.splice(idx, 1));
       return true;
     }
     return false;
@@ -195,17 +205,24 @@ export class ReminderManager {
     if (this.intervalId !== null) return; // ya iniciado
 
     this.intervalId = setInterval(async () => {
-      const due = this.getDueReminders();
-      for (const reminder of due) {
-        try {
-          await onDue(reminder, this.sock);
-          this.markFired(reminder.id);
-        } catch (err) {
-          console.error(
-            `[reminder] Error al disparar recordatorio #${reminder.id.slice(0, 8)}:`,
-            err,
-          );
+      if (this.checking) return;
+      this.checking = true;
+      try {
+        const due = this.getDueReminders();
+        for (const reminder of due) {
+          try {
+            this.markDeliveryPending(reminder.id);
+            await onDue(reminder, this.sock);
+            this.markFired(reminder.id);
+          } catch (err) {
+            console.error(
+              `[reminder] Error al disparar recordatorio #${reminder.id.slice(0, 8)}:`,
+              err,
+            );
+          }
         }
+      } finally {
+        this.checking = false;
       }
     }, 30_000);
 
@@ -395,7 +412,7 @@ export async function executeReminderTool(
 ): Promise<string> {
   switch (toolName) {
     case "create_reminder": {
-      const text = String(args.text ?? "");
+      const text = String(args.text ?? "").trim();
       const hour = Number(args.hour);
       const minute = Number(args.minute);
       const date = typeof args.date === "string" ? args.date : undefined;
@@ -403,11 +420,17 @@ export async function executeReminderTool(
       if (!text) {
         return "Error: el texto del recordatorio es obligatorio.";
       }
+      if (text.length > 500) {
+        return "Error: el texto del recordatorio no puede exceder 500 caracteres.";
+      }
       if (
         !Number.isInteger(hour) || hour < 0 || hour > 23 ||
         !Number.isInteger(minute) || minute < 0 || minute > 59
       ) {
         return "Error: hora debe ser 0-23 y minuto 0-59.";
+      }
+      if (date && !isValidYmdDate(date)) {
+        return "Error: la fecha debe ser una fecha real en formato YYYY-MM-DD.";
       }
 
       const reminder = reminderManager.createReminder(jid, text, hour, minute, date);

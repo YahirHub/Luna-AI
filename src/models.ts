@@ -1,10 +1,4 @@
-/**
- * Límites de tokens por modelo.
- *
- * Todos los modelos actuales usan el mismo límite de 120k tokens.
- * Si en el futuro se necesitan límites distintos por modelo,
- * se agrega un Map<string, ModelInfo> simple.
- */
+import { findOpenCodeFreeModelLimit } from "./providers/opencode-free.ts";
 
 // ─── Tipos ───────────────────────────────────────────────────────
 
@@ -15,7 +9,7 @@ export interface ModelInfo {
   description?: string;
 }
 
-// ─── Constantes ──────────────────────────────────────────────────
+// ─── Límites conservadores para modelos desconocidos ────────────
 
 export const DEFAULT_CONTEXT_TOKENS = 120_000;
 export const DEFAULT_OUTPUT_TOKENS = 8_000;
@@ -24,27 +18,34 @@ export const DEFAULT_OUTPUT_TOKENS = 8_000;
 
 export class ModelCatalog {
   /**
-   * Obtiene la información de contexto para un modelo específico.
-   * Actualmente todos los modelos usan el mismo límite.
+   * Obtiene límites por coincidencia del ID. Los modelos gratuitos integrados
+   * viven en su módulo de proveedor; cualquier ID desconocido usa un valor
+   * conservador para no retrasar demasiado la compactación.
    */
-  getModelInfo(_modelId: string): ModelInfo {
+  getModelInfo(modelId: string): ModelInfo {
+    const freeLimit = findOpenCodeFreeModelLimit(modelId);
+    if (freeLimit) {
+      return { ...freeLimit };
+    }
+
     return {
       pattern: "*",
       maxContextTokens: DEFAULT_CONTEXT_TOKENS,
       maxOutputTokens: DEFAULT_OUTPUT_TOKENS,
-      description: "Límite por defecto",
+      description: "Límite conservador para modelo desconocido",
     };
   }
 
   /**
    * Calcula el presupuesto efectivo de tokens de entrada.
-   * Fórmula: maxContextTokens - maxOutputTokens - toolsEstimate - margin(5%)
+   * Fórmula: contexto - salida - tools - margen del 5%.
    */
-  getEffectiveBudget(_modelId: string, toolsTokenEstimate: number = 4_000): number {
-    const margin = Math.floor(DEFAULT_CONTEXT_TOKENS * 0.05);
+  getEffectiveBudget(modelId: string, toolsTokenEstimate: number = 4_000): number {
+    const info = this.getModelInfo(modelId);
+    const margin = Math.floor(info.maxContextTokens * 0.05);
     const budget =
-      DEFAULT_CONTEXT_TOKENS -
-      DEFAULT_OUTPUT_TOKENS -
+      info.maxContextTokens -
+      info.maxOutputTokens -
       toolsTokenEstimate -
       margin;
 

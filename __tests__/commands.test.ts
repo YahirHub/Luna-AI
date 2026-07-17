@@ -31,6 +31,12 @@ describe("parseCommand", () => {
     expect(result!.name).toBe("models");
   });
 
+  it("parses administrative commands with hyphens", () => {
+    const result = parseCommand("/setup-provider");
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe("setup-provider");
+  });
+
   it("parses command with arguments", () => {
     const result = parseCommand("!ping extra arg");
     expect(result).not.toBeNull();

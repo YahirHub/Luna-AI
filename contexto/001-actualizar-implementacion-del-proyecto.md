@@ -1,4 +1,4 @@
-﻿<!-- codewolf:auto-context:record -->
+<!-- codewolf:auto-context:record -->
 # 001 — Actualizar implementación del proyecto
 
 # Fecha
@@ -11,7 +11,6 @@ Actualizar implementación del proyecto.
 
 # Archivos importantes modificados
 
-- .env.example
 - .gitignore
 - README.md
 - __tests__/commands.test.ts

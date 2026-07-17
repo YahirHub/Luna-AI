@@ -7,9 +7,22 @@ import {
   isPositiveInteger,
 } from "./commands.ts";
 import { downloadAndSaveImage } from "./media.ts";
-import { fetchFreeModels, chatCompletion, chatCompletionWithTools } from "./ai.ts";
-import type { AiConfig } from "./ai.ts";
-import { ContextManager, STATIC_SYSTEM_PROMPT_CONTENT } from "./context.ts";
+import {
+  discoverModels,
+  fetchModels,
+  chatCompletion,
+  chatCompletionWithTools,
+} from "./ai.ts";
+import {
+  ProviderSetupManager,
+  deleteLlmConfig,
+  saveLlmConfig,
+} from "./llm-config.ts";
+import type {
+  LlmConfig,
+  ProviderSetupStep,
+} from "./llm-config.ts";
+import { ContextManager } from "./context.ts";
 import { AuthManager } from "./auth.ts";
 import type { PendingAction } from "./auth.ts";
 import {
@@ -29,20 +42,36 @@ import {
 } from "./alarm.ts";
 import { modelCatalog } from "./models.ts";
 import {
+  OPENCODE_FREE_PROVIDER_NAME,
+  createOpenCodeFreeConfig,
+  filterOpenCodeFreeModels,
+  getOpenCodeFreeFallbackModels,
+} from "./providers/opencode-free.ts";
+import {
   selectMessagesForCompaction,
   buildCompactionPrompt,
   parseCompactedResponse,
   estimateRequestTokens,
 } from "./compaction.ts";
 import { estimateTokensAccurate } from "./ai.ts";
+import { sendWithTyping } from "./messaging.ts";
+import { deliverScheduledMessage } from "./scheduled-messages.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
-let aiConfig: AiConfig | null = null;
-let contextManager: ContextManager | null = null;
+type LlmProviderMode = "opencode-free" | "custom";
 
-/** Lista de modelos -free disponibles actualmente. */
+let llmConfig: LlmConfig | null = null;
+let llmProviderMode: LlmProviderMode = "opencode-free";
+let llmConfigPath = "";
+let contextManager: ContextManager | null = null;
+let schedulersStarted = false;
+
+/** Modelos disponibles actualmente; siempre incluye el predeterminado. */
 let availableModels: string[] = [];
+
+/** Flujo temporal para configurar el proveedor desde WhatsApp. */
+const providerSetupManager = new ProviderSetupManager();
 
 /** Gestor de autenticación y sesiones de usuario. */
 const authManager = new AuthManager();
@@ -65,6 +94,18 @@ const compactingJids = new Set<string>();
 /** Tools combinadas (memoria + recordatorios + alarmas). */
 const ALL_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
 
+const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
+  ["create_reminder", "⏰ Creando recordatorio..."],
+  ["delete_reminder", "🗑️ Eliminando recordatorio..."],
+  ["list_reminders", "📋 Consultando recordatorios..."],
+  ["memory_write", "📝 Escribiendo en memoria..."],
+  ["memory_read", "🔍 Leyendo memoria..."],
+  ["create_alarm", "⏰ Creando alarma recurrente..."],
+  ["delete_alarm", "🗑️ Eliminando alarma..."],
+  ["list_alarms", "📋 Consultando alarmas..."],
+  ["toggle_alarm", "🔄 Cambiando estado de alarma..."],
+]);
+
 // ─── Compactación de contexto ──────────────────────────────────
 
 /** Función externa (inyectada) para obtener la memoria de un JID. */
@@ -82,7 +123,7 @@ function getMemoryContent(jid: string): string {
  * Mientras compacta, ignora mensajes entrantes del mismo JID.
  */
 async function ensureContextCompaction(sock: WASocket, jid: string): Promise<void> {
-  if (!contextManager || !aiConfig) return;
+  if (!contextManager || !llmConfig) return;
 
   const modelId = contextManager.getModel(jid);
   const messages = contextManager.getMessages(jid);
@@ -141,7 +182,7 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
       const compactRaw = await chatCompletion(
         compactionMessages,
         modelId,
-        aiConfig,
+        llmConfig,
         2,
         4096,
       );
@@ -189,33 +230,108 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
   }
 }
 
-/** Inicializa el módulo AI con la configuración. */
-export function initAi(config: AiConfig): void {
-  aiConfig = config;
-  contextManager = new ContextManager("");
-  contextManager.setMemoryManager(memoryManager);
+/** Actualiza modelos desde el endpoint y aplica el fallback del proveedor activo. */
+async function refreshAvailableModels(): Promise<boolean> {
+  const configSnapshot = llmConfig;
+  const modeSnapshot = llmProviderMode;
+  if (!configSnapshot) {
+    availableModels = getOpenCodeFreeFallbackModels();
+    return true;
+  }
 
-  // Iniciar verificadores
+  if (modeSnapshot === "opencode-free") {
+    try {
+      const discovered = await fetchModels(configSnapshot);
+
+      // Ignorar una respuesta tardía si el administrador cambió de proveedor.
+      if (llmConfig !== configSnapshot || llmProviderMode !== modeSnapshot) {
+        return true;
+      }
+
+      const filtered = filterOpenCodeFreeModels(discovered);
+      const useLocalCatalog = filtered.length === 0;
+      availableModels = useLocalCatalog
+        ? getOpenCodeFreeFallbackModels()
+        : filtered;
+      return useLocalCatalog;
+    } catch (error) {
+      if (llmConfig !== configSnapshot || llmProviderMode !== modeSnapshot) {
+        return true;
+      }
+
+      availableModels = getOpenCodeFreeFallbackModels();
+      console.warn(
+        `[models] No se pudo consultar ${configSnapshot.modelsUrl}; ` +
+        "se usará el catálogo local de OpenCode Free.",
+        error,
+      );
+      return true;
+    }
+  }
+
+  const result = await discoverModels(configSnapshot);
+
+  // Ignorar una respuesta tardía si el administrador cambió de proveedor.
+  if (llmConfig !== configSnapshot || llmProviderMode !== modeSnapshot) {
+    return true;
+  }
+
+  availableModels = result.models;
+
+  if (result.error) {
+    console.warn(
+      `[models] No se pudo consultar ${configSnapshot.modelsUrl}; ` +
+      `se usará el modelo predeterminado "${configSnapshot.defaultModel}".`,
+      result.error,
+    );
+  }
+
+  return result.usedFallback;
+}
+
+/** Inicia una sola vez los verificadores de mensajes programados. */
+function ensureSchedulersStarted(): void {
+  if (schedulersStarted) return;
+  schedulersStarted = true;
   reminderManager.startChecker(onReminderDue);
   alarmManager.startChecker(onAlarmDue);
+}
 
-  fetchFreeModels(config)
-    .then((models) => {
-      availableModels = models;
-      if (models.length > 0 && models[0] && contextManager) {
-        contextManager.setDefaultModel(models[0]);
-      }
-    })
-    .catch(() => {
-      // Fallo silencioso — el usuario podrá recargar con !modelos
-    });
+/**
+ * Inicializa o reemplaza la configuración LLM en caliente.
+ * config=null activa automáticamente el proveedor integrado OpenCode Free.
+ */
+export function initLlm(
+  config: LlmConfig | null,
+  configPath: string,
+): void {
+  llmConfigPath = configPath;
+  ensureSchedulersStarted();
+
+  const activeConfig = config ?? createOpenCodeFreeConfig();
+  llmProviderMode = config ? "custom" : "opencode-free";
+  llmConfig = activeConfig;
+  availableModels =
+    llmProviderMode === "opencode-free"
+      ? getOpenCodeFreeFallbackModels()
+      : [activeConfig.defaultModel];
+
+  if (contextManager) {
+    contextManager.setDefaultModel(activeConfig.defaultModel);
+  } else {
+    contextManager = new ContextManager(activeConfig.defaultModel);
+    contextManager.setMemoryManager(memoryManager);
+  }
+
+  // No bloquear el arranque ni /setup-provider por una caída de /models.
+  void refreshAvailableModels();
 }
 
 /**
  * Actualiza la referencia al socket activo.
  * Se llama desde connection.ts cuando el socket se conecta/reconecta.
  */
-export function setSocket(sock: WASocket): void {
+export function setSocket(sock: WASocket | null): void {
   reminderManager.setSock(sock);
   currentSock = sock;
 }
@@ -224,60 +340,29 @@ export function setSocket(sock: WASocket): void {
 async function onAlarmDue(
   alarm: import("./alarm.ts").RecurringAlarm,
 ): Promise<void> {
-  const sock = currentSock;
-  if (!sock || !aiConfig || !contextManager) {
-    console.warn("[alarm] No se puede disparar: sock/aiConfig/contextManager no disponible");
-    return;
+  if (!currentSock || !llmConfig || !contextManager) {
+    throw new Error("Socket o configuración no disponible para entregar la alarma.");
   }
 
-  const model = contextManager.getModel(alarm.jid);
-  const dynamicCtx = contextManager.buildDynamicContext(alarm.jid);
+  const dayName = new Intl.DateTimeFormat("es-MX", {
+    timeZone: "America/Mexico_City",
+    weekday: "long",
+  }).format(new Date());
 
-  const alarmMessages: import("./ai.ts").ChatMessage[] = [
-    {
-      role: "system",
-      content: STATIC_SYSTEM_PROMPT_CONTENT,
-    },
-    {
-      role: "user",
-      content: `${dynamicCtx}\n\n---\n\n⏰ ALARMA RECURRENTE:\n${alarm.text}`,
-    },
-  ];
+  await deliverScheduledMessage({
+    sock: currentSock,
+    jid: alarm.jid,
+    model: contextManager.getModel(alarm.jid),
+    llmConfig,
+    dynamicContext: contextManager.buildDynamicContext(alarm.jid),
+    prompt: `⏰ ALARMA RECURRENTE:
+${alarm.text}`,
+    fallbackText: alarm.text,
+    title: `⏰ ALARMA RECURRENTE (${dayName})`,
+    logLabel: "alarm",
+  });
 
-  try {
-    const response = await chatCompletion(alarmMessages, model, aiConfig);
-    const dayName = new Intl.DateTimeFormat("es-MX", {
-      timeZone: "America/Mexico_City",
-      weekday: "long",
-    }).format(new Date());
-
-    const finalText = `⏰ ALARMA RECURRENTE (${dayName})\n\n${response}`;
-
-    await sock.sendPresenceUpdate("composing", alarm.jid).catch(() => {});
-    const delayMs = 2000 + Math.floor(Math.random() * 2000);
-    await new Promise<void>((r) => setTimeout(r, delayMs));
-
-    await sock.sendMessage(alarm.jid, { text: finalText });
-    await sock.sendPresenceUpdate("paused", alarm.jid).catch(() => {});
-
-    console.log(
-      `[alarm] Alarma disparada para ${alarm.jid}: "${alarm.text}"`,
-    );
-  } catch (err) {
-    console.error("[alarm] Error al enviar alarma via AI:", err);
-    // Fallback: texto plano
-    try {
-      await sock.sendPresenceUpdate("composing", alarm.jid).catch(() => {});
-      const delayMs = 2000 + Math.floor(Math.random() * 2000);
-      await new Promise<void>((r) => setTimeout(r, delayMs));
-      await sock.sendMessage(alarm.jid, {
-        text: `⏰ ALARMA RECURRENTE\n\n${alarm.text}`,
-      });
-      await sock.sendPresenceUpdate("paused", alarm.jid).catch(() => {});
-    } catch (sendErr) {
-      console.error("[alarm] Error al enviar alarma fallback:", sendErr);
-    }
-  }
+  console.log(`[alarm] Alarma disparada para ${alarm.jid}`);
 }
 
 /** Callback cuando un recordatorio debe dispararse. */
@@ -285,77 +370,74 @@ async function onReminderDue(
   reminder: import("./reminder.ts").Reminder,
   sock: WASocket | null,
 ): Promise<void> {
-  if (!sock || !aiConfig || !contextManager) {
-    console.warn("[reminder] No se puede disparar: sock/aiConfig/contextManager no disponible");
-    return;
+  if (!sock || !llmConfig || !contextManager) {
+    throw new Error("Socket o configuración no disponible para entregar el recordatorio.");
   }
 
-  const model = contextManager.getModel(reminder.jid);
+  await deliverScheduledMessage({
+    sock,
+    jid: reminder.jid,
+    model: contextManager.getModel(reminder.jid),
+    llmConfig,
+    dynamicContext: contextManager.buildDynamicContext(reminder.jid),
+    prompt: `Es hora de recordar: ${reminder.text}`,
+    fallbackText: reminder.text,
+    title: "⏰ RECORDATORIO",
+    logLabel: "reminder",
+  });
 
-  // Contexto dinámico con hora actual + memoria
-  const dynamicCtx = contextManager.buildDynamicContext(reminder.jid);
+  console.log(`[reminder] Recordatorio disparado para ${reminder.jid}`);
+}
 
-  // Construir mensaje para la API: system prompt estático + user msg con contexto dinámico
-  const reminderMessages: import("./ai.ts").ChatMessage[] = [
-    {
-      role: "system",
-      content: STATIC_SYSTEM_PROMPT_CONTENT,
-    },
-    {
-      role: "user",
-      content: `${dynamicCtx}\n\n---\n\nEs hora de recordar: ${reminder.text}`,
-    },
-  ];
+function isAdminSession(jid: string): boolean {
+  const username = authManager.getUsername(jid);
+  return Boolean(username && authManager.isAdmin(username));
+}
 
-  try {
-    const response = await chatCompletion(reminderMessages, model, aiConfig);
-
-    const finalText = `⏰ RECORDATORIO\n\n${response}`;
-
-    // Simular escritura
-    await sock.sendPresenceUpdate("composing", reminder.jid).catch(() => {});
-    const delayMs = 2000 + Math.floor(Math.random() * 2000);
-    await new Promise<void>((r) => setTimeout(r, delayMs));
-
-    await sock.sendMessage(reminder.jid, { text: finalText });
-    await sock.sendPresenceUpdate("paused", reminder.jid).catch(() => {});
-
-    console.log(
-      `[reminder] Recordatorio disparado para ${reminder.jid}: "${reminder.text}"`,
-    );
-  } catch (err) {
-    console.error("[reminder] Error al enviar recordatorio via AI:", err);
-    // Fallback: enviar texto plano con typing
-    try {
-      await sock.sendPresenceUpdate("composing", reminder.jid).catch(() => {});
-      const delayMs = 2000 + Math.floor(Math.random() * 2000);
-      await new Promise<void>((r) => setTimeout(r, delayMs));
-      await sock.sendMessage(reminder.jid, {
-        text: `⏰ RECORDATORIO\n\n${reminder.text}`,
-      });
-      await sock.sendPresenceUpdate("paused", reminder.jid).catch(() => {});
-    } catch (sendErr) {
-      console.error("[reminder] Error al enviar recordatorio fallback:", sendErr);
-    }
+function providerSetupPrompt(step: ProviderSetupStep): string {
+  switch (step) {
+    case "chatCompletionsUrl":
+      return [
+        "1/4 — URL DE CHAT COMPLETIONS",
+        "",
+        "Envía el endpoint completo usado para generar respuestas.",
+        "Ejemplo: https://api.example.com/v1/chat/completions",
+      ].join("\n");
+    case "modelsUrl":
+      return [
+        "2/4 — URL DEL CATÁLOGO DE MODELOS",
+        "",
+        "Envía el endpoint completo que devuelve { data: [{ id }] }.",
+        "Si falla, Luna usará el modelo predeterminado.",
+      ].join("\n");
+    case "defaultModel":
+      return [
+        "3/4 — MODELO PREDETERMINADO",
+        "",
+        "Envía el identificador exacto que usarán los chats nuevos.",
+        "También será el fallback si el catálogo no responde.",
+      ].join("\n");
+    case "apiKey":
+      return [
+        "4/4 — API KEY",
+        "",
+        "Envía la clave del proveedor.",
+        "Si no requiere clave, responde: sin-clave",
+        "",
+        "Por seguridad intentaré eliminar este mensaje después de leerlo.",
+      ].join("\n");
   }
 }
 
-// ─── Simulación de escritura ─────────────────────────────────────
-
-/**
- * Envía un mensaje de texto con simulación de "escribiendo...".
- * Retardo aleatorio de 3 a 5 segundos antes de enviar.
- */
-async function sendWithTyping(
+async function deleteSensitiveIncomingMessage(
   sock: WASocket,
-  jid: string,
-  text: string,
+  message: WAMessage,
 ): Promise<void> {
-  await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-  const delay = 3000 + Math.floor(Math.random() * 2000); // 3–5 segundos
-  await new Promise((r) => setTimeout(r, delay));
-  await sock.sendMessage(jid, { text });
-  await sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  try {
+    await sock.sendMessage(message.key.remoteJid!, { delete: message.key });
+  } catch {
+    // WhatsApp puede impedir borrar mensajes ajenos según el tipo de chat.
+  }
 }
 
 // ─── Registro de comandos ────────────────────────────────────────
@@ -368,7 +450,7 @@ registerCommand(
     const isAdmin = sessionUsername ? authManager.isAdmin(sessionUsername) : false;
     const cmds = getCommands(isAdmin);
     const lista = cmds
-      .map((c) => `!${c.name} — ${c.description}`)
+      .map((c) => `${c.name === "setup-provider" ? "/" : "!"}${c.name} — ${c.description}`)
       .join("\n");
 
     return {
@@ -404,6 +486,10 @@ registerCommand(
   "cancelar",
   "Cancela la operación actual (selección de modelo, etc.)",
   (_cmd, senderJid) => {
+    if (providerSetupManager.has(senderJid)) {
+      providerSetupManager.cancel(senderJid);
+      return { text: "❌ Configuración del proveedor cancelada." };
+    }
     if (contextManager?.isAwaitingModelSelection(senderJid)) {
       contextManager.clearAwaitingModelSelection(senderJid);
       return { text: "❌ Selección de modelo cancelada." };
@@ -423,39 +509,32 @@ registerCommand(
 
 registerCommand(
   "modelos",
-  "Lista los modelos -free disponibles y permite seleccionar uno",
+  "Lista los modelos del proveedor activo y permite seleccionar uno",
   async (_cmd, senderJid, _sock) => {
-    if (!aiConfig) {
-      return { text: "⚠️ El proveedor AI no está configurado." };
+    if (!llmConfig) {
+      return { text: "⚠️ El proveedor LLM todavía está iniciando. Intenta de nuevo." };
     }
 
-    try {
-      availableModels = await fetchFreeModels(aiConfig);
-    } catch (err: unknown) {
-      return {
-        text: `❌ Error al obtener modelos: ${err instanceof Error ? err.message : "desconocido"}`,
-      };
-    }
-
-    if (availableModels.length === 0) {
-      return {
-        text: "❌ No se encontraron modelos -free en el proveedor.",
-      };
-    }
-
+    const usedFallback = await refreshAvailableModels();
     contextManager?.setAwaitingModelSelection(senderJid);
 
-    // Mostrar modelos sin el sufijo "-free"
-    const displayModels = availableModels.map((m) =>
-      m.endsWith("-free") ? m.slice(0, -5) : m,
-    );
-    const list = displayModels
-      .map((name, i) => `${i + 1}. ${name}`)
+    const list = availableModels
+      .map((name, index) => `${index + 1}. ${name}`)
       .join("\n");
-    const currentRaw = contextManager?.getModel(senderJid) ?? "";
-    const currentDisplay = currentRaw.endsWith("-free")
-      ? currentRaw.slice(0, -5)
-      : currentRaw || "ninguno";
+    const currentModel = contextManager?.getModel(senderJid) || "ninguno";
+    const fallbackNotice = usedFallback
+      ? llmProviderMode === "opencode-free"
+        ? [
+            "",
+            "⚠️ El endpoint no respondió o no devolvió modelos gratuitos.",
+            "Se muestra el catálogo local de emergencia de OpenCode Free.",
+          ]
+        : [
+            "",
+            "⚠️ El endpoint no respondió o no devolvió modelos utilizables.",
+            `Se muestra el modelo predeterminado: ${llmConfig.defaultModel}`,
+          ]
+      : [];
 
     return {
       text: [
@@ -463,12 +542,57 @@ registerCommand(
         "",
         list,
         "",
-        `📌 Actual: ${currentDisplay}`,
+        `📌 Actual: ${currentModel}`,
+        ...fallbackNotice,
         "",
         "✏️ Responde con el NUMERO del modelo que quieras usar.",
       ].join("\n"),
     };
   },
+);
+
+registerCommand(
+  "setup-provider",
+  "Configura o reemplaza el proveedor LLM (solo administrador)",
+  async (cmd, senderJid) => {
+    if (!isAdminSession(senderJid)) {
+      return { text: "⚠️ Solo el administrador puede configurar el proveedor." };
+    }
+
+    const requestedMode = cmd.body.trim().toLowerCase();
+    if (["gratis", "free", "opencode", "opencode-free"].includes(requestedMode)) {
+      deleteLlmConfig(llmConfigPath);
+      providerSetupManager.cancel(senderJid);
+      initLlm(null, llmConfigPath);
+      return {
+        text: [
+          "✅ OPENCODE FREE ACTIVADO",
+          "",
+          "Se eliminó la configuración personalizada y se restauró el proveedor gratuito integrado.",
+          "Usa !modelos para actualizar y elegir un modelo gratuito.",
+        ].join("\n"),
+      };
+    }
+
+    providerSetupManager.start(
+      senderJid,
+      llmProviderMode === "custom" ? llmConfig : null,
+    );
+    return {
+      text: [
+        "🧠 CONFIGURAR PROVEEDOR LLM",
+        "",
+        llmProviderMode === "custom"
+          ? "La configuración personalizada actual se reemplazará al completar los 4 pasos."
+          : `${OPENCODE_FREE_PROVIDER_NAME} seguirá activo hasta completar los 4 pasos.`,
+        "Este comando es opcional: Luna funciona con modelos gratuitos sin configurarlo.",
+        "Puedes cancelar en cualquier momento con /cancelar.",
+        "",
+        providerSetupPrompt("chatCompletionsUrl"),
+      ].join("\n"),
+    };
+  },
+  true,
 );
 
 // ─── Comandos de autenticación ────────────────────────────────────
@@ -637,16 +761,25 @@ async function handlePendingAuthAction(
   const action = authManager.getPendingAction(jid);
   if (!action) return;
 
-  switch (action.type) {
-    case "setup":
-      await handleSetupStep(sock, jid, text, action);
-      break;
-    case "login":
-      await handleLoginStep(sock, jid, text, action);
-      break;
-    case "adduser":
-      await handleAdduserStep(sock, jid, text, action);
-      break;
+  try {
+    switch (action.type) {
+      case "setup":
+        await handleSetupStep(sock, jid, text, action);
+        break;
+      case "login":
+        await handleLoginStep(sock, jid, text, action);
+        break;
+      case "adduser":
+        await handleAdduserStep(sock, jid, text, action);
+        break;
+    }
+  } catch (err) {
+    console.error(`[auth] Error en flujo ${action.type}:`, err);
+    await sendWithTyping(
+      sock,
+      jid,
+      "❌ No se pudo guardar el cambio. Revisa permisos y espacio en disco e inténtalo de nuevo.",
+    );
   }
 }
 
@@ -705,7 +838,13 @@ async function handleSetupStep(
   await sendWithTyping(
     sock,
     jid,
-    `✅ Cuenta de administrador creada exitosamente. Bienvenido, ${setupUsername}.`,
+    [
+      `✅ Cuenta de administrador creada exitosamente. Bienvenido, ${setupUsername}.`,
+      "",
+      llmConfig
+        ? "El proveedor LLM ya está disponible."
+        : "Ahora configura el proveedor con /setup-provider.",
+    ].join("\n"),
   );
 }
 
@@ -838,6 +977,61 @@ async function handleAdduserStep(
   );
 }
 
+async function handlePendingProviderSetup(
+  sock: WASocket,
+  message: WAMessage,
+  jid: string,
+  text: string,
+): Promise<void> {
+  const currentStep = providerSetupManager.getStep(jid);
+  if (!currentStep) return;
+
+  try {
+    const result = providerSetupManager.submit(jid, text);
+    if (!result.completed) {
+      await sendWithTyping(sock, jid, providerSetupPrompt(result.nextStep));
+      return;
+    }
+
+    if (result.secretInput) {
+      await deleteSensitiveIncomingMessage(sock, message);
+    }
+
+    const savedConfig = saveLlmConfig(result.config, llmConfigPath);
+    initLlm(savedConfig, llmConfigPath);
+    providerSetupManager.cancel(jid);
+
+    await sendWithTyping(
+      sock,
+      jid,
+      [
+        "✅ PROVEEDOR CONFIGURADO",
+        "",
+        `Modelo predeterminado: ${savedConfig.defaultModel}`,
+        "El catálogo se actualizará sin bloquear el bot.",
+        "Si el endpoint falla, Luna mantendrá el modelo predeterminado como fallback.",
+        "La configuración personalizada tiene prioridad sobre OpenCode Free.",
+        "",
+        "Los chats nuevos usarán este modelo. Los chats existentes conservan su selección.",
+        "Puedes cambiar de modelo con !modelos.",
+      ].join("\n"),
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const step = providerSetupManager.getStep(jid) ?? currentStep;
+    console.warn(`[provider-setup] Entrada inválida en ${step}: ${reason}`);
+    await sendWithTyping(
+      sock,
+      jid,
+      [
+        `❌ ${reason}`,
+        "",
+        providerSetupPrompt(step),
+      ].join("\n"),
+    );
+  }
+}
+
 // ─── Procesamiento de mensajes ───────────────────────────────────
 
 export async function handleMessage(
@@ -922,6 +1116,32 @@ export async function handleMessage(
     }
   }
 
+  // ── Configuración interactiva del proveedor ───────────────────
+  if (providerSetupManager.has(remoteJid)) {
+    if (!isAdminSession(remoteJid)) {
+      providerSetupManager.cancel(remoteJid);
+      await sendWithTyping(
+        sock,
+        remoteJid,
+        "⚠️ La configuración se canceló porque la sesión ya no es administradora.",
+      );
+      return;
+    }
+
+    if (command && command.name === "cancelar") {
+      providerSetupManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "❌ Configuración del proveedor cancelada.");
+      return;
+    }
+
+    if (command) {
+      providerSetupManager.cancel(remoteJid);
+    } else {
+      await handlePendingProviderSetup(sock, message, remoteJid, text);
+      return;
+    }
+  }
+
   // ── Verificar si espera selección de modelo ────────────────────
   if (contextManager?.isAwaitingModelSelection(remoteJid)) {
     if (isPositiveInteger(text.trim())) {
@@ -960,8 +1180,14 @@ export async function handleMessage(
     if (result) {
       await sendWithTyping(sock, remoteJid, result.text);
     } else {
-      const cmds = getCommands();
-      const lista = cmds.map((c) => `!${c.name}`).join(", ");
+      const sessionUsername = authManager.getUsername(remoteJid);
+      const isAdmin = sessionUsername
+        ? authManager.isAdmin(sessionUsername)
+        : false;
+      const cmds = getCommands(isAdmin);
+      const lista = cmds
+        .map((c) => `${c.name === "setup-provider" ? "/" : "!"}${c.name}`)
+        .join(", ");
       await sendWithTyping(
         sock,
         remoteJid,
@@ -985,11 +1211,11 @@ export async function handleMessage(
   }
 
   // ── Chat AI (mensajes sin prefijo) ─────────────────────────────
-  if (!aiConfig || !contextManager) {
+  if (!llmConfig || !contextManager) {
     await sendWithTyping(
       sock,
       remoteJid,
-      "⚠️ El chat AI no está configurado. Contacta al administrador.",
+      "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.",
     );
     return;
   }
@@ -1006,7 +1232,7 @@ async function handleAiChat(
   remoteJid: string,
   userText: string,
 ): Promise<void> {
-  if (!aiConfig || !contextManager) {
+  if (!llmConfig || !contextManager) {
     return;
   }
 
@@ -1024,7 +1250,7 @@ async function handleAiChat(
   // Ejecutar todo el procesamiento con lock exclusivo por JID
   // para evitar que dos mensajes simultáneos corrompan el contexto
   const cm = contextManager;
-  const cfg = aiConfig;
+  const cfg = llmConfig;
   await cm.withLock(remoteJid, async () => {
 
   const userMessage = { role: "user" as const, content: userText };
@@ -1084,30 +1310,19 @@ async function handleAiChat(
     };
 
     // Notificar al usuario en WhatsApp cuando se usen herramientas
-    const toolNotifTexts = new Map<string, string>();
-    toolNotifTexts.set("create_reminder", "⏰ Creando recordatorio...");
-    toolNotifTexts.set("delete_reminder", "🗑️ Eliminando recordatorio...");
-    toolNotifTexts.set("list_reminders", "📋 Consultando recordatorios...");
-    toolNotifTexts.set("memory_write", "📝 Escribiendo en memoria...");
-    toolNotifTexts.set("memory_read", "🔍 Leyendo memoria...");
-    toolNotifTexts.set("create_alarm", "⏰ Creando alarma recurrente...");
-    toolNotifTexts.set("delete_alarm", "🗑️ Eliminando alarma...");
-    toolNotifTexts.set("list_alarms", "📋 Consultando alarmas...");
-    toolNotifTexts.set("toggle_alarm", "🔄 Cambiando estado de alarma...");
-
     const shownNotifs = new Set<string>();
 
     const result = await chatCompletionWithTools(
       apiMessages,
       model,
-      cfg!,
+      cfg,
       ALL_TOOLS,
       toolExecutor,
       3,
       (toolName) => {
-        if (toolNotifTexts.has(toolName) && !shownNotifs.has(toolName)) {
+        if (TOOL_NOTIFICATION_TEXTS.has(toolName) && !shownNotifs.has(toolName)) {
           shownNotifs.add(toolName);
-          const text = toolNotifTexts.get(toolName) ?? "";
+          const text = TOOL_NOTIFICATION_TEXTS.get(toolName) ?? "";
           // Enviar notificación sin esperar (fire-and-forget)
           sock.sendMessage(remoteJid, { text }).catch(() => {});
         }
@@ -1120,9 +1335,6 @@ async function handleAiChat(
     };
     cm.addMessage(remoteJid, assistantMessage);
 
-    // Preparar respuesta final
-    let finalText = result.content;
-
     // La memoria ya está actualizada en disco vía el tool call.
     // El contexto dinámico con la memoria fresca se inyectará en el
     // próximo user message via buildDynamicContext().
@@ -1132,7 +1344,7 @@ async function handleAiChat(
     const typingDelay = 3000 + Math.floor(Math.random() * 2000);
     await new Promise((r) => setTimeout(r, typingDelay));
 
-    await sock.sendMessage(remoteJid, { text: finalText });
+    await sock.sendMessage(remoteJid, { text: result.content });
   } catch (err: unknown) {
     console.error("[ai] Error en chat (agotados reintentos):", err);
     const errorMsg =
@@ -1191,7 +1403,9 @@ async function handleAiChat(
     await sendWithTyping(
       sock,
       remoteJid,
-      `❌ Error al procesar tu mensaje: ${errorMsg}`,
+      isOverflow
+        ? "⚠️ La conversación alcanzó su límite y fue compactada. Envía tu mensaje nuevamente."
+        : "❌ No pude procesar tu mensaje en este momento. Intenta de nuevo.",
     );
   } finally {
     await sock.sendPresenceUpdate("paused", remoteJid).catch(() => {});
@@ -1216,7 +1430,7 @@ async function handleMediaMessage(
       await sendWithTyping(
         sock,
         remoteJid,
-        `📷 Imagen recibida y guardada: ${savedPath}`,
+        "📷 Imagen recibida y guardada correctamente.",
       );
     } else {
       await sendWithTyping(

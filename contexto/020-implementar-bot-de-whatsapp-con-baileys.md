@@ -1,4 +1,4 @@
-﻿<!-- codewolf:auto-context:record -->
+<!-- codewolf:auto-context:record -->
 # 020 — Implementar bot de WhatsApp con Baileys
 
 # Fecha
@@ -20,7 +20,7 @@ Implementar bot de WhatsApp con Baileys.
 - Added "Características" section
 - Updated repo URL to https://github.com/yahirhub/luna-ai.git
 - Removed all.env references and phone number setup instructions
-- Added note about AI_API_KEY env var
+- Se documentó la configuración opcional de la API key
 - Updated execution instructions with interactive menu explanation
 - Expanded command list from 4 to 12 commands
 

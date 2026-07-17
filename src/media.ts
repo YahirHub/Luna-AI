@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { getAppDir } from "./utils.ts";
+import { sanitizePathSegment } from "./storage.ts";
 
 const UPLOADS_DIR = join(getAppDir(), "persistent", "uploads");
 
@@ -77,9 +78,16 @@ export async function downloadAndSaveImage(
   ensureUploadsDir();
 
   const buffer = await downloadMediaMessage(message, "buffer", {});
+  if (!isWithinSizeLimit(buffer.byteLength)) {
+    console.warn(
+      `[media] Descarga rechazada por tamaño real: ${buffer.byteLength} bytes`,
+    );
+    return null;
+  }
 
   const extension = mimeType.split("/")[1] ?? "jpg";
-  const filename = `${Date.now()}_${message.key.id ?? "unknown"}.${extension}`;
+  const messageId = sanitizePathSegment(message.key.id ?? "unknown");
+  const filename = `${Date.now()}_${messageId}.${extension}`;
   const filePath = join(UPLOADS_DIR, filename);
 
   writeFileSync(filePath, new Uint8Array(buffer));

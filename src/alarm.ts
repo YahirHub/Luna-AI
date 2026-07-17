@@ -1,8 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CONTEXTS_DIR } from "./context.ts";
 import { getMexicoCityNow } from "./utils.ts";
 import type { ToolDefinition } from "./ai.ts";
+import {
+  readJsonFile,
+  sanitizePathSegment,
+  writeJsonFileAtomically,
+} from "./storage.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -17,6 +22,8 @@ export interface RecurringAlarm {
   enabled: boolean;
   /** Fecha YYYY-MM-DD de la última vez que se disparó. Evita duplicados en el mismo día. */
   lastFiredDate: string;
+  /** Fecha cuya entrega ya comenzó y debe reintentarse si falla. */
+  pendingDeliveryDate?: string;
   createdAt: string;
 }
 
@@ -26,18 +33,8 @@ interface AlarmsFile {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-function safeJid(jid: string): string {
-  return jid.replace(/[^a-zA-Z0-9@._-]/g, "_");
-}
-
 function alarmsFilePath(baseDir: string, jid: string): string {
-  return join(baseDir, safeJid(jid), "alarms.json");
-}
-
-function ensureDir(dir: string): void {
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
+  return join(baseDir, sanitizePathSegment(jid), "alarms.json");
 }
 
 // ─── AlarmManager ────────────────────────────────────────────────
@@ -46,6 +43,7 @@ export class AlarmManager {
   private alarms: RecurringAlarm[] = [];
   private readonly baseDir: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private checking = false;
 
   constructor(testBaseDir?: string) {
     this.baseDir = testBaseDir ?? CONTEXTS_DIR;
@@ -75,9 +73,8 @@ export class AlarmManager {
 
   private loadFile(path: string): void {
     try {
-      const raw = readFileSync(path, "utf-8");
-      const data = JSON.parse(raw) as AlarmsFile;
-      if (Array.isArray(data.alarms)) {
+      const data = readJsonFile<AlarmsFile>(path);
+      if (Array.isArray(data?.alarms)) {
         this.alarms.push(...data.alarms);
       }
     } catch (err) {
@@ -89,12 +86,22 @@ export class AlarmManager {
   private saveUserAlarms(jid: string): void {
     const userAlarms = this.alarms.filter((a) => a.jid === jid);
     const path = alarmsFilePath(this.baseDir, jid);
-    ensureDir(join(this.baseDir, safeJid(jid)));
+    writeJsonFileAtomically(path, { alarms: userAlarms });
+  }
+
+  /** Revierte el estado en memoria si la persistencia falla. */
+  private persistUserMutation<T>(jid: string, mutate: () => T): T {
+    const snapshot = this.alarms.map((alarm) => ({
+      ...alarm,
+      daysOfWeek: [...alarm.daysOfWeek],
+    }));
     try {
-      const data: AlarmsFile = { alarms: userAlarms };
-      writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
+      const result = mutate();
+      this.saveUserAlarms(jid);
+      return result;
     } catch (err) {
-      console.error(`[alarm] Error al guardar alarmas de ${jid}:`, err);
+      this.alarms = snapshot;
+      throw err;
     }
   }
 
@@ -113,14 +120,14 @@ export class AlarmManager {
       text,
       hour,
       minute,
-      daysOfWeek: [...daysOfWeek].sort(),
+      daysOfWeek: [...new Set(daysOfWeek)].sort((a, b) => a - b),
       enabled: true,
       lastFiredDate: "",
+      pendingDeliveryDate: "",
       createdAt: new Date().toISOString(),
     };
 
-    this.alarms.push(alarm);
-    this.saveUserAlarms(jid);
+    this.persistUserMutation(jid, () => this.alarms.push(alarm));
 
     const daysStr = alarm.daysOfWeek
       .map((d) => ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][d])
@@ -128,7 +135,7 @@ export class AlarmManager {
     console.log(
       `[alarm] Creada alarma #${alarm.id.slice(0, 8)} ` +
       `para ${jid} a las ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ` +
-      `los días [${daysStr}]: "${text}"`,
+      `los días [${daysStr}]`,
     );
 
     return alarm;
@@ -138,8 +145,7 @@ export class AlarmManager {
   deleteAlarm(id: string, jid: string): boolean {
     const idx = this.alarms.findIndex((a) => a.id === id && a.jid === jid);
     if (idx >= 0) {
-      this.alarms.splice(idx, 1);
-      this.saveUserAlarms(jid);
+      this.persistUserMutation(jid, () => this.alarms.splice(idx, 1));
       return true;
     }
     return false;
@@ -149,9 +155,11 @@ export class AlarmManager {
   toggleAlarm(id: string, jid: string): boolean | null {
     const alarm = this.alarms.find((a) => a.id === id && a.jid === jid);
     if (!alarm) return null;
-    alarm.enabled = !alarm.enabled;
-    this.saveUserAlarms(jid);
-    return alarm.enabled;
+    return this.persistUserMutation(jid, () => {
+      alarm.enabled = !alarm.enabled;
+      if (!alarm.enabled) alarm.pendingDeliveryDate = "";
+      return alarm.enabled;
+    });
   }
 
   /** Obtiene las alarmas de un usuario (copia). */
@@ -194,21 +202,34 @@ export class AlarmManager {
 
     return this.alarms.filter((a) => {
       if (!a.enabled) return false;
-      if (!a.daysOfWeek.includes(now.dayOfWeek)) return false;
       if (a.lastFiredDate === now.ymd) return false;
+      if (a.pendingDeliveryDate === now.ymd) return true;
+      if (!a.daysOfWeek.includes(now.dayOfWeek)) return false;
       const alarmTs = a.hour * 60 + a.minute;
       return alarmTs >= windowStart && alarmTs <= now.ts;
     });
   }
 
+  /** Persiste que la alarma ya entró al proceso de entrega. */
+  private markDeliveryPending(id: string): void {
+    const alarm = this.alarms.find((item) => item.id === id);
+    if (!alarm || !alarm.enabled) return;
+    const today = getMexicoCityNow().ymd;
+    if (alarm.pendingDeliveryDate === today) return;
+    this.persistUserMutation(alarm.jid, () => {
+      alarm.pendingDeliveryDate = today;
+    });
+  }
+
   /** Marca una alarma como disparada hoy. */
   markFired(id: string): void {
-    const alarm = this.alarms.find((a) => a.id === id);
-    if (alarm) {
-      const now = getMexicoCityNow();
-      alarm.lastFiredDate = now.ymd;
-      this.saveUserAlarms(alarm.jid);
-    }
+    const alarm = this.alarms.find((item) => item.id === id);
+    if (!alarm) return;
+    const today = getMexicoCityNow().ymd;
+    this.persistUserMutation(alarm.jid, () => {
+      alarm.lastFiredDate = today;
+      alarm.pendingDeliveryDate = "";
+    });
   }
 
   /** Inicia el verificador periódico (cada 30s). */
@@ -218,17 +239,24 @@ export class AlarmManager {
     if (this.intervalId !== null) return;
 
     this.intervalId = setInterval(async () => {
-      const due = this.getDueAlarms();
-      for (const alarm of due) {
-        try {
-          await onDue(alarm);
-          this.markFired(alarm.id);
-        } catch (err) {
-          console.error(
-            `[alarm] Error al disparar alarma #${alarm.id.slice(0, 8)}:`,
-            err,
-          );
+      if (this.checking) return;
+      this.checking = true;
+      try {
+        const due = this.getDueAlarms();
+        for (const alarm of due) {
+          try {
+            this.markDeliveryPending(alarm.id);
+            await onDue(alarm);
+            this.markFired(alarm.id);
+          } catch (err) {
+            console.error(
+              `[alarm] Error al disparar alarma #${alarm.id.slice(0, 8)}:`,
+              err,
+            );
+          }
         }
+      } finally {
+        this.checking = false;
       }
     }, 30_000);
 
@@ -400,17 +428,28 @@ export async function executeAlarmTool(
 ): Promise<string> {
   switch (toolName) {
     case "create_alarm": {
-      const text = String(args.text ?? "");
+      const text = String(args.text ?? "").trim();
       const hour = Number(args.hour);
       const minute = Number(args.minute);
       const daysOfWeek = Array.isArray(args.daysOfWeek)
-        ? (args.daysOfWeek.filter(
-            (d): d is number => typeof d === "number" && d >= 0 && d <= 6,
-          ))
+        ? [
+            ...new Set(
+              args.daysOfWeek.filter(
+                (day): day is number =>
+                  typeof day === "number" &&
+                  Number.isInteger(day) &&
+                  day >= 0 &&
+                  day <= 6,
+              ),
+            ),
+          ]
         : [];
 
       if (!text) {
         return "Error: el texto de la alarma es obligatorio.";
+      }
+      if (text.length > 500) {
+        return "Error: el texto de la alarma no puede exceder 500 caracteres.";
       }
       if (
         !Number.isInteger(hour) || hour < 0 || hour > 23 ||

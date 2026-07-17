@@ -235,6 +235,33 @@ describe("AlarmManager — getDueAlarms", () => {
   });
 });
 
+describe("AlarmManager — reintentos", () => {
+  it("persiste el reintento de una entrega fallida durante el mismo día", () => {
+    const dir = join(tmpdir(), `codewolf-alarm-retry-${Date.now()}`);
+    TEST_DIRS.push(dir);
+
+    const first = new AlarmManager(dir);
+    const alarm = first.createAlarm(TEST_JID, "entrega pendiente", 23, 59, []);
+    const internal = first as unknown as {
+      markDeliveryPending(id: string): void;
+    };
+    internal.markDeliveryPending(alarm.id);
+
+    const reloaded = new AlarmManager(dir);
+    expect(reloaded.getDueAlarms().some((item) => item.id === alarm.id)).toBe(true);
+  });
+
+  it("ignora entregas pendientes de días anteriores", () => {
+    const am = createIsolatedAlarmManager();
+    const alarm = am.createAlarm(TEST_JID, "alarma vencida", 23, 59, []);
+    const internal = am as unknown as { alarms: Array<{ id: string; pendingDeliveryDate?: string }> };
+    const stored = internal.alarms.find((item) => item.id === alarm.id);
+    if (stored) stored.pendingDeliveryDate = "2000-01-01";
+
+    expect(am.getDueAlarms().some((item) => item.id === alarm.id)).toBe(false);
+  });
+});
+
 describe("ALARM_TOOLS — definiciones", () => {
   it("exporta exactamente 4 tools", () => {
     expect(ALARM_TOOLS).toHaveLength(4);
@@ -422,5 +449,13 @@ describe("AlarmManager — CRUD con días específicos", () => {
     const am = createIsolatedAlarmManager();
     const a = am.createAlarm(TEST_JID, "desordenados", 12, 0, [5, 1, 3, 0, 6]);
     expect(a.daysOfWeek).toEqual([0, 1, 3, 5, 6]);
+  });
+});
+
+describe("AlarmManager — normalización", () => {
+  it("elimina días duplicados y los ordena", () => {
+    const am = createIsolatedAlarmManager();
+    const alarm = am.createAlarm(TEST_JID, "prueba", 8, 0, [5, 1, 5, 3, 1]);
+    expect(alarm.daysOfWeek).toEqual([1, 3, 5]);
   });
 });

@@ -1,4 +1,4 @@
-﻿# 000 — Contexto maestro del proyecto
+# 000 — Contexto maestro del proyecto
 
 # Fecha
 
@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16T18:37:40.728Z
-- Último registro: contexto/032-actualizar-proveedores-y-modelos.md
-- Resumen: Actualizar proveedores y modelos.
-- Archivos del cambio: __tests__/compaction.test.ts, src/alarm.ts, src/compaction.ts, src/context.ts, src/models.ts, src/reminder.ts, src/utils.ts
+- Última actualización: 2026-07-16
+- Último registro: contexto/036-restaurar-opencode-free.md
+- Resumen: Restaurar OpenCode Free como proveedor automático, mantener `/setup-provider` como override opcional y agregar límites por coincidencia de modelo.
+- Archivos del cambio: src/providers/opencode-free.ts, src/models.ts, src/bot.ts, src/index.ts, src/llm-config.ts, README.md, pruebas y contexto
 <!-- codewolf:auto-context:end -->

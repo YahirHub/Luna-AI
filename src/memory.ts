@@ -1,6 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
+import {
+  sanitizePathSegment,
+  writeTextFileAtomically,
+} from "./storage.ts";
+
+export const MAX_MEMORY_CHARS = 64_000;
 
 const DEFAULT_MEMORY = `# Memoria de esta conversacion 📝
 
@@ -24,11 +30,6 @@ Le interesa la programacion en JavaScript
 \`\`\`
 `;
 
-/** Sanitiza un JID para usarlo como nombre de carpeta/archivo. */
-function safeJid(jid: string): string {
-  return jid.replace(/[^a-zA-Z0-9@._-]/g, "_");
-}
-
 /**
  * Gestor de la memoria persistente del bot, por usuario.
  * Cada usuario tiene su propio memory.md en persistent/contexts/{jid}/.
@@ -44,18 +45,14 @@ export class MemoryManager {
   /** Resuelve la ruta al memory.md de un jid específico. */
   private getPath(jid: string): string {
     const base = this.testBaseDir ?? join(getAppDir(), "persistent", "contexts");
-    return join(base, safeJid(jid), "memory.md");
+    return join(base, sanitizePathSegment(jid), "memory.md");
   }
 
   /** Crea el archivo de memoria con contenido por defecto si no existe. */
   init(jid: string): void {
     const path = this.getPath(jid);
-    const dir = dirname(path);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
     if (!existsSync(path)) {
-      writeFileSync(path, DEFAULT_MEMORY, "utf-8");
+      writeTextFileAtomically(path, DEFAULT_MEMORY);
     }
   }
 
@@ -84,12 +81,20 @@ export class MemoryManager {
     const path = this.getPath(jid);
     if (mode === "overwrite") {
       const finalContent = content.endsWith("\n") ? content : content + "\n";
-      writeFileSync(path, finalContent, "utf-8");
-    } else {
-      const current = this.getContent(jid);
-      const separator = current.endsWith("\n") ? "" : "\n";
-      writeFileSync(path, current + separator + content + "\n", "utf-8");
+      if (finalContent.length > MAX_MEMORY_CHARS) {
+        throw new Error(`La memoria excede el límite de ${MAX_MEMORY_CHARS} caracteres.`);
+      }
+      writeTextFileAtomically(path, finalContent);
+      return;
     }
+
+    const current = this.getContent(jid);
+    const separator = current.endsWith("\n") ? "" : "\n";
+    const finalContent = current + separator + content + "\n";
+    if (finalContent.length > MAX_MEMORY_CHARS) {
+      throw new Error(`La memoria excede el límite de ${MAX_MEMORY_CHARS} caracteres.`);
+    }
+    writeTextFileAtomically(path, finalContent);
   }
 }
 
@@ -152,8 +157,15 @@ export async function executeMemoryTool(
     case "memory_write": {
       const content = String(args.content ?? "");
       const mode = args.mode === "overwrite" ? "overwrite" : "append";
-      memoryManager.write(jid, mode, content);
-      return `✅ Memoria actualizada. Contenido actual:\n\n${memoryManager.getContent(jid)}`;
+      if (!content.trim()) {
+        return "Error: el contenido de memoria no puede estar vacío.";
+      }
+      try {
+        memoryManager.write(jid, mode, content);
+        return `✅ Memoria actualizada. Contenido actual:\n\n${memoryManager.getContent(jid)}`;
+      } catch (err) {
+        return `Error: ${err instanceof Error ? err.message : "no se pudo actualizar la memoria"}`;
+      }
     }
     case "memory_read": {
       return memoryManager.getContent(jid);

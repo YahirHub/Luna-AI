@@ -98,6 +98,32 @@ describe("ReminderManager — markFired", () => {
   });
 });
 
+describe("ReminderManager — reintentos", () => {
+  it("persiste una entrega pendiente para reintentar después de reiniciar", () => {
+    const dir = join(tmpdir(), `codewolf-reminder-retry-${Date.now()}`);
+    const path = join(dir, "reminders.json");
+    TEST_DIRS.push(dir);
+
+    const first = new ReminderManager(path);
+    const reminder = first.createReminder(
+      TEST_JID,
+      "entrega pendiente",
+      0,
+      0,
+      "2000-01-01",
+    );
+    const internal = first as unknown as {
+      markDeliveryPending(id: string): void;
+    };
+    internal.markDeliveryPending(reminder.id);
+
+    const reloaded = new ReminderManager(path);
+    expect(
+      reloaded.getDueReminders().some((item) => item.id === reminder.id),
+    ).toBe(true);
+  });
+});
+
 describe("ReminderManager — setSock / getSock", () => {
   it("setSock y getSock funcionan", () => {
     const rm = createIsolatedReminder();
@@ -297,5 +323,31 @@ describe("executeReminderTool", () => {
 
     const all = rm.getAll();
     expect(all[0]?.date).toBe("2026-12-25");
+  });
+});
+
+describe("executeReminderTool — límites de entrada", () => {
+  it("rechaza fechas inexistentes", async () => {
+    const rm = createIsolatedReminder();
+    const result = await executeReminderTool(
+      "create_reminder",
+      { text: "fecha inválida", hour: 10, minute: 0, date: "2026-02-30" },
+      rm,
+      TEST_JID,
+    );
+    expect(result).toContain("Error");
+    expect(rm.getAll()).toHaveLength(0);
+  });
+
+  it("rechaza textos mayores a 500 caracteres", async () => {
+    const rm = createIsolatedReminder();
+    const result = await executeReminderTool(
+      "create_reminder",
+      { text: "x".repeat(501), hour: 10, minute: 0 },
+      rm,
+      TEST_JID,
+    );
+    expect(result).toContain("500");
+    expect(rm.getAll()).toHaveLength(0);
   });
 });
