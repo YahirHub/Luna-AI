@@ -160,11 +160,15 @@ describe("registerCommand and dispatchCommand", () => {
 describe("superficie pública de búsqueda", () => {
   it("no expone comandos para ejecutar búsquedas manualmente", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
+    const registeredCommands = Array.from(
+      source.matchAll(/registerCommand\(\s*["']([^"']+)["']/g),
+      (match) => match[1],
+    );
 
-    expect(source).toContain('registerCommand(\n  "setup-search"');
-    expect(source).not.toContain('registerCommand(\n  "buscar"');
-    expect(source).not.toContain('registerCommand(\n  "search"');
-    expect(source).not.toContain('registerCommand(\n  "search-setup"');
+    expect(registeredCommands).toContain("setup-search");
+    expect(registeredCommands).not.toContain("buscar");
+    expect(registeredCommands).not.toContain("search");
+    expect(registeredCommands).not.toContain("search-setup");
   });
 });
 
