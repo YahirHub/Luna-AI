@@ -81,6 +81,19 @@ import {
   runResearchSubagent,
   type ResearchProgressEvent,
 } from "./research-agent.ts";
+import {
+  ADMIN_TOOLS,
+  executeUserAdminTool,
+  executeWhisperAdminTool,
+} from "./admin-tools.ts";
+import {
+  buildConfirmedToolEvent,
+  buildVisibleSystemConfirmation,
+  guardUnconfirmedScheduledCreationClaim,
+  isConfirmedScheduledCreation,
+  isConfirmedToolSuccess,
+  userExplicitlyBlocksScheduledCreation,
+} from "./tool-confirmation.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -126,9 +139,12 @@ const compactingJids = new Set<string>();
 /** Tools base y herramientas opcionales según /config. */
 const BASE_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
 
-function getAvailableTools(): import("./ai.ts").ToolDefinition[] {
+function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
   const tools = [...BASE_TOOLS];
   tools.push(...getMainResearchTools(agentConfig));
+  if (jid && isAdminSession(jid)) {
+    tools.push(...ADMIN_TOOLS);
+  }
   return tools;
 }
 
@@ -142,6 +158,12 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["delete_alarm", "🗑️ Eliminando alarma..."],
   ["list_alarms", "📋 Consultando alarmas..."],
   ["toggle_alarm", "🔄 Cambiando estado de alarma..."],
+  ["whisper_update_config", "🎙️ Actualizando Whisper..."],
+  ["whisper_download_model", "⬇️ Descargando modelo Whisper..."],
+  ["whisper_cleanup_models", "🗑️ Limpiando modelos Whisper..."],
+  ["admin_start_add_user", "👤 Preparando nuevo usuario..."],
+  ["admin_ban_user", "🚫 Bloqueando usuario..."],
+  ["admin_unban_user", "✅ Desbloqueando usuario..."],
 ]);
 
 // ─── Compactación de contexto ──────────────────────────────────
@@ -170,7 +192,7 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
 
   // Estimar tokens actuales (incluyendo tools)
   const currentTokens = estimateTokensAccurate(messages);
-  const toolsTokens = estimateRequestTokens([], getAvailableTools());
+  const toolsTokens = estimateRequestTokens([], getAvailableTools(jid));
 
   // Obtener presupuesto efectivo del modelo
   const effectiveBudget = modelCatalog.getEffectiveBudget(modelId, toolsTokens);
@@ -958,11 +980,16 @@ registerCommand(
  */
 async function handlePendingAuthAction(
   sock: WASocket,
+  message: WAMessage,
   jid: string,
   text: string,
 ): Promise<void> {
   const action = authManager.getPendingAction(jid);
   if (!action) return;
+
+  if (action.step === "awaiting-password") {
+    await deleteSensitiveIncomingMessage(sock, message);
+  }
 
   try {
     switch (action.type) {
@@ -1349,7 +1376,7 @@ export async function handleMessage(
       // Envió un comando durante flujo — cancelar pending y seguir
       authManager.clearPendingAction(remoteJid);
     } else {
-      await handlePendingAuthAction(sock, remoteJid, text);
+      await handlePendingAuthAction(sock, message, remoteJid, text);
       return;
     }
   }
@@ -1592,7 +1619,7 @@ async function handleAiChat(
   const cm = contextManager;
   const cfg = llmConfig;
   const agentConfigSnapshot = { ...agentConfig };
-  const activeTools = getAvailableTools();
+  const activeTools = getAvailableTools(remoteJid);
   await cm.withLock(remoteJid, async () => {
 
   const userMessage = { role: "user" as const, content: userText };
@@ -1616,41 +1643,107 @@ async function handleAiChat(
   const typingSession = await startContinuousTyping(sock, remoteJid);
 
   try {
-    // Ejecutar chat con function calling
+    // Ejecutar chat con function calling. Las acciones mutables se registran
+    // como eventos confirmados del sistema, nunca como afirmaciones del asistente.
+    const confirmedTools = new Set<string>();
+    const toolResults: Array<{ name: string; result: string }> = [];
+    const shownNotifs = new Set<string>();
+
+    const recordToolResult = async (name: string, result: string): Promise<void> => {
+      toolResults.push({ name, result });
+      if (
+        (name === "list_reminders" || name === "list_alarms") &&
+        !result.startsWith("Error:")
+      ) {
+        confirmedTools.add(name);
+      }
+      if (!isConfirmedToolSuccess(name, result)) return;
+
+      confirmedTools.add(name);
+      cm.addMessage(remoteJid, {
+        role: "user",
+        content: buildConfirmedToolEvent(name, result),
+      });
+
+      if (isConfirmedScheduledCreation(name, result)) {
+        await sock.sendMessage(remoteJid, {
+          text: buildVisibleSystemConfirmation(result),
+        }).catch((error: unknown) => {
+          console.warn("[tools] No se pudo enviar confirmación visible:", error);
+        });
+        await typingSession.refresh();
+      }
+    };
+
     const toolExecutor = async (
       name: string,
       args: Record<string, unknown>,
     ): Promise<string> => {
-      // Intentar ejecutar como tool de memoria primero
+      if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
+        shownNotifs.add(name);
+        const notification = TOOL_NOTIFICATION_TEXTS.get(name) ?? "";
+        await sock.sendMessage(remoteJid, { text: notification }).catch(() => {});
+        await typingSession.refresh();
+      }
+
+      if (
+        (name === "create_reminder" || name === "create_alarm") &&
+        userExplicitlyBlocksScheduledCreation(userText, name)
+      ) {
+        const blocked =
+          "Error: el mensaje actual contiene una negación explícita. No se creó ninguna alarma ni recordatorio.";
+        toolResults.push({ name, result: blocked });
+        return blocked;
+      }
+
+      let result: string;
+
       if (name === "memory_write" || name === "memory_read") {
-        return executeMemoryTool(name, args, memoryManager, remoteJid);
+        result = await executeMemoryTool(name, args, memoryManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
       }
-      // Intentar como tool de recordatorios
+
       if (["create_reminder", "delete_reminder", "list_reminders"].includes(name)) {
-        const result = await executeReminderTool(name, args, reminderManager, remoteJid);
-        // Persistir en el contexto para que el modelo lo recuerde
-        if (!result.startsWith("Error:")) {
-          cm.addMessage(remoteJid, {
-            role: "assistant",
-            content: result,
-          });
-        }
+        result = await executeReminderTool(name, args, reminderManager, remoteJid);
+        await recordToolResult(name, result);
         return result;
       }
-      // Intentar como tool de alarmas recurrentes
+
       if (["create_alarm", "delete_alarm", "list_alarms", "toggle_alarm"].includes(name)) {
-        const result = await executeAlarmTool(name, args, alarmManager, remoteJid);
-        if (!result.startsWith("Error:")) {
-          cm.addMessage(remoteJid, {
-            role: "assistant",
-            content: result,
-          });
-        }
+        result = await executeAlarmTool(name, args, alarmManager, remoteJid);
+        await recordToolResult(name, result);
         return result;
       }
+
+      if (ADMIN_TOOLS.some((tool) => tool.function.name === name)) {
+        if (!isAdminSession(remoteJid)) {
+          result = "Error: esta herramienta requiere una sesión administradora activa.";
+        } else if (name.startsWith("admin_")) {
+          result = await executeUserAdminTool(
+            name,
+            args,
+            authManager,
+            remoteJid,
+          );
+        } else {
+          let lastProgress = -25;
+          result = await executeWhisperAdminTool(name, args, async (progress) => {
+            if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
+            lastProgress = progress.percent;
+            await sock.sendMessage(remoteJid, {
+              text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
+            });
+            await typingSession.refresh();
+          });
+        }
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (name === "research_web") {
         const query = typeof args.query === "string" ? args.query : "";
-        return runResearchSubagent({
+        result = await runResearchSubagent({
           query,
           model,
           llmConfig: cfg,
@@ -1663,12 +1756,14 @@ async function handleAiChat(
             await typingSession.refresh();
           },
         });
+        toolResults.push({ name, result });
+        return result;
       }
-      return `Error: funcion desconocida "${name}"`;
-    };
 
-    // Notificar al usuario en WhatsApp cuando se usen herramientas
-    const shownNotifs = new Set<string>();
+      result = `Error: funcion desconocida "${name}"`;
+      toolResults.push({ name, result });
+      return result;
+    };
 
     const result = await chatCompletionWithTools(
       apiMessages,
@@ -1677,21 +1772,22 @@ async function handleAiChat(
       activeTools,
       toolExecutor,
       3,
-      (toolName) => {
-        if (TOOL_NOTIFICATION_TEXTS.has(toolName) && !shownNotifs.has(toolName)) {
-          shownNotifs.add(toolName);
-          const text = TOOL_NOTIFICATION_TEXTS.get(toolName) ?? "";
-          // Enviar notificación sin bloquear el ciclo del modelo y renovar typing.
-          sock.sendMessage(remoteJid, { text })
-            .then(() => typingSession.refresh())
-            .catch(() => {});
-        }
-      },
+      undefined,
+    );
+
+    const latestUsefulToolResult = [...toolResults]
+      .reverse()
+      .find((entry) => !entry.result.startsWith("Error:"))?.result;
+    const rawFinalContent = result.content.trim() || latestUsefulToolResult ||
+      "No pude generar una respuesta útil en esta ronda.";
+    const finalContent = guardUnconfirmedScheduledCreationClaim(
+      rawFinalContent,
+      confirmedTools,
     );
 
     const assistantMessage: import("./ai.ts").ChatMessage = {
       role: "assistant",
-      content: result.content,
+      content: finalContent,
     };
     cm.addMessage(remoteJid, assistantMessage);
 
@@ -1706,7 +1802,7 @@ async function handleAiChat(
       await new Promise((resolve) => setTimeout(resolve, typingDelay));
     }
 
-    await sock.sendMessage(remoteJid, { text: result.content });
+    await sock.sendMessage(remoteJid, { text: finalContent });
   } catch (err: unknown) {
     console.error("[ai] Error en chat (agotados reintentos):", err);
     const errorMsg =

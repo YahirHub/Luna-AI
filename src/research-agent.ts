@@ -167,6 +167,48 @@ function progressResults(result: WebSearchToolResult): ResearchProgressResult[] 
   }));
 }
 
+export interface PartialResearchSnapshot {
+  results: ResearchProgressResult[];
+  verifiedUrls: string[];
+}
+
+export function buildPartialResearchResponse(
+  query: string,
+  snapshot: PartialResearchSnapshot,
+  timeoutSeconds: number,
+): string | null {
+  const seenUrls = new Set<string>();
+  const results = snapshot.results.filter((item) => {
+    const url = item.url.trim();
+    if (!url || seenUrls.has(url)) return false;
+    seenUrls.add(url);
+    return true;
+  }).slice(0, 8);
+  const verified = [...new Set(snapshot.verifiedUrls.map((url) => url.trim()).filter(Boolean))];
+  if (results.length === 0 && verified.length === 0) return null;
+
+  const lines = results.flatMap((item, index) => {
+    const snippet = item.snippet?.trim();
+    return [
+      `${index + 1}. ${item.title || "Fuente encontrada"}`,
+      ...(snippet ? [`   ${snippet}`] : []),
+      `   ${item.url}`,
+    ];
+  });
+
+  return [
+    `⏳ La investigación sobre "${query}" alcanzó el límite de ${timeoutSeconds} segundos.`,
+    "",
+    "Esto es lo que alcancé a encontrar antes del timeout:",
+    ...lines,
+    ...(verified.length > 0
+      ? ["", "Fuentes que sí alcancé a abrir:", ...verified.map((url) => `- ${url}`)]
+      : []),
+    "",
+    "La investigación quedó incompleta; estos resultados son parciales y conviene verificar los puntos que falten.",
+  ].join("\n");
+}
+
 export async function runResearchSubagent(
   options: ResearchAgentOptions,
 ): Promise<string> {
@@ -187,6 +229,9 @@ export async function runResearchSubagent(
   );
 
   await emitProgress(options.onProgress, { type: "started", query, depth });
+
+  const partialResults: ResearchProgressResult[] = [];
+  const verifiedUrls = new Set<string>();
 
   try {
     let hasReportedSynthesis = false;
@@ -217,6 +262,7 @@ export async function runResearchSubagent(
               depth,
               controller.signal,
             );
+            partialResults.push(...progressResults(searchResult));
             await emitProgress(options.onProgress, {
               type: "search_results",
               query: searchResult.query,
@@ -227,6 +273,7 @@ export async function runResearchSubagent(
             });
             return searchResult.text;
           } catch (error) {
+            if (controller.signal.aborted) throw error;
             return `Error: ${error instanceof Error ? error.message : String(error)}`;
           }
         }
@@ -240,6 +287,7 @@ export async function runResearchSubagent(
           }
           const readResult = await executeReadUrlTool(args, controller.signal);
           if (url && !readResult.startsWith("Error:")) {
+            verifiedUrls.add(url);
             await emitProgress(options.onProgress, {
               type: "source_read",
               url,
@@ -279,8 +327,10 @@ export async function runResearchSubagent(
         controller.signal,
       );
     } catch (error) {
+      if (controller.signal.aborted) throw error;
       return `Error: ${error instanceof Error ? error.message : String(error)}`;
     }
+    partialResults.push(...progressResults(searchResult));
     await emitProgress(options.onProgress, {
       type: "search_results",
       query: searchResult.query,
@@ -301,7 +351,20 @@ export async function runResearchSubagent(
     return fallbackResult;
   } catch (error) {
     if (controller.signal.aborted) {
-      return `Error: el subagente investigador excedió ${Math.round(options.agentConfig.researcherTimeoutMs / 1000)} segundos.`;
+      const timeoutSeconds = Math.round(options.agentConfig.researcherTimeoutMs / 1000);
+      const partial = buildPartialResearchResponse(
+        query,
+        {
+          results: partialResults,
+          verifiedUrls: [...verifiedUrls],
+        },
+        timeoutSeconds,
+      );
+      if (partial) {
+        await emitProgress(options.onProgress, { type: "completed" });
+        return partial;
+      }
+      return `Error: el subagente investigador excedió ${timeoutSeconds} segundos sin alcanzar a obtener resultados.`;
     }
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   } finally {

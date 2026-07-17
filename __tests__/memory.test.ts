@@ -26,8 +26,9 @@ describe("MemoryManager — init", () => {
     mm.init(TEST_JID);
 
     const content = mm.getContent(TEST_JID);
-    expect(content).toContain("Memoria de esta conversacion");
-    expect(content).toContain("informacion importante");
+    expect(content).toContain("Memoria personal de Luna");
+    expect(content).toContain("Nombre: pendiente de preguntar");
+    expect(content).toContain("pregúntalo de manera natural y amable");
   });
 
   it("init no sobreescribe si ya existe", () => {
@@ -43,7 +44,7 @@ describe("MemoryManager — init", () => {
   it("getContent retorna default si no se ha hecho init", () => {
     const mm = createIsolatedMemory();
     const content = mm.getContent(TEST_JID);
-    expect(content).toContain("Memoria de esta conversacion");
+    expect(content).toContain("Memoria personal de Luna");
   });
 });
 
@@ -64,7 +65,7 @@ describe("MemoryManager — escritura por JID", () => {
     mm.write(TEST_JID, "overwrite", "Usuario: Maria\nLe gusta el cafe");
     const content = mm.getContent(TEST_JID);
     expect(content).toBe("Usuario: Maria\nLe gusta el cafe\n");
-    expect(content).not.toContain("Memoria de esta conversacion");
+    expect(content).not.toContain("Memoria personal de Luna");
   });
 
   it("write append funciona sin init previo", () => {
@@ -129,7 +130,7 @@ describe("MemoryManager — executeMemoryTool con JID", () => {
 
     const content = mm.getContent(TEST_JID);
     expect(content).toBe("Solo esto\n");
-    expect(content).not.toContain("Memoria de esta conversacion");
+    expect(content).not.toContain("Memoria personal de Luna");
   });
 
   it("memory_read retorna el contenido actual del JID correcto", async () => {

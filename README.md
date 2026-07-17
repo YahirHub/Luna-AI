@@ -11,8 +11,8 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Vinculación de WhatsApp mediante código QR o número telefónico.
 - Reconexión automática y sesión persistente.
 - Conversación con contexto por usuario y compactación automática.
-- Memoria duradera separada del historial conversacional.
-- Recordatorios de una sola vez y alarmas recurrentes con mensaje de entrega persistido desde su creación.
+- Memoria duradera separada del historial conversacional; al crear un perfil nuevo Luna pregunta el nombre de forma simpática y lo guarda cuando se confirma.
+- Recordatorios de una sola vez y alarmas recurrentes con mensaje de entrega persistido desde su creación. Cada creación válida genera una confirmación autoritativa del sistema; Luna no puede sustituirla con una afirmación inventada.
 - Los recordatorios y alarmas entregados se agregan al contexto persistente con fecha, texto configurado y respuesta enviada.
 - OpenCode Free integrado como proveedor LLM predeterminado.
 - Proveedor LLM personalizado opcional mediante `/setup-provider`.
@@ -21,11 +21,11 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Lectura segura de fuentes públicas mediante una herramienta interna.
 - Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
 - Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
-- Configuración global de Whisper desde `!setup-whisper`, con catálogo oficial, descarga de modelos y parámetros persistentes.
+- Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
 - OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
 - Luna compila como binario standalone y se distribuye junto al runtime oficial de whisper.cpp; sin FFmpeg, Python ni APIs multimedia.
-- Administrador, usuarios, sesiones y bloqueo de cuentas.
+- Administrador, usuarios, sesiones y bloqueo de cuentas, también gestionables por lenguaje natural con herramientas restringidas a administradores.
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
 
@@ -111,6 +111,8 @@ Parámetros configurables:
 - Limpieza de modelos descargados que no estén activos.
 
 Los modelos con `.en` solo admiten inglés. Al seleccionarlos, Luna fija automáticamente el idioma en `en`. Los cambios se aplican al siguiente audio y no requieren reiniciar el bot.
+
+Un administrador también puede pedir en lenguaje natural acciones como “muéstrame la configuración de Whisper”, “cambia el idioma a automático”, “usa 8 hilos” o “qué modelos puedo descargar”. Luna dispone de herramientas administrativas para consultar el estado, listar modelos con su peso, modificar parámetros, descargar y activar modelos con confirmación explícita y limpiar modelos inactivos. Estas herramientas no se exponen a usuarios normales.
 
 Las transcripciones se marcan como texto generado por el sistema. El prompt de Luna le ordena no ejecutar recordatorios, alarmas, cambios de memoria u otras acciones cuando una transcripción sea ambigua, incompleta o parezca mal reconocida; primero debe explicar lo entendido y pedir confirmación.
 
@@ -259,6 +261,8 @@ Profundidad: estándar
 
 Después muestra un resumen de resultados con títulos y URLs, informa qué fuentes está verificando y avisa cuando está comparando la evidencia. Al terminar, la respuesta final se envía inmediatamente, sin simular otros 3 a 5 segundos de escritura.
 
+Si el investigador alcanza su timeout después de obtener resultados, no descarta el trabajo realizado. Devuelve una respuesta parcial con títulos, fragmentos, URLs y las fuentes que sí alcanzó a abrir, marcada claramente como investigación incompleta. Solo devuelve un error de timeout cuando no consiguió ninguna evidencia utilizable.
+
 ## `/config`
 
 El administrador puede modificar el comportamiento del agente desde WhatsApp:
@@ -283,6 +287,10 @@ persistent/agent-config.json
 La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda solicita hasta 15 y permite un flujo de investigación más amplio.
 
 ## Recordatorios, alarmas y contexto persistente
+
+La única prueba de que una creación ocurrió es el resultado exitoso de `create_reminder` o `create_alarm`. Después de persistir la acción, Luna envía un mensaje separado con el encabezado `⚙️ CONFIRMACIÓN DEL SISTEMA` y guarda en `context.json` un evento `[Resultado de herramienta confirmado por el sistema]`. Las frases anteriores del asistente no cuentan como evidencia.
+
+Si el usuario cuestiona una creación anterior, Luna debe consultar `list_reminders` o `list_alarms` antes de crear otra, evitando duplicados. Además, una negación explícita como “no crees ningún recordatorio” bloquea determinísticamente la herramienta aunque el modelo intente llamarla. Si la respuesta final afirma una creación sin confirmación del tipo correcto, el sistema suprime esa afirmación y devuelve únicamente un estado autoritativo de acción no confirmada.
 
 Al crear un recordatorio o una alarma, Luna guarda un `deliveryMessage` autocontenido con su personalidad. El modelo que ejecuta `create_reminder` o `create_alarm` puede prepararlo en ese momento; si no lo hace, Luna genera localmente un mensaje seguro. Este texto queda dentro del sandbox del usuario, en `persistent/contexts/<jid>/reminders.json` o `alarms.json`, y no depende de que el proveedor LLM continúe disponible cuando llegue la hora.
 
@@ -377,6 +385,8 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!desban` | Desbloquea un usuario; solo administrador. |
 | `!userlist` | Lista usuarios; solo administrador. |
 
+Los administradores pueden realizar las mismas operaciones de usuarios con lenguaje natural: listar cuentas, iniciar de forma segura la creación de un usuario, bloquearlo o desbloquearlo. La contraseña nunca se pasa como argumento al modelo; después de iniciar la creación, el bot la solicita en un mensaje separado, la procesa fuera del chat LLM e intenta borrar el mensaje de WhatsApp.
+
 ## Persistencia
 
 ```text
@@ -431,7 +441,7 @@ scripts/
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
 ├── agent-config.ts          # Configuración persistente y flujo /config
-├── research-agent.ts        # Subagente aislado, progreso y tools internas
+├── research-agent.ts        # Subagente aislado, progreso, evidencia parcial y timeout
 ├── scheduled-context.ts     # Registro de recordatorios y alarmas entregados
 ├── media.ts                 # Validación y descarga en memoria de audio/imágenes
 ├── whisper-config.ts        # Catálogo, persistencia y descarga segura de modelos
@@ -453,12 +463,14 @@ src/
 │   └── opencode-free.ts     # Proveedor LLM gratuito integrado
 ├── llm-config.ts            # Proveedor personalizado y /setup-provider
 ├── auth.ts                  # Usuarios, sesiones y permisos
-├── bot.ts                   # Orquestación, comandos y ejecución de tools
-├── context.ts               # Contexto persistente y compactación
+├── admin-tools.ts           # Whisper y usuarios por lenguaje natural, solo admin
+├── tool-confirmation.ts     # Confirmación autoritativa y bloqueo de falsos positivos
+├── bot.ts                   # Orquestación, comandos, permisos y ejecución confirmada de tools
+├── context.ts               # Contexto persistente, reglas de veracidad y compactación
 ├── scheduled-copy.ts        # Mensajes persistidos y fallback local de Luna
 ├── scheduled-messages.ts    # Entrega robusta de recordatorios y alarmas
 ├── storage.ts               # Persistencia atómica
-├── memory.ts                # Memoria persistente
+├── memory.ts                # Memoria persistente y perfil inicial simpático
 ├── reminder.ts              # Recordatorios
 ├── alarm.ts                 # Alarmas recurrentes
 └── index.ts                 # Entrada y vinculación

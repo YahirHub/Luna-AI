@@ -355,7 +355,9 @@ export const REMINDER_TOOLS: import("./ai.ts").ToolDefinition[] = [
         "El sistema se encargara de notificar al usuario cuando llegue el momento. " +
         "Usa esto cuando el usuario te pida 'recuerdame a las X:Y hacer algo'. " +
         "⚠️ IMPORTANTE: DEBES llamar esta herramienta para que el recordatorio realmente exista. " +
-        "No digas que lo creaste si no llamaste esta herramienta.",
+        "No la llames si el mensaje contiene una negación como 'no crees ningún recordatorio'. " +
+        "Si el usuario duda de una creación previa, usa list_reminders antes de volver a crear para evitar duplicados. " +
+        "No digas que lo creaste si esta herramienta no devolvió una confirmación exitosa.",
       parameters: {
         type: "object",
         properties: {
@@ -427,7 +429,7 @@ export const REMINDER_TOOLS: import("./ai.ts").ToolDefinition[] = [
       name: "list_reminders",
       description:
         "Lista todos los recordatorios pendientes del usuario. " +
-        "Usa esto cuando el usuario pregunte 'que recordatorios tengo', 'muestrame mis alarmas', " +
+        "Usa esto cuando el usuario pregunte 'que recordatorios tengo', 'muestrame mis recordatorios', " +
         "o similar. " +
         "⚠️ IMPORTANTE: DEBES llamar esta herramienta para ver la lista real. " +
         "No inventes recordatorios.",

@@ -46,3 +46,36 @@ describe("research subagent guards", () => {
     })).toContain("desactivado");
   });
 });
+
+describe("research subagent partial timeout", () => {
+  it("devuelve evidencia parcial en lugar de un error vacío", async () => {
+    const { buildPartialResearchResponse } = await import("../src/research-agent.ts");
+    const result = buildPartialResearchResponse(
+      "tema reciente",
+      {
+        results: [
+          {
+            title: "Fuente oficial",
+            url: "https://example.com/oficial",
+            snippet: "Dato preliminar verificado durante la búsqueda.",
+          },
+        ],
+        verifiedUrls: ["https://example.com/oficial"],
+      },
+      120,
+    );
+    expect(result).not.toBeNull();
+    expect(result).toContain("resultados son parciales");
+    expect(result).toContain("https://example.com/oficial");
+    expect(result).not.toStartWith("Error:");
+  });
+
+  it("mantiene el error cuando no alcanzó a obtener evidencia", async () => {
+    const { buildPartialResearchResponse } = await import("../src/research-agent.ts");
+    expect(buildPartialResearchResponse(
+      "tema",
+      { results: [], verifiedUrls: [] },
+      60,
+    )).toBeNull();
+  });
+});

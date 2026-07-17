@@ -315,7 +315,10 @@ export const ALARM_TOOLS: ToolDefinition[] = [
         "'todos los días a las 7am y 9pm'. " +
         "Para recordatorios de UNA SOLA VEZ (ej: 'recuérdame mañana a las 5pm'), usa create_reminder. " +
         "⚠️ IMPORTANTE: si el usuario pide múltiples horarios (ej: 'a las 8am, 4pm y 12pm'), " +
-        "crea UNA alarma por cada horario, llamando esta herramienta varias veces.",
+        "crea UNA alarma por cada horario, llamando esta herramienta varias veces. " +
+        "No la llames si el mensaje contiene una negación como 'no crees ninguna alarma'. " +
+        "Si el usuario duda de una alarma previa, usa list_alarms antes de volver a crear para evitar duplicados. " +
+        "Nunca afirmes que quedó creada si esta herramienta no devolvió una confirmación exitosa.",
       parameters: {
         type: "object",
         properties: {

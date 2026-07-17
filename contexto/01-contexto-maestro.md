@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/54-recordatorios-por-sandbox-y-contexto-secuencial.md
-- Resumen: Guardar los recordatorios dentro del sandbox de cada usuario, ignorar el archivo global anterior y renumerar contexto con una secuencia única.
-- Archivos del cambio: recordatorios, pruebas, README y todos los nombres y referencias de contexto
+- Último registro: contexto/55-confirmacion-de-tools-administracion-natural-y-timeout-parcial.md
+- Resumen: Confirmar acciones mediante resultados reales de herramientas, suprimir afirmaciones no respaldadas, bloquear creaciones negadas, habilitar administración natural restringida y devolver evidencia parcial al agotar el timeout de búsqueda.
+- Archivos del cambio: bot, prompt, memoria, herramientas administrativas, investigador, pruebas, README y contexto
 <!-- codewolf:auto-context:end -->
