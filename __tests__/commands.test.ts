@@ -9,6 +9,16 @@ import {
 
 // ─── Mock de WASocket para pruebas ───────────────────────────────
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasRegisteredCommand(source: string, commandName: string): boolean {
+  return new RegExp(
+    `registerCommand\\s*\\(\\s*["']${escapeRegExp(commandName)}["']`,
+  ).test(source);
+}
+
 function mockSock(): Parameters<typeof dispatchCommand>[2] {
   return {
     sendPresenceUpdate: async () => {},
@@ -162,9 +172,11 @@ describe("configuración administrativa de Whisper", () => {
   it("registra !setup-whisper como comando exclusivo para administradores", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
 
-    expect(source).toContain('registerCommand(\n  "setup-whisper"');
-    expect(source).toContain('Solo el administrador puede configurar Whisper');
-    expect(source).toContain('  true,\n);\n// ─── Comandos de autenticación');
+    expect(hasRegisteredCommand(source, "setup-whisper")).toBe(true);
+    expect(source).toContain("Solo el administrador puede configurar Whisper");
+    expect(
+      /registerCommand\s*\(\s*["']setup-whisper["'][\s\S]*?\n\s*true,\s*\n\s*\);/.test(source),
+    ).toBe(true);
   });
 });
 
@@ -172,10 +184,10 @@ describe("superficie pública de búsqueda", () => {
   it("no expone comandos para ejecutar búsquedas manualmente", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
 
-    expect(source).toContain('registerCommand(\n  "setup-search"');
-    expect(source).not.toContain('registerCommand(\n  "buscar"');
-    expect(source).not.toContain('registerCommand(\n  "search"');
-    expect(source).not.toContain('registerCommand(\n  "search-setup"');
+    expect(hasRegisteredCommand(source, "setup-search")).toBe(true);
+    expect(hasRegisteredCommand(source, "buscar")).toBe(false);
+    expect(hasRegisteredCommand(source, "search")).toBe(false);
+    expect(hasRegisteredCommand(source, "search-setup")).toBe(false);
   });
 });
 

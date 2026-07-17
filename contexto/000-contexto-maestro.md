@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/041-corregir-bibliotecas-whisper-linux.md
-- Resumen: Reparar aliases SONAME, configurar el entorno de whisper-cli y validar las bibliotecas compartidas de los releases Linux.
-- Archivos del cambio: whisper-native, preparación y empaquetado del runtime, helper Linux, pruebas, README y contexto
+- Último registro: contexto/042-corregir-tipos-streams-y-tests-ci.md
+- Resumen: Corregir tipos de streams de Bun/TypeScript y hacer portables las pruebas de comandos entre Linux y Windows.
+- Archivos del cambio: configuración Whisper, preparación multimedia, pruebas de comandos, parche de OGG y contexto
 <!-- codewolf:auto-context:end -->
