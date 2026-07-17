@@ -21,6 +21,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Lectura segura de fuentes públicas mediante una herramienta interna.
 - Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
 - Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
+- Configuración global de Whisper desde `!setup-whisper`, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
 - OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
 - Luna compila como binario standalone y se distribuye junto al runtime oficial de whisper.cpp; sin FFmpeg, Python ni APIs multimedia.
@@ -56,6 +57,7 @@ No es necesario crear `.env` ni archivos JSON manualmente.
 3. Inicia sesión con `!login`.
 4. Conversa normalmente: Luna usa OpenCode Free de forma automática.
 5. Configura búsqueda web con `/setup-search` cuando necesites acceso a internet.
+6. Opcionalmente ajusta el modelo de transcripción con `!setup-whisper`.
 
 ## Procesamiento multimedia local
 
@@ -64,10 +66,53 @@ Luna procesa localmente las notas de voz y el texto de imágenes. El bot princip
 ### Notas de voz
 
 - Formatos aceptados: `audio/ogg` y `audio/opus`, incluidos los mensajes OGG/Opus habituales de WhatsApp.
-- Límite: 12 MB y 120 segundos.
-- El decoder OGG/Opus convierte la nota a WAV PCM mono de 16 kHz sin FFmpeg. Después Luna invoca el `whisper-cli` oficial con el modelo multilingüe cuantizado `base-q5_1`.
+- Límite de archivo: 12 MB. La duración máxima predeterminada es 120 segundos y puede cambiarse globalmente.
+- El decoder OGG/Opus convierte la nota a WAV PCM mono de 16 kHz sin FFmpeg. Después Luna invoca el `whisper-cli` oficial con el modelo multilingüe cuantizado `base-q5_1` incluido por defecto.
+- El administrador puede usar `!setup-whisper` para descargar otro modelo oficial, activarlo globalmente y ajustar idioma, traducción, hilos, best-of, beam size, temperatura, umbral sin voz, duración máxima y timeout.
+- Los modelos descargados se guardan en `persistent/whisper/models/`, por lo que sobreviven reinicios y actualizaciones del contenedor.
 - El audio se mezcla a mono y se reduce de 48 kHz a 16 kHz antes de transcribir.
 - WhatsApp muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
+
+
+### Configuración global de Whisper
+
+El comando administrativo:
+
+```text
+!setup-whisper
+```
+
+permite consultar el modelo activo y cambiar los parámetros sin editar archivos ni recompilar. El menú lista los modelos oficiales publicados para whisper.cpp, incluidos Tiny, Base, Small, Medium, Large y Large Turbo, junto con sus variantes cuantizadas, variantes en inglés y tamaño aproximado.
+
+El modelo `base-q5_1` ya viene incluido en los builds y releases. Cuando se elige otro modelo, Luna solicita confirmación, consulta los metadatos oficiales de Hugging Face, descarga el archivo con reanudación, comprueba espacio libre y verifica su SHA-256 antes de activarlo. La configuración global se guarda en:
+
+```text
+persistent/whisper.json
+```
+
+Los modelos adicionales se almacenan en:
+
+```text
+persistent/whisper/models/
+```
+
+Parámetros configurables:
+
+- Modelo global.
+- Idioma fijo, detección automática o código ISO personalizado.
+- Traducción al inglés.
+- Hilos de CPU o selección automática.
+- `best-of`.
+- `beam size`.
+- Temperatura.
+- Umbral de ausencia de voz.
+- Duración máxima aceptada.
+- Timeout de transcripción.
+- Limpieza de modelos descargados que no estén activos.
+
+Los modelos con `.en` solo admiten inglés. Al seleccionarlos, Luna fija automáticamente el idioma en `en`. Los cambios se aplican al siguiente audio y no requieren reiniciar el bot.
+
+Las transcripciones se marcan como texto generado por el sistema. El prompt de Luna le ordena no ejecutar recordatorios, alarmas, cambios de memoria u otras acciones cuando una transcripción sea ambigua, incompleta o parezca mal reconocida; primero debe explicar lo entendido y pedir confirmación.
 
 ### Imágenes
 
@@ -81,6 +126,8 @@ El procesamiento pesado corre en un subproceso persistente y serializado para no
 Durante `bun run dev` y `bun run build`, `scripts/prepare-media-assets.ts` consulta la API oficial de GitHub, selecciona la release `latest` de whisper.cpp para Windows x64, Linux x64 o Linux arm64, verifica el digest SHA-256 publicado por GitHub y extrae todo el paquete oficial. También descarga y verifica el modelo Whisper y prepara los recursos OCR. `assets/runtime/` es temporal y no se versiona.
 
 `bun run build` copia a `dist/runtime/whisper/` el ejecutable, las DLL o bibliotecas compartidas, el manifiesto de versión y el modelo. Para mover Luna manualmente debes copiar el ejecutable **junto con la carpeta `runtime/`**. Los paquetes de GitHub Releases ya vienen completos y listos para ejecutar.
+
+En Linux, la preparación restaura como archivos regulares los nombres SONAME que suelen distribuirse como enlaces simbólicos, por ejemplo `libwhisper.so.1`. Esto evita que se pierdan al extraer, copiar o volver a comprimir el runtime. Antes de aceptar un runtime Linux, el build ejecuta `whisper-cli --help` con su `LD_LIBRARY_PATH`; si falta una biblioteca, el build falla en lugar de publicar un release roto. Durante la transcripción, Luna vuelve a agregar automáticamente todas las carpetas de bibliotecas del runtime a `PATH` y `LD_LIBRARY_PATH`.
 
 Si una descarga automática está bloqueada, puedes descargar manualmente el asset oficial de la release más reciente y señalarlo sin desactivar la verificación:
 
@@ -294,7 +341,7 @@ docker run --rm -it `
   luna-ai
 ```
 
-El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda y credenciales. Los audios e imágenes se procesan en memoria y no se guardan en el volumen. No es necesario montar archivos adicionales.
+El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda, credenciales y la configuración global de Whisper. Los modelos Whisper descargados por `!setup-whisper` también permanecen en el volumen. Los audios e imágenes originales se procesan temporalmente y no se conservan. No es necesario montar archivos adicionales.
 
 Para revisar el QR o los logs:
 
@@ -320,6 +367,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `/setup-provider gratis` | Restaura OpenCode Free. |
 | `/setup-search` | Configura motores, claves y fallback; solo administrador. |
 | `/config` | Configura herramientas y subagente; solo administrador. |
+| `!setup-whisper` | Configura el modelo y parámetros globales de transcripción; solo administrador. |
 | `!adduser` | Crea un usuario; solo administrador. |
 | `!banuser` | Bloquea un usuario; solo administrador. |
 | `!desban` | Desbloquea un usuario; solo administrador. |
@@ -338,6 +386,8 @@ persistent/
 ├── search.json              # Motores, estados, predeterminado y fallback
 ├── search-auth.json         # API keys de búsqueda; secreto
 ├── llm.config.json          # Solo si existe proveedor LLM personalizado
+├── whisper.json             # Modelo y parámetros globales de transcripción
+├── whisper/models/          # Modelos adicionales descargados por el administrador
 ├── reminders.json           # Recordatorios de una sola vez
 └── users.json               # Usuarios y sesiones del bot
 ```
@@ -369,8 +419,9 @@ patches/
 └── ogg-opus-decoder@1.7.3.patch # Evita incluir su WebWorker opcional en Bun compile
 
 scripts/
-├── prepare-media-assets.ts  # Descarga latest de whisper.cpp, modelo y assets OCR
-├── package-runtime.ts       # Copia whisper.cpp junto al ejecutable compilado
+├── prepare-media-assets.ts  # Descarga latest, repara y valida whisper.cpp
+├── package-runtime.ts       # Copia whisper.cpp y restaura aliases Linux
+├── whisper-linux-libs.ts    # Preserva SONAME como libwhisper.so.1
 └── eliminar-whisper-wasm-obsoleto.ps1 # Limpieza segura de la implementación sustituida
 
 src/
@@ -379,6 +430,8 @@ src/
 ├── research-agent.ts        # Subagente aislado, progreso y tools internas
 ├── scheduled-context.ts     # Registro de alarmas entregadas en el contexto
 ├── media.ts                 # Validación y descarga en memoria de audio/imágenes
+├── whisper-config.ts        # Catálogo, persistencia y descarga segura de modelos
+├── whisper-setup.ts         # Flujo administrativo !setup-whisper
 ├── media-processing/
 │   ├── audio-utils.ts       # Mezcla mono y reducción a 16 kHz
 │   ├── client.ts            # Cola e IPC con el subproceso multimedia
@@ -439,10 +492,12 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 10. Revisar `context.json` y comprobar que no contenga resultados completos ni páginas leídas por el subagente.
 11. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
 12. Desactivar búsqueda y subagente desde `/config` y comprobar que `research_web` desaparezca.
-13. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
-14. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
-15. Probar un audio mayor de 120 segundos y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
-16. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
+13. Abrir `!setup-whisper`, comprobar el catálogo, cambiar un parámetro y verificar `persistent/whisper.json`.
+14. Descargar un modelo alternativo pequeño, activarlo y comprobar que se conserve después de reiniciar.
+15. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
+16. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
+17. Probar un audio mayor que la duración configurada y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
+18. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
 
 ## Limpieza segura en Windows
 

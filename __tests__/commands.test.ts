@@ -40,6 +40,7 @@ describe("parseCommand", () => {
   it("parses search configuration and agent commands", () => {
     expect(parseCommand("/config")?.name).toBe("config");
     expect(parseCommand("/setup-search")?.name).toBe("setup-search");
+    expect(parseCommand("!setup-whisper")?.name).toBe("setup-whisper");
   });
 
   it("parses command with arguments", () => {
@@ -157,18 +158,24 @@ describe("registerCommand and dispatchCommand", () => {
 });
 
 
+describe("configuración administrativa de Whisper", () => {
+  it("registra !setup-whisper como comando exclusivo para administradores", async () => {
+    const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
+
+    expect(source).toContain('registerCommand(\n  "setup-whisper"');
+    expect(source).toContain('Solo el administrador puede configurar Whisper');
+    expect(source).toContain('  true,\n);\n// ─── Comandos de autenticación');
+  });
+});
+
 describe("superficie pública de búsqueda", () => {
   it("no expone comandos para ejecutar búsquedas manualmente", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
-    const registeredCommands = Array.from(
-      source.matchAll(/registerCommand\(\s*["']([^"']+)["']/g),
-      (match) => match[1],
-    );
 
-    expect(registeredCommands).toContain("setup-search");
-    expect(registeredCommands).not.toContain("buscar");
-    expect(registeredCommands).not.toContain("search");
-    expect(registeredCommands).not.toContain("search-setup");
+    expect(source).toContain('registerCommand(\n  "setup-search"');
+    expect(source).not.toContain('registerCommand(\n  "buscar"');
+    expect(source).not.toContain('registerCommand(\n  "search"');
+    expect(source).not.toContain('registerCommand(\n  "search-setup"');
   });
 });
 

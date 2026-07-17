@@ -15,6 +15,8 @@ import {
   getMediaKind,
 } from "./media.ts";
 import { MediaProcessorClient } from "./media-processing/client.ts";
+import { loadWhisperConfig } from "./whisper-config.ts";
+import { WhisperSetupManager } from "./whisper-setup.ts";
 import {
   discoverModels,
   fetchModels,
@@ -97,6 +99,7 @@ const providerSetupManager = new ProviderSetupManager();
 let agentConfig = loadAgentConfig();
 const agentConfigFlowManager = new AgentConfigFlowManager();
 const searchSetupManager = new SearchSetupManager();
+const whisperSetupManager = new WhisperSetupManager();
 const mediaProcessor = new MediaProcessorClient();
 
 /** Gestor de autenticación y sesiones de usuario. */
@@ -611,6 +614,10 @@ registerCommand(
       agentConfigFlowManager.cancel(senderJid);
       return { text: "❌ Configuración del agente cancelada." };
     }
+    if (whisperSetupManager.has(senderJid)) {
+      whisperSetupManager.cancel(senderJid);
+      return { text: "❌ Configuración de Whisper cancelada." };
+    }
     if (contextManager?.isAwaitingModelSelection(senderJid)) {
       contextManager.clearAwaitingModelSelection(senderJid);
       return { text: "❌ Selección de modelo cancelada." };
@@ -741,6 +748,18 @@ registerCommand(
   "setup-search",
   "Configura motores de búsqueda y fallback (solo administrador)",
   (_cmd, senderJid) => startSearchSetup(senderJid),
+  true,
+);
+
+registerCommand(
+  "setup-whisper",
+  "Configura el modelo y parámetros globales de transcripción (solo administrador)",
+  (_cmd, senderJid) => {
+    if (!isAdminSession(senderJid)) {
+      return { text: "⚠️ Solo el administrador puede configurar Whisper." };
+    }
+    return { text: whisperSetupManager.start(senderJid) };
+  },
   true,
 );
 // ─── Comandos de autenticación ────────────────────────────────────
@@ -1219,6 +1238,33 @@ async function handlePendingSearchSetup(
   }
 }
 
+async function handlePendingWhisperSetup(
+  sock: WASocket,
+  jid: string,
+  text: string,
+): Promise<void> {
+  let lastProgress = -25;
+  const typing = await startContinuousTyping(sock, jid);
+  try {
+    const result = await whisperSetupManager.submit(jid, text, async (progress) => {
+      if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
+      lastProgress = progress.percent;
+      await sock.sendMessage(jid, {
+        text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
+      });
+    });
+    await sendWithTyping(sock, jid, result.text);
+  } catch (error) {
+    await sendWithTyping(
+      sock,
+      jid,
+      `❌ ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await typing.stop();
+  }
+}
+
 // ─── Procesamiento de mensajes ───────────────────────────────────
 
 export async function handleMessage(
@@ -1370,6 +1416,26 @@ export async function handleMessage(
       searchSetupManager.cancel(remoteJid);
     } else {
       await handlePendingSearchSetup(sock, message, remoteJid, text);
+      return;
+    }
+  }
+
+  // ── Configuración interactiva de Whisper ──────────────────────
+  if (whisperSetupManager.has(remoteJid)) {
+    if (!isAdminSession(remoteJid)) {
+      whisperSetupManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      return;
+    }
+    if (command && command.name === "cancelar") {
+      whisperSetupManager.cancel(remoteJid);
+      await sendWithTyping(sock, remoteJid, "❌ Configuración de Whisper cancelada.");
+      return;
+    }
+    if (command) {
+      whisperSetupManager.cancel(remoteJid);
+    } else {
+      await handlePendingWhisperSetup(sock, remoteJid, text);
       return;
     }
   }
@@ -1696,7 +1762,10 @@ async function handleMediaMessage(
   try {
     if (mediaKind === "audio") {
       await sock.sendMessage(remoteJid, { text: "🎙️ Transcribiendo audio..." });
-      const media = await downloadAudioForTranscription(message);
+      const media = await downloadAudioForTranscription(
+        message,
+        loadWhisperConfig().maxAudioSeconds,
+      );
       const result = await mediaProcessor.process(
         "transcribe-audio",
         media.bytes,

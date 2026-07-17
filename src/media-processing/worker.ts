@@ -10,8 +10,8 @@ import type { MediaWorkerRequest, MediaWorkerResponse } from "./protocol.ts";
 import { downsampleTo16k, estimateOggDurationSeconds, mixToMono } from "./audio-utils.ts";
 import { readImageDimensions } from "./image-utils.ts";
 import { transcribeWithWhisperCli } from "./whisper-native.ts";
+import { loadWhisperConfig } from "../whisper-config.ts";
 
-const MAX_AUDIO_SECONDS = 120;
 const MAX_IMAGE_PIXELS = 16_000_000;
 const MAX_EXTRACTED_TEXT_CHARS = 20_000;
 let ocrEnginePromise: Promise<OCREngine> | null = null;
@@ -51,10 +51,11 @@ async function transcribeAudio(request: MediaWorkerRequest): Promise<{ text: str
     throw new Error("Solo se admiten notas de voz OGG/Opus.");
   }
 
+  const config = loadWhisperConfig();
   const encodedBytes = new Uint8Array(request.bytes);
   const estimatedDuration = estimateOggDurationSeconds(encodedBytes);
-  if (estimatedDuration !== null && estimatedDuration > MAX_AUDIO_SECONDS) {
-    throw new Error(`El audio supera el límite de ${MAX_AUDIO_SECONDS} segundos.`);
+  if (estimatedDuration !== null && estimatedDuration > config.maxAudioSeconds) {
+    throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
   }
 
   const decoder = new OggOpusDecoder();
@@ -64,11 +65,11 @@ async function transcribeAudio(request: MediaWorkerRequest): Promise<{ text: str
     const mono = downsampleTo16k(mixToMono(decoded.channelData), decoded.sampleRate);
     const durationSeconds = mono.length / 16_000;
     if (durationSeconds <= 0) throw new Error("El audio no contiene muestras válidas.");
-    if (durationSeconds > MAX_AUDIO_SECONDS) {
-      throw new Error(`El audio supera el límite de ${MAX_AUDIO_SECONDS} segundos.`);
+    if (durationSeconds > config.maxAudioSeconds) {
+      throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
     }
 
-    const text = await transcribeWithWhisperCli(mono);
+    const text = await transcribeWithWhisperCli(mono, { config });
     return { text, durationSeconds };
   } finally {
     decoder.free();
