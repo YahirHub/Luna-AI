@@ -27,6 +27,16 @@ export type WhisperModelDefinition = {
 const MiB = 1024 ** 2;
 const GiB = 1024 ** 3;
 
+type ByteStreamReadResult = {
+  done: boolean;
+  value?: Uint8Array;
+};
+
+type ByteStreamReader = {
+  read(): Promise<ByteStreamReadResult>;
+  cancel(reason?: unknown): Promise<void>;
+};
+
 function model(
   id: string,
   displaySize: string,
@@ -339,9 +349,9 @@ function writeAll(fd: number, bytes: Uint8Array): void {
 }
 
 async function readWithIdleTimeout(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reader: ByteStreamReader,
   controller: AbortController,
-): Promise<ReadableStreamReadResult<Uint8Array>> {
+): Promise<ByteStreamReadResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -400,7 +410,7 @@ async function downloadModelInternal(
     timeoutReason = "total";
     controller.abort();
   }, DOWNLOAD_TOTAL_TIMEOUT_MS);
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: ByteStreamReader | undefined;
   let fd: number | undefined;
 
   try {
@@ -430,12 +440,13 @@ async function downloadModelInternal(
     if (!resumed) existingBytes = 0;
     const openedFd = openSync(temporary, resumed ? "a" : "w");
     fd = openedFd;
-    reader = response.body.getReader();
+    const responseReader: ByteStreamReader = response.body.getReader();
+    reader = responseReader;
     let downloadedBytes = existingBytes;
     let lastReportedPercent = -1;
 
     while (true) {
-      const { done, value } = await readWithIdleTimeout(reader, controller);
+      const { done, value } = await readWithIdleTimeout(responseReader, controller);
       if (done) break;
       if (!value?.byteLength) continue;
       writeAll(openedFd, value);

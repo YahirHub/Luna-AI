@@ -31,6 +31,16 @@ const WHISPER_MODEL_SHA256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac
 const WHISPER_RELEASE_API = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest";
 const DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000;
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
+
+type ByteStreamReadResult = {
+  done: boolean;
+  value?: Uint8Array;
+};
+
+type ByteStreamReader = {
+  read(): Promise<ByteStreamReadResult>;
+  cancel(reason?: unknown): Promise<void>;
+};
 const DOWNLOAD_TOTAL_TIMEOUT_MS = 10 * 60_000;
 const DOWNLOAD_RETRIES_PER_SOURCE = 2;
 const OBSOLETE_WHISPER_MODELS = ["ggml-tiny-q5_1.bin"] as const;
@@ -130,9 +140,9 @@ function parseTotalSize(response: Response, resumedBytes: number): number | unde
 }
 
 async function readWithIdleTimeout(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reader: ByteStreamReader,
   controller: AbortController,
-): Promise<ReadableStreamReadResult<Uint8Array>> {
+): Promise<ByteStreamReadResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -178,7 +188,7 @@ async function streamDownload(url: string, temporary: string, label: string): Pr
     timeoutReason = "connect";
     controller.abort();
   }, DOWNLOAD_CONNECT_TIMEOUT_MS);
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: ByteStreamReader | undefined;
   let fd: number | undefined;
 
   try {
@@ -207,14 +217,15 @@ async function streamDownload(url: string, temporary: string, label: string): Pr
     const totalSize = parseTotalSize(response, resumedBytes);
     const openedFd = openSync(temporary, canResume ? "a" : "w");
     fd = openedFd;
-    reader = response.body.getReader();
+    const responseReader: ByteStreamReader = response.body.getReader();
+    reader = responseReader;
     let downloaded = resumedBytes;
     let lastPrintedAt = 0;
     let lastPrintedBytes = downloaded;
     process.stdout.write(`[media-assets] ${label}: ${formatProgress(downloaded, totalSize)}`);
 
     while (true) {
-      const { done, value } = await readWithIdleTimeout(reader, controller);
+      const { done, value } = await readWithIdleTimeout(responseReader, controller);
       if (done) break;
       if (!value?.byteLength) continue;
       writeAll(openedFd, value);
