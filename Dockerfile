@@ -3,6 +3,10 @@ FROM oven/bun:1.3.14 AS build
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package.json bun.lock ./
 COPY patches ./patches
 RUN bun install --production --frozen-lockfile

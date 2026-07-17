@@ -7,6 +7,7 @@ import {
   buildWhisperArguments,
   buildWhisperEnvironment,
   encodePcm16Wav,
+  loadWhisperRuntime,
   type WhisperRuntime,
 } from "../src/media-processing/whisper-native.ts";
 
@@ -115,6 +116,41 @@ describe("runtime nativo de whisper.cpp", () => {
     expect(env.LD_LIBRARY_PATH).toContain(libraryDir);
     expect(env.LD_LIBRARY_PATH).toContain("/opt/libs");
     expect(env.PATH).toContain("/usr/bin");
+  });
+
+  it("descubre system-libs y lo agrega al entorno de Whisper", () => {
+    const root = mkdtempSync(join(tmpdir(), "luna-whisper-system-libs-"));
+    temporaryDirs.push(root);
+    const executable = join(root, "bin", process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli");
+    const model = join(root, "models", "ggml-base-q5_1.bin");
+    const systemLibraries = join(root, "system-libs");
+    mkdirSync(dirname(executable), { recursive: true });
+    mkdirSync(dirname(model), { recursive: true });
+    mkdirSync(systemLibraries, { recursive: true });
+    writeFileSync(executable, "test");
+    writeFileSync(model, "test");
+    writeFileSync(join(systemLibraries, "libgomp.so.1"), "openmp-runtime");
+    writeFileSync(join(root, "manifest.json"), JSON.stringify({
+      schemaVersion: 1,
+      version: "v1.9.1",
+      platform: process.platform,
+      arch: process.arch,
+      assetName: process.platform === "win32" ? "whisper-bin-x64.zip" : "whisper-bin-ubuntu-x64.tar.gz",
+      assetDigest: "a".repeat(64),
+      executable: executable.slice(root.length + 1).replaceAll("\\", "/"),
+      model: "models/ggml-base-q5_1.bin",
+      libraryDirs: [],
+      preparedAt: new Date(0).toISOString(),
+    }));
+
+    const runtime = loadWhisperRuntime([root]);
+    expect(runtime.libraryDirs).toContain(systemLibraries);
+    const env = buildWhisperEnvironment(runtime, {
+      platform: "linux",
+      environment: { PATH: "/usr/bin" },
+      pathDelimiter: ":",
+    });
+    expect(env.LD_LIBRARY_PATH).toContain(systemLibraries);
   });
 
 });

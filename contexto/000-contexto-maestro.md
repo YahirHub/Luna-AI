@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/042-corregir-tipos-streams-y-tests-ci.md
-- Resumen: Corregir tipos de streams de Bun/TypeScript y hacer portables las pruebas de comandos entre Linux y Windows.
-- Archivos del cambio: configuración Whisper, preparación multimedia, pruebas de comandos, parche de OGG y contexto
+- Último registro: contexto/044-descargar-libgomp-portable-debian.md
+- Resumen: Obtener libgomp.so.1 sin instalar paquetes, con APT y respaldo Debian fijado por arquitectura y SHA-256.
+- Archivos del cambio: preparación y empaquetado del runtime Whisper Linux, pruebas, README y contexto
 <!-- codewolf:auto-context:end -->

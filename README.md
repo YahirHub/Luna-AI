@@ -127,7 +127,7 @@ Durante `bun run dev` y `bun run build`, `scripts/prepare-media-assets.ts` consu
 
 `bun run build` copia a `dist/runtime/whisper/` el ejecutable, las DLL o bibliotecas compartidas, el manifiesto de versión y el modelo. Para mover Luna manualmente debes copiar el ejecutable **junto con la carpeta `runtime/`**. Los paquetes de GitHub Releases ya vienen completos y listos para ejecutar.
 
-En Linux, la preparación restaura como archivos regulares los nombres SONAME que suelen distribuirse como enlaces simbólicos, por ejemplo `libwhisper.so.1`. Esto evita que se pierdan al extraer, copiar o volver a comprimir el runtime. Antes de aceptar un runtime Linux, el build ejecuta `whisper-cli --help` con su `LD_LIBRARY_PATH`; si falta una biblioteca, el build falla en lugar de publicar un release roto. Durante la transcripción, Luna vuelve a agregar automáticamente todas las carpetas de bibliotecas del runtime a `PATH` y `LD_LIBRARY_PATH`.
+En Linux, la preparación restaura como archivos regulares los nombres SONAME que suelen distribuirse como enlaces simbólicos, por ejemplo `libwhisper.so.1`. También copia `libgomp.so.1`, requerido por OpenMP, dentro de `runtime/whisper/system-libs`, por lo que los paquetes Linux no dependen de que el servidor tenga instalado `libgomp1`. Luna primero busca la biblioteca en el sistema; si no existe, intenta obtener el paquete con `apt-get download` sin instalarlo y, si los índices APT no están disponibles, usa un paquete oficial de Debian Bookworm fijado por arquitectura y SHA-256 para amd64 o ARM64. Antes de aceptar un runtime Linux, el build ejecuta `whisper-cli --help` con su `LD_LIBRARY_PATH`; si falta una biblioteca, el build falla en lugar de publicar un release roto. Durante la transcripción, Luna vuelve a agregar automáticamente todas las carpetas de bibliotecas del runtime a `PATH` y `LD_LIBRARY_PATH`.
 
 Si una descarga automática está bloqueada, puedes descargar manualmente el asset oficial de la release más reciente y señalarlo sin desactivar la verificación:
 
@@ -421,7 +421,7 @@ patches/
 scripts/
 ├── prepare-media-assets.ts  # Descarga latest, repara y valida whisper.cpp
 ├── package-runtime.ts       # Copia whisper.cpp y restaura aliases Linux
-├── whisper-linux-libs.ts    # Preserva SONAME como libwhisper.so.1
+├── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1
 └── eliminar-whisper-wasm-obsoleto.ps1 # Limpieza segura de la implementación sustituida
 
 src/
@@ -476,7 +476,7 @@ dist/
     └── whisper/             # whisper-cli, bibliotecas, modelo y manifest.json
 ```
 
-El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Ninguna credencial se incrusta en los releases.
+El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. Los paquetes Linux incluyen además `libgomp.so.1`, requerido por OpenMP, y el workflow comprueba su presencia antes de comprimir el release. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Ninguna credencial se incrusta en los releases.
 
 ## Pruebas manuales importantes
 

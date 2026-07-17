@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
+  ensureLinuxRuntimeDependencies,
   ensureLinuxSharedLibraryAliases,
   walkRuntimeFiles,
 } from "./whisper-linux-libs.ts";
@@ -43,7 +44,7 @@ type ByteStreamReader = {
 };
 const DOWNLOAD_TOTAL_TIMEOUT_MS = 10 * 60_000;
 const DOWNLOAD_RETRIES_PER_SOURCE = 2;
-const OBSOLETE_WHISPER_MODELS = ["ggml-tiny-q5_1.bin"] as const;
+const OBSOLETE_WHISPER_MODELS: readonly string[] = ["ggml-tiny-q5_1.bin"];
 
 const DEFAULT_MODEL_URLS = [
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base-q5_1.bin",
@@ -406,19 +407,23 @@ function libraryDirectories(files: string[]): string[] {
   )].sort();
 }
 
-function repairWhisperRuntime(manifest: WhisperRuntimeManifest): WhisperRuntimeManifest {
+async function repairWhisperRuntime(manifest: WhisperRuntimeManifest): Promise<WhisperRuntimeManifest> {
   const aliases = ensureLinuxSharedLibraryAliases(WHISPER_BIN_DIR);
   for (const alias of aliases) {
     console.log(`[media-assets] Alias Linux restaurado: ${relative(WHISPER_DIR, alias)}`);
   }
+  const dependencies = await ensureLinuxRuntimeDependencies(WHISPER_DIR);
+  for (const dependency of dependencies) {
+    console.log(`[media-assets] Dependencia Linux incluida: ${relative(WHISPER_DIR, dependency)}`);
+  }
 
-  const files = walkRuntimeFiles(WHISPER_BIN_DIR);
+  const files = walkRuntimeFiles(WHISPER_DIR);
   const libraryDirs = libraryDirectories(files);
   const updated = {
     ...manifest,
     model: expectedModelRelativePath(),
     libraryDirs,
-    preparedAt: aliases.length > 0 || manifest.model !== expectedModelRelativePath()
+    preparedAt: aliases.length > 0 || dependencies.length > 0 || manifest.model !== expectedModelRelativePath()
       ? new Date().toISOString()
       : manifest.preparedAt,
   };
@@ -464,7 +469,7 @@ async function prepareWhisperBinary(): Promise<void> {
     release = await fetchLatestWhisperRelease();
   } catch (error) {
     if (manifestIsUsable(cachedManifest)) {
-      const updatedManifest = repairWhisperRuntime(updateManifestModel(cachedManifest));
+      const updatedManifest = await repairWhisperRuntime(updateManifestModel(cachedManifest));
       await validateWhisperRuntime(updatedManifest);
       console.warn(`[media-assets] No se pudo consultar la release latest; usando ${updatedManifest.version}: ${String(error)}`);
       return;
@@ -482,7 +487,7 @@ async function prepareWhisperBinary(): Promise<void> {
     && cachedManifest.assetName === asset.name
     && cachedManifest.assetDigest === assetSha256
   ) {
-    const updatedManifest = repairWhisperRuntime(updateManifestModel(cachedManifest));
+    const updatedManifest = await repairWhisperRuntime(updateManifestModel(cachedManifest));
     await validateWhisperRuntime(updatedManifest);
     console.log(`[media-assets] Reutilizando whisper.cpp ${release.tag_name} (${asset.name}).`);
     return;
@@ -518,7 +523,7 @@ async function prepareWhisperBinary(): Promise<void> {
     preparedAt: new Date().toISOString(),
   };
   writeFileSync(WHISPER_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  const repairedManifest = repairWhisperRuntime(manifest);
+  const repairedManifest = await repairWhisperRuntime(manifest);
   await validateWhisperRuntime(repairedManifest);
   console.log(`[media-assets] whisper.cpp ${release.tag_name} preparado para ${process.platform}/${process.arch}.`);
 }

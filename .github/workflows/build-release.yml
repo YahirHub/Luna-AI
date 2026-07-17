@@ -60,6 +60,7 @@ jobs:
           cp README.md release/luna-ai-linux-amd64/README.md
           chmod +x release/luna-ai-linux-amd64/luna-ai
           find release/luna-ai-linux-amd64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
+          test -f release/luna-ai-linux-amd64/runtime/whisper/system-libs/libgomp.so.1
           tar -czf release/luna-ai-linux-amd64.tar.gz -C release luna-ai-linux-amd64
 
       - uses: actions/upload-artifact@v4
@@ -94,6 +95,7 @@ jobs:
           cp README.md release/luna-ai-linux-arm64/README.md
           chmod +x release/luna-ai-linux-arm64/luna-ai
           find release/luna-ai-linux-arm64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
+          test -f release/luna-ai-linux-arm64/runtime/whisper/system-libs/libgomp.so.1
           tar -czf release/luna-ai-linux-arm64.tar.gz -C release luna-ai-linux-arm64
 
       - uses: actions/upload-artifact@v4
