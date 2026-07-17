@@ -4,7 +4,7 @@
 
 # Luna AI
 
-Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, búsqueda web multiproveedor, subagente investigador, selección de modelos y control de acceso.
+Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, transcripción y OCR locales, búsqueda web multiproveedor, subagente investigador, selección de modelos y control de acceso.
 
 ## Funciones principales
 
@@ -21,6 +21,9 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Lectura segura de fuentes públicas mediante una herramienta interna.
 - Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
 - Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
+- Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
+- OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
+- Luna compila como binario standalone y se distribuye junto al runtime oficial de whisper.cpp; sin FFmpeg, Python ni APIs multimedia.
 - Administrador, usuarios, sesiones y bloqueo de cuentas.
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
@@ -31,6 +34,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Una cuenta de WhatsApp para vincular el bot.
 - Opcional: claves de uno o más motores de búsqueda.
 - Opcional: un proveedor LLM compatible con la API de chat completions de OpenAI.
+- Conexión a internet durante `bun run dev` o `bun run build` para consultar la release `latest` de whisper.cpp, descargar el binario correcto para el sistema y verificar su SHA-256. Después funciona offline.
 
 ## Instalación local
 
@@ -52,6 +56,41 @@ No es necesario crear `.env` ni archivos JSON manualmente.
 3. Inicia sesión con `!login`.
 4. Conversa normalmente: Luna usa OpenCode Free de forma automática.
 5. Configura búsqueda web con `/setup-search` cuando necesites acceso a internet.
+
+## Procesamiento multimedia local
+
+Luna procesa localmente las notas de voz y el texto de imágenes. El bot principal es un ejecutable Bun standalone; la transcripción se delega al `whisper-cli` oficial distribuido junto a Luna y el OCR continúa dentro del subproceso multimedia. No se envían archivos a APIs de transcripción u OCR.
+
+### Notas de voz
+
+- Formatos aceptados: `audio/ogg` y `audio/opus`, incluidos los mensajes OGG/Opus habituales de WhatsApp.
+- Límite: 12 MB y 120 segundos.
+- El decoder OGG/Opus convierte la nota a WAV PCM mono de 16 kHz sin FFmpeg. Después Luna invoca el `whisper-cli` oficial con el modelo multilingüe cuantizado `base-q5_1`.
+- El audio se mezcla a mono y se reduce de 48 kHz a 16 kHz antes de transcribir.
+- WhatsApp muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
+
+### Imágenes
+
+- Formatos aceptados: JPEG y PNG.
+- Límite: 10 MB, 16 megapíxeles y 20 000 caracteres extraídos.
+- Tesseract WASM y el modelo rápido de español se incorporan al binario.
+- El texto extraído y el pie de imagen se entregan al asistente con marcadores que conservan su origen.
+
+El procesamiento pesado corre en un subproceso persistente y serializado para no bloquear la conexión de WhatsApp. El subproceso ejecuta `whisper-cli` para audio y Tesseract WASM para OCR. Luna mantiene el estado `escribiendo` durante el trabajo y admite como máximo tres solicitudes pendientes para evitar saturar memoria.
+
+Durante `bun run dev` y `bun run build`, `scripts/prepare-media-assets.ts` consulta la API oficial de GitHub, selecciona la release `latest` de whisper.cpp para Windows x64, Linux x64 o Linux arm64, verifica el digest SHA-256 publicado por GitHub y extrae todo el paquete oficial. También descarga y verifica el modelo Whisper y prepara los recursos OCR. `assets/runtime/` es temporal y no se versiona.
+
+`bun run build` copia a `dist/runtime/whisper/` el ejecutable, las DLL o bibliotecas compartidas, el manifiesto de versión y el modelo. Para mover Luna manualmente debes copiar el ejecutable **junto con la carpeta `runtime/`**. Los paquetes de GitHub Releases ya vienen completos y listos para ejecutar.
+
+Si una descarga automática está bloqueada, puedes descargar manualmente el asset oficial de la release más reciente y señalarlo sin desactivar la verificación:
+
+```powershell
+$env:WHISPER_CPP_ARCHIVE_PATH = "C:\Descargas\whisper-bin-x64.zip"
+$env:WHISPER_MODEL_PATH = "C:\Descargas\ggml-base-q5_1.bin"
+bun run build
+```
+
+El archivo manual debe coincidir con el digest publicado por GitHub y el modelo debe coincidir con su SHA-256 esperado.
 
 ## Proveedor LLM predeterminado
 
@@ -255,7 +294,7 @@ docker run --rm -it `
   luna-ai
 ```
 
-El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda y credenciales. No es necesario montar archivos adicionales.
+El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda y credenciales. Los audios e imágenes se procesan en memoria y no se guardan en el volumen. No es necesario montar archivos adicionales.
 
 Para revisar el QR o los logs:
 
@@ -300,8 +339,7 @@ persistent/
 ├── search-auth.json         # API keys de búsqueda; secreto
 ├── llm.config.json          # Solo si existe proveedor LLM personalizado
 ├── reminders.json           # Recordatorios de una sola vez
-├── users.json               # Usuarios y sesiones del bot
-└── uploads/                 # Imágenes recibidas
+└── users.json               # Usuarios y sesiones del bot
 ```
 
 `persistent/` no debe versionarse ni exponerse públicamente.
@@ -324,13 +362,29 @@ persistent/
 
 ```text
 assets/
-└── luna-ai.png
+├── luna-ai.png
+└── runtime/                 # whisper.cpp, modelo y WASM OCR preparados; ignorados por Git
+
+patches/
+└── ogg-opus-decoder@1.7.3.patch # Evita incluir su WebWorker opcional en Bun compile
+
+scripts/
+├── prepare-media-assets.ts  # Descarga latest de whisper.cpp, modelo y assets OCR
+├── package-runtime.ts       # Copia whisper.cpp junto al ejecutable compilado
+└── eliminar-whisper-wasm-obsoleto.ps1 # Limpieza segura de la implementación sustituida
 
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
 ├── agent-config.ts          # Configuración persistente y flujo /config
 ├── research-agent.ts        # Subagente aislado, progreso y tools internas
 ├── scheduled-context.ts     # Registro de alarmas entregadas en el contexto
+├── media.ts                 # Validación y descarga en memoria de audio/imágenes
+├── media-processing/
+│   ├── audio-utils.ts       # Mezcla mono y reducción a 16 kHz
+│   ├── client.ts            # Cola e IPC con el subproceso multimedia
+│   ├── protocol.ts          # Contrato de mensajes
+│   ├── whisper-native.ts    # WAV, resolución del runtime y ejecución de whisper-cli
+│   └── worker.ts            # OGG/Opus, whisper.cpp y OCR WASM
 ├── search/
 │   ├── read-url.ts          # Lectura de páginas con protecciones SSRF
 │   ├── search-config.ts     # Tipos, proveedores y normalización
@@ -360,7 +414,16 @@ bun test
 bun run build
 ```
 
-El workflow de GitHub genera binarios para Linux amd64, Linux arm64 y Windows amd64. Ninguna credencial se incrusta en los binarios ni en los releases.
+Salida local esperada:
+
+```text
+dist/
+├── luna-ai.exe              # Windows; en Linux se llama luna-ai
+└── runtime/
+    └── whisper/             # whisper-cli, bibliotecas, modelo y manifest.json
+```
+
+El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Ninguna credencial se incrusta en los releases.
 
 ## Pruebas manuales importantes
 
@@ -376,7 +439,10 @@ El workflow de GitHub genera binarios para Linux amd64, Linux arm64 y Windows am
 10. Revisar `context.json` y comprobar que no contenga resultados completos ni páginas leídas por el subagente.
 11. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
 12. Desactivar búsqueda y subagente desde `/config` y comprobar que `research_web` desaparezca.
-13. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
+13. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
+14. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
+15. Probar un audio mayor de 120 segundos y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
+16. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
 
 ## Limpieza segura en Windows
 

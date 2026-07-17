@@ -6,7 +6,15 @@ import {
   dispatchCommand,
   isPositiveInteger,
 } from "./commands.ts";
-import { downloadAndSaveImage } from "./media.ts";
+import {
+  buildAudioContextText,
+  buildImageContextText,
+  downloadAudioForTranscription,
+  downloadImageForOcr,
+  getMediaCaption,
+  getMediaKind,
+} from "./media.ts";
+import { MediaProcessorClient } from "./media-processing/client.ts";
 import {
   discoverModels,
   fetchModels,
@@ -89,6 +97,7 @@ const providerSetupManager = new ProviderSetupManager();
 let agentConfig = loadAgentConfig();
 const agentConfigFlowManager = new AgentConfigFlowManager();
 const searchSetupManager = new SearchSetupManager();
+const mediaProcessor = new MediaProcessorClient();
 
 /** Gestor de autenticación y sesiones de usuario. */
 const authManager = new AuthManager();
@@ -1227,13 +1236,18 @@ export async function handleMessage(
   // Marcar como leído (2 palomitas azules) inmediatamente
   void sock.readMessages([key]).catch(() => {});
 
+  const mediaKind = getMediaKind(message);
   const text =
     message.message?.conversation ??
     message.message?.extendedTextMessage?.text ??
+    message.message?.imageMessage?.caption ??
     "";
 
-  if (!text) {
-    await handleMediaMessage(sock, message, remoteJid);
+  // Baileys también emite notificaciones sin contenido conversacional
+  // (protocolos, reacciones, recibos y otros eventos internos). No deben
+  // convertirse en mensajes vacíos para el LLM porque provocarían respuestas
+  // espontáneas sin una entrada real del usuario.
+  if (!mediaKind && !text.trim()) {
     return;
   }
 
@@ -1418,6 +1432,12 @@ export async function handleMessage(
         ].join("\n"),
       );
     }
+    return;
+  }
+
+  // ── Procesamiento local de audio e imágenes ────────────────────
+  if (mediaKind) {
+    await handleMediaMessage(sock, message, remoteJid, mediaKind);
     return;
   }
 
@@ -1660,24 +1680,65 @@ async function handleMediaMessage(
   sock: WASocket,
   message: WAMessage,
   remoteJid: string,
+  mediaKind: "image" | "audio",
 ): Promise<void> {
-  const isImage = Boolean(message.message?.imageMessage);
+  if (!llmConfig || !contextManager) {
+    await sendWithTyping(
+      sock,
+      remoteJid,
+      "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.",
+    );
+    return;
+  }
 
-  if (isImage) {
-    const savedPath = await downloadAndSaveImage(message);
+  const typingSession = await startContinuousTyping(sock, remoteJid);
 
-    if (savedPath) {
-      await sendWithTyping(
-        sock,
-        remoteJid,
-        "📷 Imagen recibida y guardada correctamente.",
+  try {
+    if (mediaKind === "audio") {
+      await sock.sendMessage(remoteJid, { text: "🎙️ Transcribiendo audio..." });
+      const media = await downloadAudioForTranscription(message);
+      const result = await mediaProcessor.process(
+        "transcribe-audio",
+        media.bytes,
+        media.mimeType,
       );
-    } else {
-      await sendWithTyping(
-        sock,
-        remoteJid,
-        "⚠️ No se pudo guardar la imagen. Verifica el tipo y tamaño.",
-      );
+      if (!result.text.trim()) {
+        await sock.sendMessage(remoteJid, { text: "⚠️ No pude identificar voz o texto en el audio." });
+        return;
+      }
+
+      await typingSession.stop();
+      await handleAiChat(sock, remoteJid, buildAudioContextText(result.text));
+      return;
     }
+
+    await sock.sendMessage(remoteJid, { text: "🖼️ Extrayendo texto de la imagen..." });
+    const media = await downloadImageForOcr(message);
+    const result = await mediaProcessor.process(
+      "ocr-image",
+      media.bytes,
+      media.mimeType,
+    );
+    const caption = getMediaCaption(message);
+    if (!result.text.trim()) {
+      await sock.sendMessage(remoteJid, {
+        text: "⚠️ No encontré texto legible en la imagen. No enviaré una respuesta al asistente sin el resultado del OCR.",
+      });
+      return;
+    }
+
+    await typingSession.stop();
+    await handleAiChat(
+      sock,
+      remoteJid,
+      buildImageContextText(result.text, caption),
+    );
+  } catch (error) {
+    console.error(`[media] Error procesando ${mediaKind}:`, error);
+    await sock.sendMessage(remoteJid, {
+      text: `❌ ${error instanceof Error ? error.message : "No se pudo procesar el archivo."}`,
+    });
+  } finally {
+    await typingSession.stop();
   }
 }

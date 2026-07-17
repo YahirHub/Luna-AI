@@ -1,0 +1,13 @@
+.git
+.github
+.codewolf
+node_modules
+dist
+coverage
+.nyc_output
+persistent
+auth_info_baileys
+assets/runtime
+*.log
+*.tmp
+*.exe

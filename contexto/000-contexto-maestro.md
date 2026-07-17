@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-16
-- Último registro: contexto/038-progreso-visible-del-subagente.md
-- Resumen: Forzar toda búsqueda mediante un subagente aislado y mostrar progreso real en WhatsApp con estado de escritura continuo, resultados y fuentes verificadas.
-- Archivos del cambio: src/ai.ts, src/bot.ts, src/context.ts, src/messaging.ts, src/research-agent.ts, src/search/*, src/agent-config.ts, README.md, pruebas y contexto
+- Última actualización: 2026-07-17
+- Último registro: contexto/039-procesamiento-multimedia-local.md
+- Resumen: Integrar OCR local y transcripción OGG/Opus mediante el runtime oficial latest de whisper.cpp, distribuido junto al ejecutable Bun.
+- Archivos del cambio: package.json, bun.lock, Dockerfile, workflow, README, entrypoint, src/media-processing/*, scripts de preparación/empaquetado, pruebas y contexto
 <!-- codewolf:auto-context:end -->

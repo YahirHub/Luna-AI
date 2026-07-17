@@ -1,34 +1,38 @@
-# ─── Build stage: compilar a binario standalone ───────────────────
-FROM oven/bun:1.3.14-alpine AS build
+# ─── Build stage: Luna standalone + runtime oficial de whisper.cpp ──
+FROM oven/bun:1.3.14 AS build
 
 WORKDIR /app
 
-# Instalar dependencias
-COPY package.json ./
-RUN bun install --production
+COPY package.json bun.lock ./
+COPY patches ./patches
+RUN bun install --production --frozen-lockfile
 
-# Copiar y compilar código fuente
+COPY scripts ./scripts
+COPY assets ./assets
 COPY src ./src
-RUN bun build ./src/index.ts --compile --bytecode --outfile /tmp/bot
+RUN bun run build
 
-# ─── Runtime stage: solo el binario + runtime libs ───────────────
-FROM alpine:3.22
+# ─── Runtime glibc: compatible con los binarios oficiales Ubuntu ─────
+FROM debian:bookworm-slim
 
-# Instalar bash (entrypoint), su-exec (drop privileges) y libs runtime
-RUN apk add --no-cache bash su-exec libgcc libstdc++
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        gosu \
+        libgomp1 \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system appgroup \
+    && useradd --system --gid appgroup --home-dir /data --shell /usr/sbin/nologin appuser
 
-# Crear usuario no-root
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
-# Copiar binario compilado desde build stage
-COPY --from=build /tmp/bot /data/bot
-
-# Copiar entrypoint
+COPY --from=build /app/dist/luna-ai /data/bot
+COPY --from=build /app/dist/runtime /data/runtime
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh /data/bot \
+    && chmod -R a+rX /data/runtime \
+    && find /data/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
 
-# Directorio de trabajo para datos persistentes (/data/persistent/)
 WORKDIR /data
-
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/data/bot", "--qr"]

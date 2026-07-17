@@ -1,97 +1,115 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import type { WAMessage } from "@whiskeysockets/baileys";
-import { getAppDir } from "./utils.ts";
-import { sanitizePathSegment } from "./storage.ts";
 
-const UPLOADS_DIR = join(getAppDir(), "persistent", "uploads");
+const IMAGE_MIME_TYPES = ["image/jpeg", "image/png"] as const;
+const AUDIO_MIME_PREFIXES = ["audio/ogg", "audio/opus"] as const;
 
-/** Tipos MIME permitidos para descarga. */
-const ALLOWED_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-] as const;
+export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+export const MAX_AUDIO_SIZE_BYTES = 12 * 1024 * 1024;
+export const MAX_AUDIO_DURATION_SECONDS = 120;
 
-type AllowedMimeType = (typeof ALLOWED_MIME_TYPES)[number];
+export type DownloadedMedia = {
+  bytes: Uint8Array;
+  mimeType: string;
+};
 
-/** Tamaño máximo en bytes (10 MB). */
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
-
-/** Asegura que la carpeta de uploads exista. */
-function ensureUploadsDir(): void {
-  if (!existsSync(UPLOADS_DIR)) {
-    mkdirSync(UPLOADS_DIR, { recursive: true });
+function numericMessageValue(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return Number(value);
+  if (value && typeof value === "object" && "toNumber" in value) {
+    const converted = (value as { toNumber(): number }).toNumber();
+    return Number.isFinite(converted) ? converted : null;
   }
+  const converted = Number(value);
+  return Number.isFinite(converted) ? converted : null;
 }
 
-/** Retorna true si el tipo MIME es una imagen permitida. */
-export function isAllowedImageMime(
-  mimeType: string,
-): mimeType is AllowedMimeType {
-  return (ALLOWED_MIME_TYPES as readonly string[]).includes(mimeType);
+export function isAllowedImageMime(mimeType: string): boolean {
+  return (IMAGE_MIME_TYPES as readonly string[]).includes(mimeType.toLowerCase());
 }
 
-/** Retorna true si el tamaño no excede el límite. */
-export function isWithinSizeLimit(sizeBytes: number): boolean {
-  return sizeBytes <= MAX_FILE_SIZE_BYTES;
+export function isAllowedAudioMime(mimeType: string): boolean {
+  const normalized = mimeType.toLowerCase();
+  return AUDIO_MIME_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix};`));
 }
 
-/**
- * Descarga la imagen de un mensaje de WhatsApp y la guarda en uploads/.
- * Retorna la ruta del archivo o null si no se pudo guardar.
- */
-export async function downloadAndSaveImage(
+export function isWithinSizeLimit(sizeBytes: number, maxBytes = MAX_IMAGE_SIZE_BYTES): boolean {
+  return Number.isFinite(sizeBytes) && sizeBytes >= 0 && sizeBytes <= maxBytes;
+}
+
+export function getMediaKind(message: WAMessage): "image" | "audio" | null {
+  if (message.message?.imageMessage) return "image";
+  if (message.message?.audioMessage) return "audio";
+  return null;
+}
+
+export function getMediaCaption(message: WAMessage): string {
+  return message.message?.imageMessage?.caption?.trim() ?? "";
+}
+
+async function downloadValidatedMedia(
   message: WAMessage,
-): Promise<string | null> {
-  const imageMessage = message.message?.imageMessage;
-
-  if (!imageMessage) {
-    return null;
+  mimeType: string,
+  declaredSize: unknown,
+  maxBytes: number,
+): Promise<DownloadedMedia> {
+  const numericSize = numericMessageValue(declaredSize);
+  if (numericSize !== null && !isWithinSizeLimit(numericSize, maxBytes)) {
+    throw new Error(`El archivo supera el límite de ${Math.floor(maxBytes / 1024 / 1024)} MB.`);
   }
 
-  const mimeType = imageMessage.mimetype ?? "image/jpeg";
+  const downloaded = await downloadMediaMessage(message, "buffer", {});
+  const bytes = new Uint8Array(downloaded);
+  if (!isWithinSizeLimit(bytes.byteLength, maxBytes)) {
+    throw new Error(`El archivo supera el límite real de ${Math.floor(maxBytes / 1024 / 1024)} MB.`);
+  }
+  return { bytes, mimeType };
+}
 
+export async function downloadImageForOcr(message: WAMessage): Promise<DownloadedMedia> {
+  const image = message.message?.imageMessage;
+  if (!image) throw new Error("El mensaje no contiene una imagen.");
+  const mimeType = (image.mimetype ?? "image/jpeg").toLowerCase();
   if (!isAllowedImageMime(mimeType)) {
-    console.warn(`[media] Tipo MIME no permitido: ${mimeType}`);
-    return null;
+    throw new Error("El OCR local solo admite imágenes JPEG y PNG.");
+  }
+  return downloadValidatedMedia(message, mimeType, image.fileLength, MAX_IMAGE_SIZE_BYTES);
+}
+
+export async function downloadAudioForTranscription(message: WAMessage): Promise<DownloadedMedia> {
+  const audio = message.message?.audioMessage;
+  if (!audio) throw new Error("El mensaje no contiene audio.");
+  const mimeType = (audio.mimetype ?? "audio/ogg; codecs=opus").toLowerCase();
+  if (!isAllowedAudioMime(mimeType)) {
+    throw new Error("La transcripción local solo admite notas de voz OGG/Opus.");
+  }
+  const duration = numericMessageValue(audio.seconds);
+  if (duration !== null && duration > MAX_AUDIO_DURATION_SECONDS) {
+    throw new Error(`El audio supera el límite de ${MAX_AUDIO_DURATION_SECONDS} segundos.`);
+  }
+  return downloadValidatedMedia(message, mimeType, audio.fileLength, MAX_AUDIO_SIZE_BYTES);
+}
+
+export function buildAudioContextText(transcript: string): string {
+  return `[Transcripción de audio generada por el sistema]\n${transcript.trim()}`;
+}
+
+export function buildImageContextText(ocrText: string, caption = ""): string {
+  const normalizedCaption = caption.trim();
+  const normalizedOcr = ocrText.trim();
+  const parts: string[] = [];
+
+  // El texto escrito por el usuario debe conservarse primero para que el
+  // asistente entienda la intención de la imagen antes de leer el OCR.
+  if (normalizedCaption) {
+    parts.push(`[Mensaje del usuario adjunto a la imagen]\n${normalizedCaption}`);
   }
 
-  const fileSizeBytes = imageMessage.fileLength;
+  parts.push(
+    normalizedOcr
+      ? `[Texto extraído de la imagen por el sistema]\n${normalizedOcr}`
+      : "[La extracción de texto de la imagen no produjo contenido legible]",
+  );
 
-  if (fileSizeBytes !== undefined && fileSizeBytes !== null) {
-    const size: number =
-      typeof fileSizeBytes === "object"
-        ? (fileSizeBytes as { toNumber(): number }).toNumber()
-        : Number(fileSizeBytes);
-
-    if (Number.isFinite(size) && !isWithinSizeLimit(size)) {
-      console.warn(
-        `[media] Archivo demasiado grande: ${size} bytes (máx ${MAX_FILE_SIZE_BYTES})`,
-      );
-      return null;
-    }
-  }
-
-  ensureUploadsDir();
-
-  const buffer = await downloadMediaMessage(message, "buffer", {});
-  if (!isWithinSizeLimit(buffer.byteLength)) {
-    console.warn(
-      `[media] Descarga rechazada por tamaño real: ${buffer.byteLength} bytes`,
-    );
-    return null;
-  }
-
-  const extension = mimeType.split("/")[1] ?? "jpg";
-  const messageId = sanitizePathSegment(message.key.id ?? "unknown");
-  const filename = `${Date.now()}_${messageId}.${extension}`;
-  const filePath = join(UPLOADS_DIR, filename);
-
-  writeFileSync(filePath, new Uint8Array(buffer));
-  console.log(`[media] Imagen guardada: ${filePath}`);
-
-  return filePath;
+  return parts.join("\n\n");
 }
