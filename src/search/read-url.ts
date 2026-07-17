@@ -7,6 +7,11 @@ const MAX_DOWNLOAD_BYTES = 2_000_000;
 const DEFAULT_MAX_CHARS = 20_000;
 const FETCH_TIMEOUT_MS = 20_000;
 
+type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
 export const READ_URL_TOOL: ToolDefinition = {
   type: "function",
   function: {
@@ -215,7 +220,7 @@ async function readTextLimited(response: Response): Promise<string> {
 
 export interface ReadUrlOptions {
   signal?: AbortSignal;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 export async function readUrl(

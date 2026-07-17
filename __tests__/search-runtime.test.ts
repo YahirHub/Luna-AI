@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   normalizeWebSearchRequest,
   runWebSearchWithFallback,
+  type FetchLike,
 } from "../src/search/search-runtime.ts";
 import { normalizeWebSearchAuth, normalizeWebSearchSettings } from "../src/search/search-config.ts";
 
@@ -39,7 +40,7 @@ describe("search runtime", () => {
 
   it("usa el siguiente motor cuando el predeterminado falla", async () => {
     const calls: string[] = [];
-    const fetchMock: typeof fetch = async (input) => {
+    const fetchMock: FetchLike = async (input) => {
       const url = String(input);
       calls.push(url);
       if (url.includes("tavily")) {
@@ -71,6 +72,13 @@ describe("search runtime", () => {
     );
 
     expect(result.provider).toBe("exa");
+    expect(result.resultCount).toBe(1);
+    expect(result.results).toEqual([
+      expect.objectContaining({
+        title: "Documentación oficial",
+        url: "https://example.com/docs",
+      }),
+    ]);
     expect(result.text).toContain("https://example.com/docs");
     expect(result.attempts.map((item) => item.status)).toEqual(["failed", "success"]);
     expect(calls.length).toBe(2);

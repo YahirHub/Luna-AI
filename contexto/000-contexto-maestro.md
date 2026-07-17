@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-16
-- Último registro: contexto/037-agente-busqueda-y-alarmas-en-contexto.md
-- Resumen: Incorporar alarmas entregadas al contexto persistente y agregar búsqueda web agéntica multiproveedor, configurada con `/setup-search` y `/config`, sin comandos públicos de búsqueda.
-- Archivos del cambio: src/bot.ts, src/context.ts, src/ai.ts, src/agent-config.ts, src/research-agent.ts, src/scheduled-context.ts, src/search/*, README.md, pruebas y contexto
+- Último registro: contexto/038-progreso-visible-del-subagente.md
+- Resumen: Forzar toda búsqueda mediante un subagente aislado y mostrar progreso real en WhatsApp con estado de escritura continuo, resultados y fuentes verificadas.
+- Archivos del cambio: src/ai.ts, src/bot.ts, src/context.ts, src/messaging.ts, src/research-agent.ts, src/search/*, src/agent-config.ts, README.md, pruebas y contexto
 <!-- codewolf:auto-context:end -->

@@ -18,9 +18,9 @@ Agregar las alarmas realmente entregadas al contexto persistente del usuario e i
 - Las preferencias de búsqueda y las API keys se guardan en archivos separados.
 - `/setup-search` solo está disponible para administradores y se usa únicamente para configurar motores.
 - `/config` controla las herramientas internas de búsqueda, el subagente, la profundidad y el timeout.
-- No existe un comando público para buscar; Luna decide automáticamente cuándo usar búsqueda, lectura de fuentes o un subagente.
+- No existe un comando público para buscar; Luna decide automáticamente cuándo delegar la consulta al subagente.
 - El subagente hereda el proveedor y modelo del usuario, pero recibe un contexto aislado.
-- El investigador solo dispone de `web_search` y `read_url`; no puede modificar memoria, alarmas, recordatorios ni usuarios.
+- El modelo principal solo dispone de `research_web`; el investigador aislado es el único que recibe `web_search` y `read_url`, sin acceso a memoria, alarmas, recordatorios ni usuarios.
 - `read_url` bloquea esquemas no HTTP, hosts locales, redes privadas, credenciales embebidas y redirecciones inseguras.
 - No se agregaron dependencias para búsqueda, lectura HTML o persistencia.
 
@@ -32,11 +32,11 @@ Agregar las alarmas realmente entregadas al contexto persistente del usuario e i
 - `src/search/search-storage.ts`: archivos separados para preferencias y credenciales.
 - `src/search/search-runtime.ts`: adaptadores HTTP, normalización y fallback entre motores.
 - `src/search/search-setup.ts`: menú administrativo `/setup-search`.
-- `src/search/search-tools.ts`: definición y ejecución de `web_search`.
+- `src/search/search-tools.ts`: definición y ejecución detallada de `web_search`, exclusiva del subagente.
 - `src/search/read-url.ts`: definición y ejecución de `read_url` con protecciones SSRF.
 - `src/research-agent.ts`: subagente investigador aislado y fallback para gateways sin function calling.
-- `src/bot.ts`: expone solo los comandos de configuración y habilita tools internas según `/config`.
-- `src/context.ts`: instruye al modelo sobre cuándo buscar, leer fuentes o delegar investigación.
+- `src/bot.ts`: expone solo `research_web` al modelo principal y presenta el progreso del subagente en WhatsApp.
+- `src/context.ts`: instruye al modelo para delegar toda búsqueda al subagente y no leer fuentes directamente.
 - `src/ai.ts`: permite cancelar solicitudes y limitar las rondas de herramientas.
 
 # Librerías usadas

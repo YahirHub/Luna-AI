@@ -10,6 +10,11 @@ import { loadWebSearchAuth, loadWebSearchSettings } from "./search-storage.ts"
 
 export const DEFAULT_SEARCH_TIMEOUT_MS = 20_000
 
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>
+
 const SEARCH_PROVIDER_MIN_INTERVAL_MS: Record<SearchProviderId, number> = {
   tavily: 0,
   brave: 1_100,
@@ -67,10 +72,11 @@ export interface WebSearchRuntimeResult {
   request: NormalizedWebSearchRequest
   resultCount: number
   text: string
+  results: SearchResultItem[]
   attempts: SearchAttempt[]
 }
 
-interface SearchResultItem {
+export interface SearchResultItem {
   title: string
   url: string
   snippet?: string
@@ -356,7 +362,7 @@ async function fetchJson(
   init: RequestInit,
   provider: SearchProviderId,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<unknown> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -515,7 +521,7 @@ async function searchTavily(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpoint = 'https://api.tavily.com/search'
   const payload = (await fetchJson(
@@ -561,7 +567,7 @@ async function searchExa(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpoint = 'https://api.exa.ai/search'
   const payload = (await fetchJson(
@@ -621,7 +627,7 @@ async function searchLinkup(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpoint = 'https://api.linkup.so/v1/search'
   const payload = (await fetchJson(
@@ -670,7 +676,7 @@ async function searchFirecrawl(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpoint = 'https://api.firecrawl.dev/v2/search'
   const payload = (await fetchJson(
@@ -728,7 +734,7 @@ async function searchSerpApi(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpointUrl = new URL('https://serpapi.com/search.json')
   endpointUrl.searchParams.set('engine', 'google')
@@ -772,7 +778,7 @@ async function searchZenserp(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpointUrl = new URL('https://app.zenserp.com/api/v2/search')
   endpointUrl.searchParams.set('q', request.query)
@@ -861,7 +867,7 @@ async function searchBraveLlmContext(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpointUrl = new URL('https://api.search.brave.com/res/v1/llm/context')
   endpointUrl.searchParams.set('q', request.query)
@@ -920,7 +926,7 @@ async function searchBraveWeb(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   const endpointUrl = new URL('https://api.search.brave.com/res/v1/web/search')
   endpointUrl.searchParams.set('q', request.query)
@@ -971,7 +977,7 @@ async function searchBrave(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   // Web Search is the primary route because it returns stable URL results in a
   // single request and works with the Brave Free plan. LLM Context is only a
@@ -1023,7 +1029,7 @@ async function runProviderSearch(
   request: NormalizedWebSearchRequest,
   apiKey: string,
   signal: AbortSignal | undefined,
-  fetchImpl: typeof fetch,
+  fetchImpl: FetchLike,
 ): Promise<{ endpoint: string; results: SearchResultItem[] }> {
   let response: { endpoint: string; results: SearchResultItem[] }
   switch (provider) {
@@ -1064,7 +1070,7 @@ export async function runWebSearchWithFallback(
   input: WebSearchRequest,
   config?: WebSearchRuntimeConfig,
   signal?: AbortSignal,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: FetchLike = fetch,
 ): Promise<WebSearchRuntimeResult> {
   const request = normalizeWebSearchRequest(input)
   const attempts: SearchAttempt[] = []
@@ -1104,6 +1110,7 @@ export async function runWebSearchWithFallback(
         request,
         resultCount: response.results.length,
         text: formatSearchResults(provider, request.query, response.results),
+        results: response.results,
         attempts,
       }
     } catch (error) {
@@ -1139,7 +1146,7 @@ export async function testSearchProvider(
   config?: WebSearchRuntimeConfig,
   query = 'documentación oficial TypeScript',
   signal?: AbortSignal,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: FetchLike = fetch,
 ): Promise<{ ok: boolean; message: string }> {
   const settings = config?.settings ?? loadWebSearchSettings()
   const auth = config?.auth ?? loadWebSearchAuth()

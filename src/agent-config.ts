@@ -88,7 +88,7 @@ export class AgentConfigFlowManager {
     return [
       "⚙️ CONFIGURACIÓN DEL AGENTE",
       "",
-      `1. Búsqueda web directa: ${config.webSearchEnabled ? "ACTIVA" : "INACTIVA"}`,
+      `1. Acceso web del investigador: ${config.webSearchEnabled ? "ACTIVO" : "INACTIVO"}`,
       `2. Subagente investigador: ${config.researchSubagentEnabled ? "ACTIVO" : "INACTIVO"}`,
       `3. Profundidad predeterminada: ${config.defaultSearchDepth === "deep" ? "PROFUNDA" : "ESTÁNDAR"}`,
       `4. Timeout del investigador: ${Math.round(config.researcherTimeoutMs / 1000)} segundos`,

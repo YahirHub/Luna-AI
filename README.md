@@ -142,25 +142,36 @@ Ambos archivos permanecen dentro del volumen persistente y están excluidos de G
 
 Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`.
 
-## Herramientas internas y subagente investigador
+## Subagente investigador
 
-Cuando la búsqueda está habilitada, Luna decide por sí misma cuándo utilizar:
+Cuando una consulta necesita información actual o verificación externa, el modelo principal solo puede llamar a `research_web`. Esa herramienta crea un investigador independiente con su propio contexto temporal.
 
-- Búsqueda web: obtiene resultados normalizados con títulos, URLs, fragmentos y metadatos.
-- Lectura de fuentes: consulta texto de una página pública para verificarla.
-- Investigación delegada: crea un subagente aislado que busca y compara fuentes.
+Dentro de ese contexto aislado, el subagente puede:
 
-El subagente:
+- Buscar con `web_search` usando el motor configurado y sus respaldos.
+- Leer páginas públicas con `read_url` para verificar las fuentes relevantes.
+- Ejecutar varias rondas de búsqueda y comparación.
+- Priorizar documentación oficial y fuentes primarias.
+- Devolver al bot principal únicamente la síntesis final y las URLs utilizadas.
 
-- Hereda el proveedor y modelo LLM seleccionados por el usuario.
-- Trabaja con un contexto aislado; no recibe todo el chat principal.
-- Prioriza documentación oficial y fuentes primarias.
-- Puede realizar varias búsquedas y verificar páginas.
-- Devuelve una síntesis breve con URLs completas.
-- Tiene límite de rondas y timeout configurable.
-- Usa una búsqueda directa como fallback si el gateway LLM ignora function calling.
+Los resultados completos, páginas leídas y mensajes intermedios del investigador no se agregan al historial principal. Así se evita saturar el contexto persistente del usuario con evidencia temporal.
 
-La búsqueda no se expone como comando para los usuarios. Luna analiza cada mensaje y decide automáticamente si necesita una búsqueda rápida, leer una fuente o delegar la investigación al subagente. La consulta normal y la respuesta final quedan en el contexto persistente como cualquier conversación.
+El modelo principal no recibe `web_search` ni `read_url` directamente. Toda búsqueda pasa obligatoriamente por el subagente. Si el gateway LLM ignora function calling dentro del investigador, el fallback de búsqueda continúa ejecutándose dentro de ese mismo contexto aislado.
+
+La búsqueda tampoco se expone como comando para los usuarios. Luna analiza cada mensaje y decide automáticamente cuándo necesita investigar.
+
+### Progreso visible en WhatsApp
+
+Mientras investiga, Luna mantiene activo el estado `escribiendo` sin añadir una espera artificial y envía avances reales como:
+
+```text
+🕵️ AGENTE INVESTIGADOR
+
+Buscando: “Versiones actuales de Laravel”
+Profundidad: estándar
+```
+
+Después muestra un resumen de resultados con títulos y URLs, informa qué fuentes está verificando y avisa cuando está comparando la evidencia. Al terminar, la respuesta final se envía inmediatamente, sin simular otros 3 a 5 segundos de escritura.
 
 ## `/config`
 
@@ -172,7 +183,7 @@ El administrador puede modificar el comportamiento del agente desde WhatsApp:
 
 Opciones disponibles:
 
-1. Activar o desactivar búsqueda web directa.
+1. Activar o desactivar el acceso web del investigador.
 2. Activar o desactivar el subagente investigador.
 3. Cambiar la profundidad predeterminada entre estándar y profunda.
 4. Cambiar el timeout del investigador entre 60, 120, 180 y 300 segundos.
@@ -298,7 +309,7 @@ persistent/
 ## Seguridad de búsqueda
 
 - `/setup-search` y `/config` requieren una sesión administradora.
-- No existe un comando público para ejecutar búsquedas; las herramientas solo pueden ser llamadas por el agente.
+- No existe un comando público para ejecutar búsquedas; el modelo principal solo puede delegarlas al subagente investigador.
 - Las claves se almacenan separadas de las preferencias.
 - Luna intenta borrar el mensaje entrante que contiene una clave.
 - `read_url` solo acepta HTTP y HTTPS.
@@ -318,7 +329,7 @@ assets/
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
 ├── agent-config.ts          # Configuración persistente y flujo /config
-├── research-agent.ts        # Subagente investigador aislado
+├── research-agent.ts        # Subagente aislado, progreso y tools internas
 ├── scheduled-context.ts     # Registro de alarmas entregadas en el contexto
 ├── search/
 │   ├── read-url.ts          # Lectura de páginas con protecciones SSRF
@@ -326,7 +337,7 @@ src/
 │   ├── search-runtime.ts    # Adaptadores y fallback multiproveedor
 │   ├── search-setup.ts      # Flujo /setup-search
 │   ├── search-storage.ts    # Preferencias y credenciales separadas
-│   └── search-tools.ts      # Tool web_search
+│   └── search-tools.ts      # web_search, uso exclusivo del subagente
 ├── providers/
 │   └── opencode-free.ts     # Proveedor LLM gratuito integrado
 ├── llm-config.ts            # Proveedor personalizado y /setup-provider
@@ -359,11 +370,13 @@ El workflow de GitHub genera binarios para Linux amd64, Linux arm64 y Windows am
 4. Preguntar después por la alarma y verificar que el asistente recuerde el evento.
 5. Abrir `/setup-search`, configurar un motor y probar la conexión.
 6. Configurar dos motores, forzar el fallo del predeterminado y verificar el fallback.
-7. Enviar una pregunta sobre información actual sin usar comandos y confirmar que Luna decida llamar `web_search` o `research_web`.
-8. Confirmar que la respuesta incluya las fuentes necesarias sin exponer nombres de herramientas internas.
-9. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
-10. Desactivar búsqueda y subagente desde `/config` y comprobar que las herramientas desaparezcan.
-11. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
+7. Enviar una pregunta sobre información actual sin usar comandos y confirmar que el modelo principal llame únicamente `research_web`.
+8. Verificar que aparezcan el estado `escribiendo`, la consulta del agente, los resultados encontrados y las fuentes que está revisando.
+9. Confirmar que la respuesta final se envíe sin una espera artificial después de terminar la investigación.
+10. Revisar `context.json` y comprobar que no contenga resultados completos ni páginas leídas por el subagente.
+11. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
+12. Desactivar búsqueda y subagente desde `/config` y comprobar que `research_web` desaparezca.
+13. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
 
 ## Limpieza segura en Windows
 

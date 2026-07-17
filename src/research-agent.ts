@@ -7,15 +7,19 @@ import type { AgentConfig, SearchDepth } from "./agent-config.ts";
 import type { LlmConfig } from "./llm-config.ts";
 import { getMexicoCityNow } from "./utils.ts";
 import { READ_URL_TOOL, executeReadUrlTool } from "./search/read-url.ts";
-import { WEB_SEARCH_TOOL, executeWebSearchTool } from "./search/search-tools.ts";
+import {
+  WEB_SEARCH_TOOL,
+  executeWebSearchToolDetailed,
+  type WebSearchToolResult,
+} from "./search/search-tools.ts";
 
 export const RESEARCH_WEB_TOOL: ToolDefinition = {
   type: "function",
   function: {
     name: "research_web",
     description:
-      "Crea automáticamente un subagente investigador aislado para resolver preguntas actuales, comparativas o que requieren varias fuentes. " +
-      "El subagente usa web_search y read_url, verifica fuentes y devuelve una síntesis con URLs.",
+      "Crea automáticamente un subagente investigador aislado para resolver preguntas actuales, comparativas o que requieren fuentes externas. " +
+      "El subagente busca, verifica páginas y devuelve una síntesis con URLs sin llenar el contexto principal con evidencia intermedia.",
     parameters: {
       type: "object",
       properties: {
@@ -35,12 +39,64 @@ export const RESEARCH_WEB_TOOL: ToolDefinition = {
   },
 };
 
+export interface ResearchProgressResult {
+  title: string;
+  url: string;
+  snippet?: string;
+}
+
+export type ResearchProgressEvent =
+  | { type: "started"; query: string; depth: SearchDepth }
+  | { type: "searching"; query: string; depth: SearchDepth }
+  | {
+      type: "search_results";
+      query: string;
+      provider: string;
+      providerLabel: string;
+      resultCount: number;
+      results: ResearchProgressResult[];
+    }
+  | { type: "reading_source"; url: string }
+  | { type: "source_read"; url: string }
+  | { type: "synthesizing" }
+  | { type: "completed" };
+
+export type ResearchProgressHandler = (
+  event: ResearchProgressEvent,
+) => void | Promise<void>;
+
 export interface ResearchAgentOptions {
   query: string;
   model: string;
   llmConfig: LlmConfig;
   agentConfig: AgentConfig;
   depth?: SearchDepth;
+  onProgress?: ResearchProgressHandler;
+}
+
+/**
+ * El modelo principal solo recibe research_web. web_search y read_url quedan
+ * encapsuladas dentro del contexto aislado del investigador.
+ */
+export function getMainResearchTools(config: AgentConfig): ToolDefinition[] {
+  return config.webSearchEnabled && config.researchSubagentEnabled
+    ? [RESEARCH_WEB_TOOL]
+    : [];
+}
+
+async function emitProgress(
+  handler: ResearchProgressHandler | undefined,
+  event: ResearchProgressEvent,
+): Promise<void> {
+  if (!handler) return;
+  try {
+    await handler(event);
+  } catch (error) {
+    console.warn(
+      "[research] No se pudo enviar una actualización de progreso:",
+      error,
+    );
+  }
 }
 
 function createResearchMessages(query: string, depth: SearchDepth): ChatMessage[] {
@@ -103,6 +159,14 @@ async function synthesizeFallback(
   return result.content;
 }
 
+function progressResults(result: WebSearchToolResult): ResearchProgressResult[] {
+  return result.results.slice(0, 8).map((item) => ({
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+  }));
+}
+
 export async function runResearchSubagent(
   options: ResearchAgentOptions,
 ): Promise<string> {
@@ -122,7 +186,16 @@ export async function runResearchSubagent(
     options.agentConfig.researcherTimeoutMs,
   );
 
+  await emitProgress(options.onProgress, { type: "started", query, depth });
+
   try {
+    let hasReportedSynthesis = false;
+    const reportSynthesis = async (): Promise<void> => {
+      if (hasReportedSynthesis) return;
+      hasReportedSynthesis = true;
+      await emitProgress(options.onProgress, { type: "synthesizing" });
+    };
+
     const result = await chatCompletionWithTools(
       createResearchMessages(query, depth),
       options.model,
@@ -130,37 +203,102 @@ export async function runResearchSubagent(
       [WEB_SEARCH_TOOL, READ_URL_TOOL],
       async (name, args) => {
         if (name === "web_search") {
-          return executeWebSearchTool(args, depth, controller.signal);
+          const searchQuery = typeof args.query === "string"
+            ? args.query.trim()
+            : query;
+          await emitProgress(options.onProgress, {
+            type: "searching",
+            query: searchQuery || query,
+            depth,
+          });
+          try {
+            const searchResult = await executeWebSearchToolDetailed(
+              args,
+              depth,
+              controller.signal,
+            );
+            await emitProgress(options.onProgress, {
+              type: "search_results",
+              query: searchResult.query,
+              provider: searchResult.provider,
+              providerLabel: searchResult.providerLabel,
+              resultCount: searchResult.resultCount,
+              results: progressResults(searchResult),
+            });
+            return searchResult.text;
+          } catch (error) {
+            return `Error: ${error instanceof Error ? error.message : String(error)}`;
+          }
         }
         if (name === "read_url") {
-          return executeReadUrlTool(args, controller.signal);
+          const url = typeof args.url === "string" ? args.url.trim() : "";
+          if (url) {
+            await emitProgress(options.onProgress, {
+              type: "reading_source",
+              url,
+            });
+          }
+          const readResult = await executeReadUrlTool(args, controller.signal);
+          if (url && !readResult.startsWith("Error:")) {
+            await emitProgress(options.onProgress, {
+              type: "source_read",
+              url,
+            });
+          }
+          return readResult;
         }
         return `Error: herramienta de investigación desconocida "${name}".`;
       },
       2,
       undefined,
-      { maxRounds: 7, signal: controller.signal },
+      {
+        maxRounds: 7,
+        signal: controller.signal,
+        onToolRoundComplete: async () => reportSynthesis(),
+      },
     );
 
     if (result.toolsCalled.includes("web_search") && result.content.trim()) {
+      await emitProgress(options.onProgress, { type: "completed" });
       return result.content.trim();
     }
 
     // Algunos gateways ignoran function calling. En ese caso ejecutamos una
-    // búsqueda directa y pedimos una síntesis aislada con la evidencia real.
-    const evidence = await executeWebSearchTool(
-      { query, depth },
-      depth,
-      controller.signal,
-    );
-    if (evidence.startsWith("Error:")) return evidence;
-    return (await synthesizeFallback(
+    // búsqueda directa dentro del mismo subagente aislado y sintetizamos solo
+    // con la evidencia obtenida, sin añadirla al contexto principal.
+    await emitProgress(options.onProgress, {
+      type: "searching",
       query,
-      evidence,
+      depth,
+    });
+    let searchResult: WebSearchToolResult;
+    try {
+      searchResult = await executeWebSearchToolDetailed(
+        { query, depth },
+        depth,
+        controller.signal,
+      );
+    } catch (error) {
+      return `Error: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    await emitProgress(options.onProgress, {
+      type: "search_results",
+      query: searchResult.query,
+      provider: searchResult.provider,
+      providerLabel: searchResult.providerLabel,
+      resultCount: searchResult.resultCount,
+      results: progressResults(searchResult),
+    });
+    await reportSynthesis();
+    const fallbackResult = (await synthesizeFallback(
+      query,
+      searchResult.text,
       options.model,
       options.llmConfig,
       controller.signal,
     )).trim();
+    await emitProgress(options.onProgress, { type: "completed" });
+    return fallbackResult;
   } catch (error) {
     if (controller.signal.aborted) {
       return `Error: el subagente investigador excedió ${Math.round(options.agentConfig.researcherTimeoutMs / 1000)} segundos.`;

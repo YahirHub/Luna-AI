@@ -1,7 +1,11 @@
 import type { ToolDefinition } from "../ai.ts";
 import type { SearchDepth } from "../agent-config.ts";
+import { SEARCH_PROVIDER_LABELS } from "./search-config.ts";
 import { loadWebSearchAuth, loadWebSearchSettings } from "./search-storage.ts";
-import { runWebSearchWithFallback } from "./search-runtime.ts";
+import {
+  runWebSearchWithFallback,
+  type SearchResultItem,
+} from "./search-runtime.ts";
 
 export const WEB_SEARCH_TOOL: ToolDefinition = {
   type: "function",
@@ -29,32 +33,59 @@ export const WEB_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
+export interface WebSearchToolResult {
+  text: string;
+  query: string;
+  depth: SearchDepth;
+  provider: string;
+  providerLabel: string;
+  resultCount: number;
+  results: SearchResultItem[];
+}
+
+export async function executeWebSearchToolDetailed(
+  args: Record<string, unknown>,
+  defaultDepth: SearchDepth,
+  signal?: AbortSignal,
+): Promise<WebSearchToolResult> {
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  if (!query) throw new Error("La consulta de búsqueda es obligatoria.");
+  const depth = args.depth === "deep" || args.depth === "standard"
+    ? args.depth
+    : defaultDepth;
+
+  const result = await runWebSearchWithFallback(
+    {
+      query,
+      numResults: depth === "deep" ? 15 : 8,
+      type: depth === "deep" ? "deep" : "fast",
+      livecrawl: depth === "deep" ? "preferred" : "fallback",
+    },
+    {
+      settings: loadWebSearchSettings(),
+      auth: loadWebSearchAuth(),
+    },
+    signal,
+  );
+
+  return {
+    text: result.text,
+    query,
+    depth,
+    provider: result.provider,
+    providerLabel: SEARCH_PROVIDER_LABELS[result.provider],
+    resultCount: result.resultCount,
+    results: result.results,
+  };
+}
+
 export async function executeWebSearchTool(
   args: Record<string, unknown>,
   defaultDepth: SearchDepth,
   signal?: AbortSignal,
 ): Promise<string> {
-  const query = typeof args.query === "string" ? args.query.trim() : "";
-  if (!query) return "Error: la consulta de búsqueda es obligatoria.";
-  const depth = args.depth === "deep" || args.depth === "standard"
-    ? args.depth
-    : defaultDepth;
-
   try {
-    const result = await runWebSearchWithFallback(
-      {
-        query,
-        numResults: depth === "deep" ? 15 : 8,
-        type: depth === "deep" ? "deep" : "fast",
-        livecrawl: depth === "deep" ? "preferred" : "fallback",
-      },
-      {
-        settings: loadWebSearchSettings(),
-        auth: loadWebSearchAuth(),
-      },
-      signal,
-    );
-    return result.text;
+    return (await executeWebSearchToolDetailed(args, defaultDepth, signal)).text;
   } catch (error) {
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   }

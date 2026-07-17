@@ -208,6 +208,7 @@ export async function chatCompletion(
 export interface ToolChatRuntimeOptions {
   maxRounds?: number;
   signal?: AbortSignal;
+  onToolRoundComplete?: (toolNames: string[], round: number) => void | Promise<void>;
 }
 
 export async function chatCompletionWithTools(
@@ -238,6 +239,7 @@ export async function chatCompletionWithTools(
 
     // Ejecutar todos los tool_calls de esta ronda
     const toolMessages: ChatMessage[] = [];
+    const roundToolNames: string[] = [];
 
     for (const call of result.tool_calls) {
       let args: Record<string, unknown> = {};
@@ -250,6 +252,7 @@ export async function chatCompletionWithTools(
       const toolResult = await executeTool(call.function.name, args);
 
       toolsCalled.push(call.function.name);
+      roundToolNames.push(call.function.name);
 
       // Notificar solo si la ejecución fue exitosa
       if (!String(toolResult).startsWith("Error:")) {
@@ -271,6 +274,7 @@ export async function chatCompletionWithTools(
     };
 
     currentMessages = [...currentMessages, assistantToolMsg, ...toolMessages];
+    await runtimeOptions.onToolRoundComplete?.(roundToolNames, round + 1);
   }
 
   // Limite de rondas alcanzado

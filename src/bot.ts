@@ -54,7 +54,7 @@ import {
   estimateRequestTokens,
 } from "./compaction.ts";
 import { estimateTokensAccurate } from "./ai.ts";
-import { sendWithTyping } from "./messaging.ts";
+import { sendWithTyping, startContinuousTyping } from "./messaging.ts";
 import { deliverScheduledMessage } from "./scheduled-messages.ts";
 import { recordAlarmDeliveryInContext } from "./scheduled-context.ts";
 import {
@@ -63,9 +63,11 @@ import {
   type SearchDepth,
 } from "./agent-config.ts";
 import { SearchSetupManager } from "./search/search-setup.ts";
-import { WEB_SEARCH_TOOL, executeWebSearchTool } from "./search/search-tools.ts";
-import { READ_URL_TOOL, executeReadUrlTool } from "./search/read-url.ts";
-import { RESEARCH_WEB_TOOL, runResearchSubagent } from "./research-agent.ts";
+import {
+  getMainResearchTools,
+  runResearchSubagent,
+  type ResearchProgressEvent,
+} from "./research-agent.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -111,12 +113,7 @@ const BASE_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
 
 function getAvailableTools(): import("./ai.ts").ToolDefinition[] {
   const tools = [...BASE_TOOLS];
-  if (agentConfig.webSearchEnabled) {
-    tools.push(WEB_SEARCH_TOOL, READ_URL_TOOL);
-  }
-  if (agentConfig.webSearchEnabled && agentConfig.researchSubagentEnabled) {
-    tools.push(RESEARCH_WEB_TOOL);
-  }
+  tools.push(...getMainResearchTools(agentConfig));
   return tools;
 }
 
@@ -130,9 +127,6 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["delete_alarm", "🗑️ Eliminando alarma..."],
   ["list_alarms", "📋 Consultando alarmas..."],
   ["toggle_alarm", "🔄 Cambiando estado de alarma..."],
-  ["web_search", "🔎 Buscando en internet..."],
-  ["read_url", "📖 Verificando una fuente..."],
-  ["research_web", "🕵️ Investigando con un subagente..."],
 ]);
 
 // ─── Compactación de contexto ──────────────────────────────────
@@ -453,6 +447,55 @@ function formatCommandName(name: string): string {
 
 function parseSearchDepth(value: unknown): SearchDepth | undefined {
   return value === "deep" || value === "standard" ? value : undefined;
+}
+
+function compactProgressText(value: string, maxLength = 120): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length <= maxLength
+    ? clean
+    : `${clean.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+function formatResearchProgress(event: ResearchProgressEvent): string | null {
+  switch (event.type) {
+    case "started":
+      return [
+        "🕵️ AGENTE INVESTIGADOR",
+        "",
+        `Buscando: “${compactProgressText(event.query, 180)}”`,
+        `Profundidad: ${event.depth === "deep" ? "profunda" : "estándar"}`,
+      ].join("\n");
+    case "searching":
+      return `🔎 Agente buscando: “${compactProgressText(event.query, 180)}”`;
+    case "search_results": {
+      const visibleResults = event.results.slice(0, 5);
+      const lines = [
+        `🔎 RESULTADOS DE BÚSQUEDA — ${event.providerLabel}`,
+        `Encontrados: ${event.resultCount}`,
+        "",
+      ];
+      visibleResults.forEach((result, index) => {
+        lines.push(`${index + 1}. ${compactProgressText(result.title, 100)}`);
+        if (result.snippet) {
+          lines.push(`   ${compactProgressText(result.snippet, 180)}`);
+        }
+        lines.push(result.url);
+      });
+      const hiddenCount = Math.max(0, event.resultCount - visibleResults.length);
+      if (hiddenCount > 0) {
+        lines.push("", `…y ${hiddenCount} resultado(s) más para analizar.`);
+      }
+      return lines.join("\n");
+    }
+    case "reading_source":
+      return `📖 Agente verificando fuente:\n${event.url}`;
+    case "source_read":
+      return null;
+    case "synthesizing":
+      return "🧠 El agente está comparando la evidencia y preparando sus conclusiones...";
+    case "completed":
+      return "✅ Investigación terminada. Preparando la respuesta final...";
+  }
 }
 
 function providerSetupPrompt(step: ProviderSetupStep): string {
@@ -1447,8 +1490,8 @@ async function handleAiChat(
     lastMsg.content = `${dynamicCtx}\n\n---\n\n${lastMsg.content}`;
   }
 
-  // Activar typing mientras la API procesa
-  await sock.sendPresenceUpdate("composing", remoteJid).catch(() => {});
+  // Mantener el estado escribiendo durante toda la operación real.
+  const typingSession = await startContinuousTyping(sock, remoteJid);
 
   try {
     // Ejecutar chat con function calling
@@ -1483,15 +1526,6 @@ async function handleAiChat(
         }
         return result;
       }
-      if (name === "web_search") {
-        return executeWebSearchTool(
-          args,
-          agentConfigSnapshot.defaultSearchDepth,
-        );
-      }
-      if (name === "read_url") {
-        return executeReadUrlTool(args);
-      }
       if (name === "research_web") {
         const query = typeof args.query === "string" ? args.query : "";
         return runResearchSubagent({
@@ -1500,6 +1534,12 @@ async function handleAiChat(
           llmConfig: cfg,
           agentConfig: agentConfigSnapshot,
           depth: parseSearchDepth(args.depth),
+          onProgress: async (event) => {
+            const progressText = formatResearchProgress(event);
+            if (!progressText) return;
+            await sock.sendMessage(remoteJid, { text: progressText });
+            await typingSession.refresh();
+          },
         });
       }
       return `Error: funcion desconocida "${name}"`;
@@ -1519,8 +1559,10 @@ async function handleAiChat(
         if (TOOL_NOTIFICATION_TEXTS.has(toolName) && !shownNotifs.has(toolName)) {
           shownNotifs.add(toolName);
           const text = TOOL_NOTIFICATION_TEXTS.get(toolName) ?? "";
-          // Enviar notificación sin esperar (fire-and-forget)
-          sock.sendMessage(remoteJid, { text }).catch(() => {});
+          // Enviar notificación sin bloquear el ciclo del modelo y renovar typing.
+          sock.sendMessage(remoteJid, { text })
+            .then(() => typingSession.refresh())
+            .catch(() => {});
         }
       },
     );
@@ -1536,9 +1578,11 @@ async function handleAiChat(
     // próximo user message via buildDynamicContext().
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
-    // Simular escritura antes de enviar
-    const typingDelay = 3000 + Math.floor(Math.random() * 2000);
-    await new Promise((r) => setTimeout(r, typingDelay));
+    // La investigación ya mostró actividad real; no añadir una espera artificial.
+    if (!result.toolsCalled.includes("research_web")) {
+      const typingDelay = 3000 + Math.floor(Math.random() * 2000);
+      await new Promise((resolve) => setTimeout(resolve, typingDelay));
+    }
 
     await sock.sendMessage(remoteJid, { text: result.content });
   } catch (err: unknown) {
@@ -1604,7 +1648,7 @@ async function handleAiChat(
         : "❌ No pude procesar tu mensaje en este momento. Intenta de nuevo.",
     );
   } finally {
-    await sock.sendPresenceUpdate("paused", remoteJid).catch(() => {});
+    await typingSession.stop();
   }
 
   }); // fin de withLock
