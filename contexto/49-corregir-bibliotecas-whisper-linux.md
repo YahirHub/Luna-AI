@@ -1,4 +1,4 @@
-# Fecha
+# 49 — Fecha
 
 2026-07-17
 
@@ -40,7 +40,7 @@ Corregir los paquetes Linux de Luna que incluían `whisper-cli`, pero fallaban a
 - `__tests__/whisper-linux-runtime.test.ts`
 - `__tests__/runtime-packaging.test.ts`
 - `README.md`
-- `contexto/000-contexto-maestro.md`
+- `contexto/01-contexto-maestro.md`
 
 # Problemas encontrados
 

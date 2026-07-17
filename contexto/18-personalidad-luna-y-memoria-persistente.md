@@ -12,7 +12,7 @@ Dar personalidad mexicana amigable al bot (Luna) e implementar un sistema de mem
 | `src/context.ts` | System prompt: Luna (mexicana, emojis, adaptable, incógnito), buildSystemPrompt inyecta memoria, setMemoryManager, refreshSystemPrompt, clearConversation preserva memoria |
 | `src/bot.ts` | Import MemoryManager, instancia en initAi(), chatCompletionWithTools reemplaza chatCompletion, anuncia "📝 Escribiendo en memoria...", refreshSystemPrompt post-write |
 | `__tests__/memory.test.ts` | **Creado.** 12 tests: init, getContent, append/overwrite write, executeMemoryTool read/write/unknown, tool definitions |
-| `contexto/015-*.md` | Este archivo |
+| `contexto/18-personalidad-luna-y-memoria-persistente.md` | Este archivo |
 
 ## Decisiones técnicas
 

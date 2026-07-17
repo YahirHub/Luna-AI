@@ -1,6 +1,12 @@
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { getAppDir, getMexicoCityNow, isValidYmdDate } from "./utils.ts";
-import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
+import { CONTEXTS_DIR } from "./context.ts";
+import { getMexicoCityNow, isValidYmdDate } from "./utils.ts";
+import {
+  readJsonFile,
+  sanitizePathSegment,
+  writeJsonFileAtomically,
+} from "./storage.ts";
 import type { WASocket } from "@whiskeysockets/baileys";
 import {
   buildReminderDeliveryMessage,
@@ -30,59 +36,90 @@ interface RemindersFile {
   reminders: Reminder[];
 }
 
+// ─── Helpers de persistencia ─────────────────────────────────────
+
+function remindersFilePath(baseDir: string, jid: string): string {
+  return join(baseDir, sanitizePathSegment(jid), "reminders.json");
+}
+
 // ─── ReminderManager ─────────────────────────────────────────────
 
 export class ReminderManager {
   private reminders: Reminder[] = [];
-  private readonly filePath: string;
+  private readonly baseDir: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private sock: WASocket | null = null;
   private checking = false;
 
-  constructor(testPath?: string) {
-    this.filePath = testPath ?? join(getAppDir(), "persistent", "reminders.json");
-    this.load();
+  constructor(testBaseDir?: string) {
+    this.baseDir = testBaseDir ?? CONTEXTS_DIR;
+    this.loadAll();
   }
 
   // ── Persistencia ─────────────────────────────────────────────
 
-  private load(): void {
+  /**
+   * Escanea exclusivamente los sandboxes de usuario.
+   * El archivo global persistent/reminders.json se ignora deliberadamente.
+   */
+  private loadAll(): void {
     try {
-      const data = readJsonFile<RemindersFile>(this.filePath);
-      const stored = Array.isArray(data?.reminders) ? data.reminders : [];
-      let migrated = false;
-      this.reminders = stored.map((reminder) => {
+      if (!existsSync(this.baseDir)) return;
+
+      const entries = readdirSync(this.baseDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const path = join(this.baseDir, entry.name, "reminders.json");
+        if (existsSync(path)) this.loadFile(path);
+      }
+    } catch (err) {
+      console.warn("[reminder] Error al cargar recordatorios:", err);
+    }
+  }
+
+  private loadFile(path: string): void {
+    try {
+      const data = readJsonFile<RemindersFile>(path);
+      if (!Array.isArray(data?.reminders)) return;
+
+      let normalized = false;
+      const reminders = data.reminders.map((reminder) => {
         const fallback = buildReminderDeliveryMessage(String(reminder.text ?? ""));
         const deliveryMessage = normalizePreparedScheduledMessage(
           reminder.deliveryMessage,
           fallback,
         );
-        if (reminder.deliveryMessage !== deliveryMessage) migrated = true;
+        if (reminder.deliveryMessage !== deliveryMessage) normalized = true;
         return { ...reminder, deliveryMessage };
       });
-      if (migrated) {
+
+      this.reminders.push(...reminders);
+      if (normalized) {
         try {
-          this.save();
+          writeJsonFileAtomically(path, { reminders });
         } catch (error) {
-          console.warn("[reminder] No se pudo persistir la migración de mensajes:", error);
+          console.warn(`[reminder] No se pudo normalizar ${path}:`, error);
         }
       }
     } catch (err) {
-      console.warn("[reminder] Error al cargar recordatorios:", err);
-      this.reminders = [];
+      console.warn(`[reminder] Error al leer ${path}:`, err);
     }
   }
 
-  private save(): void {
-    writeJsonFileAtomically(this.filePath, { reminders: this.reminders });
+  /** Persiste únicamente los recordatorios del usuario indicado. */
+  private saveUserReminders(jid: string): void {
+    const userReminders = this.reminders.filter((reminder) => reminder.jid === jid);
+    writeJsonFileAtomically(remindersFilePath(this.baseDir, jid), {
+      reminders: userReminders,
+    });
   }
 
-  /** Revierte el estado en memoria si la persistencia falla. */
-  private persistMutation<T>(mutate: () => T): T {
+  /** Revierte el estado en memoria si la persistencia del sandbox falla. */
+  private persistUserMutation<T>(jid: string, mutate: () => T): T {
     const snapshot = this.reminders.map((reminder) => ({ ...reminder }));
     try {
       const result = mutate();
-      this.save();
+      this.saveUserReminders(jid);
       return result;
     } catch (err) {
       this.reminders = snapshot;
@@ -140,7 +177,7 @@ export class ReminderManager {
       deliveryPending: false,
     };
 
-    this.persistMutation(() => this.reminders.push(reminder));
+    this.persistUserMutation(jid, () => this.reminders.push(reminder));
 
     console.log(
       `[reminder] Creado recordatorio #${reminder.id.slice(0, 8)} ` +
@@ -193,7 +230,7 @@ export class ReminderManager {
   private markDeliveryPending(id: string): void {
     const reminder = this.reminders.find((item) => item.id === id);
     if (!reminder || reminder.fired || reminder.deliveryPending) return;
-    this.persistMutation(() => {
+    this.persistUserMutation(reminder.jid, () => {
       reminder.deliveryPending = true;
     });
   }
@@ -202,25 +239,33 @@ export class ReminderManager {
   markFired(id: string): void {
     const reminder = this.reminders.find((item) => item.id === id);
     if (!reminder) return;
-    this.persistMutation(() => {
+    this.persistUserMutation(reminder.jid, () => {
       reminder.fired = true;
       reminder.deliveryPending = false;
     });
   }
 
-  /** Obtiene la lista completa (lectura). */
+  /** Obtiene los recordatorios de un usuario (copia). */
+  getUserReminders(jid: string): Reminder[] {
+    return this.reminders
+      .filter((reminder) => reminder.jid === jid)
+      .map((reminder) => ({ ...reminder }));
+  }
+
+  /** Obtiene la lista completa para el verificador periódico. */
   getAll(): Reminder[] {
     return this.reminders.map((r) => ({ ...r }));
   }
 
-  /** Elimina un recordatorio por su ID. */
-  deleteById(id: string): boolean {
-    const idx = this.reminders.findIndex((r) => r.id === id);
-    if (idx >= 0) {
-      this.persistMutation(() => this.reminders.splice(idx, 1));
-      return true;
-    }
-    return false;
+  /** Elimina un recordatorio solo si pertenece al usuario indicado. */
+  deleteById(id: string, jid: string): boolean {
+    const idx = this.reminders.findIndex(
+      (reminder) => reminder.id === id && reminder.jid === jid,
+    );
+    if (idx < 0) return false;
+
+    this.persistUserMutation(jid, () => this.reminders.splice(idx, 1));
+    return true;
   }
 
   /**
@@ -497,8 +542,8 @@ export async function executeReminderTool(
         return "Error: proporciona el texto o ID del recordatorio a eliminar.";
       }
 
-      const all = reminderManager.getAll();
-      const found = findReminder(all, jid, search, id);
+      const userReminders = reminderManager.getUserReminders(jid);
+      const found = findReminder(userReminders, jid, search, id);
 
       if (!found) {
         const msg =
@@ -508,7 +553,7 @@ export async function executeReminderTool(
         return `${msg} Usa list_reminders para ver tus recordatorios.`;
       }
 
-      reminderManager.deleteById(found.id);
+      reminderManager.deleteById(found.id, jid);
       return (
         `✅ Recordatorio eliminado: "${found.text}" ` +
         `(programado para las ${String(found.hour).padStart(2, "0")}:${String(found.minute).padStart(2, "0")}` +
@@ -518,8 +563,9 @@ export async function executeReminderTool(
 
     case "list_reminders": {
       const showAll = args.all === true;
-      const all = reminderManager.getAll();
-      const userReminders = all.filter((r) => r.jid === jid && (showAll || !r.fired));
+      const userReminders = reminderManager
+        .getUserReminders(jid)
+        .filter((reminder) => showAll || !reminder.fired);
 
       if (userReminders.length === 0) {
         return "No tienes ningun recordatorio pendiente.";

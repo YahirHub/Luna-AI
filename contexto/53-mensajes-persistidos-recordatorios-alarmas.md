@@ -1,4 +1,4 @@
-# 045 — Mensajes persistidos para recordatorios y alarmas
+# 53 — Mensajes persistidos para recordatorios y alarmas
 
 ## Fecha
 
@@ -42,7 +42,7 @@ Las herramientas `create_reminder` y `create_alarm` solicitan `delivery_message`
 
 ### Compatibilidad con registros anteriores
 
-Al cargar `reminders.json` o `alarms.json`, los elementos que no contienen `deliveryMessage` reciben automáticamente el fallback local y se vuelven a persistir. No es necesario borrar recordatorios ni alarmas existentes.
+Al cargar `reminders.json` o `alarms.json` dentro del sandbox de un usuario, los elementos que no contienen `deliveryMessage` reciben el fallback local y se vuelven a persistir. No existe migración desde el antiguo `persistent/reminders.json` global.
 
 ### Entrega independiente del LLM
 

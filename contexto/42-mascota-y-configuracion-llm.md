@@ -1,6 +1,6 @@
-# 034 — Mascota y configuración LLM independiente
+# 42 — Mascota y configuración LLM independiente
 
-> Estado: decisiones de proveedor sustituidas por `035-configuracion-proveedor-desde-whatsapp.md` y `036-restaurar-opencode-free.md`.
+> Estado: decisiones de proveedor sustituidas por `43-configuracion-proveedor-desde-whatsapp.md` y `44-restaurar-opencode-free.md`.
 
 # Fecha
 
@@ -82,7 +82,7 @@ Integrar la identidad visual de Luna AI y separar por completo la configuración
 
 # Actualización posterior
 
-La creación manual descrita en este registro fue reemplazada por el flujo administrativo documentado en `contexto/035-configuracion-proveedor-desde-whatsapp.md`.
+La creación manual descrita en este registro fue reemplazada por el flujo administrativo documentado en `contexto/43-configuracion-proveedor-desde-whatsapp.md`.
 
 - `llm.config.example.json` fue eliminado por ser innecesario.
 - La ruta predeterminada pasó a `persistent/llm.config.json`.

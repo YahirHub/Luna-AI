@@ -14,7 +14,7 @@ function createIsolatedReminder(): ReminderManager {
   testCounter++;
   const dir = join(tmpdir(), `codewolf-reminder-test-${Date.now()}-${testCounter}`);
   TEST_DIRS.push(dir);
-  return new ReminderManager(join(dir, "reminders.json"));
+  return new ReminderManager(dir);
 }
 
 const TEST_JID = "user@test.com";
@@ -48,12 +48,13 @@ describe("ReminderManager — creación", () => {
     expect(reminder.createdAt).toBeDefined();
   });
 
-  it("persiste el mensaje preparado y lo conserva después de reiniciar", () => {
+  it("persiste el mensaje preparado dentro del sandbox y lo conserva después de reiniciar", () => {
     const dir = join(tmpdir(), `codewolf-reminder-copy-${Date.now()}`);
-    const path = join(dir, "reminders.json");
+    const userDir = join(dir, TEST_JID);
+    const path = join(userDir, "reminders.json");
     TEST_DIRS.push(dir);
 
-    const first = new ReminderManager(path);
+    const first = new ReminderManager(dir);
     first.createReminder(
       TEST_JID,
       "tomar medicamentos",
@@ -63,24 +64,27 @@ describe("ReminderManager — creación", () => {
       "¡Hey! 😊 Ya es hora de tomar tus medicamentos 💊",
     );
 
-    const reloaded = new ReminderManager(path);
-    expect(reloaded.getAll()[0]?.deliveryMessage).toBe(
+    expect(existsSync(path)).toBe(true);
+    const reloaded = new ReminderManager(dir);
+    expect(reloaded.getUserReminders(TEST_JID)[0]?.deliveryMessage).toBe(
       "¡Hey! 😊 Ya es hora de tomar tus medicamentos 💊",
     );
   });
 
-  it("migra recordatorios antiguos sin deliveryMessage", () => {
-    const dir = join(tmpdir(), `codewolf-reminder-migration-${Date.now()}`);
-    const path = join(dir, "reminders.json");
+  it("ignora el antiguo archivo global y no crea una migración automática", () => {
+    const dir = join(tmpdir(), `codewolf-reminder-no-migration-${Date.now()}`);
+    const globalPath = join(dir, "reminders.json");
+    const userPath = join(dir, TEST_JID, "reminders.json");
     TEST_DIRS.push(dir);
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      path,
+      globalPath,
       JSON.stringify({
         reminders: [{
-          id: "legacy",
+          id: "legacy-global",
           jid: TEST_JID,
-          text: "comprar leche",
+          text: "no migrar",
+          deliveryMessage: "No migrar",
           hour: 12,
           minute: 0,
           date: "2026-07-17",
@@ -90,10 +94,30 @@ describe("ReminderManager — creación", () => {
       }),
     );
 
-    const migrated = new ReminderManager(path).getAll()[0];
-    expect(migrated?.deliveryMessage).toContain("comprar leche");
-    const persisted = JSON.parse(readFileSync(path, "utf8"));
-    expect(persisted.reminders[0].deliveryMessage).toContain("comprar leche");
+    const manager = new ReminderManager(dir);
+    expect(manager.getAll()).toHaveLength(0);
+    expect(existsSync(userPath)).toBe(false);
+    expect(existsSync(globalPath)).toBe(true);
+  });
+
+  it("dos usuarios mantienen reminders.json separados", () => {
+    const dir = join(tmpdir(), `codewolf-reminder-multi-user-${Date.now()}`);
+    TEST_DIRS.push(dir);
+    const manager = new ReminderManager(dir);
+    manager.createReminder("user1@test.com", "recordatorio uno", 8, 0);
+    manager.createReminder("user2@test.com", "recordatorio dos", 9, 0);
+
+    const user1Path = join(dir, "user1@test.com", "reminders.json");
+    const user2Path = join(dir, "user2@test.com", "reminders.json");
+    expect(existsSync(user1Path)).toBe(true);
+    expect(existsSync(user2Path)).toBe(true);
+
+    const first = JSON.parse(readFileSync(user1Path, "utf8"));
+    const second = JSON.parse(readFileSync(user2Path, "utf8"));
+    expect(first.reminders).toHaveLength(1);
+    expect(first.reminders[0].jid).toBe("user1@test.com");
+    expect(second.reminders).toHaveLength(1);
+    expect(second.reminders[0].jid).toBe("user2@test.com");
   });
 
   it("createReminder asigna id unico a cada recordatorio", () => {
@@ -151,10 +175,9 @@ describe("ReminderManager — markFired", () => {
 describe("ReminderManager — reintentos", () => {
   it("persiste una entrega pendiente para reintentar después de reiniciar", () => {
     const dir = join(tmpdir(), `codewolf-reminder-retry-${Date.now()}`);
-    const path = join(dir, "reminders.json");
     TEST_DIRS.push(dir);
 
-    const first = new ReminderManager(path);
+    const first = new ReminderManager(dir);
     const reminder = first.createReminder(
       TEST_JID,
       "entrega pendiente",
@@ -167,7 +190,7 @@ describe("ReminderManager — reintentos", () => {
     };
     internal.markDeliveryPending(reminder.id);
 
-    const reloaded = new ReminderManager(path);
+    const reloaded = new ReminderManager(dir);
     expect(
       reloaded.getDueReminders().some((item) => item.id === reminder.id),
     ).toBe(true);
@@ -369,6 +392,35 @@ describe("executeReminderTool", () => {
     expect(result).toContain("unknown_tool");
   });
 
+
+  it("list_reminders y delete_reminder respetan el sandbox del usuario", async () => {
+    const rm = createIsolatedReminder();
+    const own = rm.createReminder(TEST_JID, "recordatorio propio", 10, 0);
+    const other = rm.createReminder("other@test.com", "recordatorio ajeno", 11, 0);
+
+    const list = await executeReminderTool("list_reminders", {}, rm, TEST_JID);
+    expect(list).toContain("recordatorio propio");
+    expect(list).not.toContain("recordatorio ajeno");
+
+    const denied = await executeReminderTool(
+      "delete_reminder",
+      { id: other.id.slice(0, 8) },
+      rm,
+      TEST_JID,
+    );
+    expect(denied).toContain("No encontre");
+    expect(rm.getUserReminders("other@test.com")).toHaveLength(1);
+
+    const deleted = await executeReminderTool(
+      "delete_reminder",
+      { id: own.id.slice(0, 8) },
+      rm,
+      TEST_JID,
+    );
+    expect(deleted).toContain("Recordatorio eliminado");
+    expect(rm.getUserReminders(TEST_JID)).toHaveLength(0);
+    expect(rm.getUserReminders("other@test.com")).toHaveLength(1);
+  });
   it("create_reminder guarda con date explicito", async () => {
     const rm = createIsolatedReminder();
     await executeReminderTool(

@@ -284,7 +284,7 @@ La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda 
 
 ## Recordatorios, alarmas y contexto persistente
 
-Al crear un recordatorio o una alarma, Luna guarda un `deliveryMessage` autocontenido con su personalidad. El modelo que ejecuta `create_reminder` o `create_alarm` puede prepararlo en ese momento; si no lo hace, Luna genera localmente un mensaje seguro. Este texto queda en `reminders.json` o `alarms.json` y no depende de que el proveedor LLM continúe disponible cuando llegue la hora.
+Al crear un recordatorio o una alarma, Luna guarda un `deliveryMessage` autocontenido con su personalidad. El modelo que ejecuta `create_reminder` o `create_alarm` puede prepararlo en ese momento; si no lo hace, Luna genera localmente un mensaje seguro. Este texto queda dentro del sandbox del usuario, en `persistent/contexts/<jid>/reminders.json` o `alarms.json`, y no depende de que el proveedor LLM continúe disponible cuando llegue la hora.
 
 Al dispararse una notificación:
 
@@ -293,7 +293,7 @@ Al dispararse una notificación:
 3. WhatsApp nunca recibe únicamente `⏰ RECORDATORIO` o un cuerpo vacío.
 4. Después de una entrega confirmada se agregan al contexto el evento automático y el texto exacto enviado.
 
-Esto permite preguntas posteriores como “¿qué recordatorio me enviaste hoy?” o “¿qué alarma sonó?” con contexto conversacional. Los registros antiguos que no tengan `deliveryMessage` se migran automáticamente al arrancar.
+Esto permite preguntas posteriores como “¿qué recordatorio me enviaste hoy?” o “¿qué alarma sonó?” con contexto conversacional. Luna no lee ni migra el antiguo archivo global `persistent/reminders.json`; durante las pruebas locales puede eliminarse manualmente.
 
 ## Ejecución
 
@@ -385,6 +385,7 @@ persistent/
 ├── contexts/<jid>/
 │   ├── context.json         # Conversación, alarmas entregadas, modelo y compactación
 │   ├── memory.md            # Memoria duradera del usuario
+│   ├── reminders.json       # Recordatorios de una sola vez
 │   └── alarms.json          # Alarmas recurrentes
 ├── agent-config.json        # Configuración de herramientas y subagente
 ├── search.json              # Motores, estados, predeterminado y fallback
@@ -392,7 +393,6 @@ persistent/
 ├── llm.config.json          # Solo si existe proveedor LLM personalizado
 ├── whisper.json             # Modelo y parámetros globales de transcripción
 ├── whisper/models/          # Modelos adicionales descargados por el administrador
-├── reminders.json           # Recordatorios de una sola vez
 └── users.json               # Usuarios y sesiones del bot
 ```
 

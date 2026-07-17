@@ -1,4 +1,4 @@
-# Fecha
+# 50 — Fecha
 
 2026-07-17
 
@@ -34,7 +34,7 @@ Corregir los fallos de CI que impedían compilar los jobs Linux amd64/ARM64 y ha
 - `scripts/prepare-media-assets.ts`
 - `__tests__/commands.test.ts`
 - `patches/ogg-opus-decoder@1.7.3.patch`
-- `contexto/000-contexto-maestro.md`
+- `contexto/01-contexto-maestro.md`
 
 # Problemas encontrados
 

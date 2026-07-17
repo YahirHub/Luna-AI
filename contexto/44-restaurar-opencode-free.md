@@ -1,4 +1,4 @@
-# 036 — Restaurar OpenCode Free como proveedor predeterminado
+# 44 — Restaurar OpenCode Free como proveedor predeterminado
 
 # Fecha
 
@@ -44,9 +44,9 @@ Corregir la regresión que obligaba a ejecutar `/setup-provider` antes de conver
 - `__tests__/opencode-free.test.ts`
 - `__tests__/llm-config.test.ts`
 - `README.md`
-- `contexto/000-contexto-maestro.md`
-- `contexto/034-mascota-y-configuracion-llm.md`
-- `contexto/035-configuracion-proveedor-desde-whatsapp.md`
+- `contexto/01-contexto-maestro.md`
+- `contexto/42-mascota-y-configuracion-llm.md`
+- `contexto/43-configuracion-proveedor-desde-whatsapp.md`
 
 # Problemas encontrados
 

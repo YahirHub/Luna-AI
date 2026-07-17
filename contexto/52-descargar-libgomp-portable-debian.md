@@ -1,4 +1,4 @@
-# Fecha
+# 52 — Fecha
 
 2026-07-17
 
@@ -59,7 +59,7 @@ La dependencia afecta tanto a amd64 como a ARM64 cuando se usan los binarios ofi
 - `scripts/package-runtime.ts`
 - `__tests__/whisper-linux-runtime.test.ts`
 - `README.md`
-- `contexto/000-contexto-maestro.md`
+- `contexto/01-contexto-maestro.md`
 
 # Pruebas requeridas
 

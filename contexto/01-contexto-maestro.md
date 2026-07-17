@@ -1,4 +1,4 @@
-# 000 — Contexto maestro del proyecto
+# 01 — Contexto maestro del proyecto
 
 # Fecha
 
@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/045-mensajes-persistidos-recordatorios-alarmas.md
-- Resumen: Persistir desde la creación el mensaje final de recordatorios y alarmas, usarlo como fallback y registrar las entregas en contexto.
-- Archivos del cambio: scheduled-copy, entrega programada, recordatorios, alarmas, bot, prompt, pruebas, README y contexto
+- Último registro: contexto/54-recordatorios-por-sandbox-y-contexto-secuencial.md
+- Resumen: Guardar los recordatorios dentro del sandbox de cada usuario, ignorar el archivo global anterior y renumerar contexto con una secuencia única.
+- Archivos del cambio: recordatorios, pruebas, README y todos los nombres y referencias de contexto
 <!-- codewolf:auto-context:end -->

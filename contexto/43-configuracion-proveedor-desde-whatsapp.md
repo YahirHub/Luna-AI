@@ -1,6 +1,6 @@
-# 035 — Configuración del proveedor desde WhatsApp
+# 43 — Configuración del proveedor desde WhatsApp
 
-> Estado: corregido por `036-restaurar-opencode-free.md`; `/setup-provider` es opcional y no reemplaza el proveedor gratuito integrado cuando falta configuración.
+> Estado: corregido por `44-restaurar-opencode-free.md`; `/setup-provider` es opcional y no reemplaza el proveedor gratuito integrado cuando falta configuración.
 
 # Fecha
 
@@ -50,8 +50,8 @@ Eliminar la configuración manual duplicada y permitir que el administrador conf
 - `.github/workflows/build-release.yml`
 - `__tests__/llm-config.test.ts`
 - `scripts/eliminar-configuracion-obsoleta.ps1`
-- `contexto/000-contexto-maestro.md`
-- `contexto/034-mascota-y-configuracion-llm.md`
+- `contexto/01-contexto-maestro.md`
+- `contexto/42-mascota-y-configuracion-llm.md`
 
 # Problemas encontrados
 

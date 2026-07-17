@@ -1,4 +1,4 @@
-# Fecha
+# 48 — Fecha
 
 2026-07-17
 
@@ -72,7 +72,7 @@ El modelo incluido continúa dentro de `runtime/whisper/models/`. Un modelo desc
 - `__tests__/whisper-native.test.ts`
 - `__tests__/commands.test.ts`
 - `__tests__/media-flow.test.ts`
-- `contexto/000-contexto-maestro.md`
+- `contexto/01-contexto-maestro.md`
 
 # Problemas encontrados
 
