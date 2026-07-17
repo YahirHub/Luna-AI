@@ -94,6 +94,27 @@ import {
   isConfirmedToolSuccess,
   userExplicitlyBlocksScheduledCreation,
 } from "./tool-confirmation.ts";
+import { WorkspaceManager } from "./workspace/workspace-manager.ts";
+import {
+  WORKSPACE_TOOLS,
+  executeWorkspaceTool,
+} from "./workspace/workspace-tools.ts";
+import {
+  ARTIFACT_TOOLS,
+  executeArtifactTool,
+} from "./artifacts/artifact-tools.ts";
+import {
+  PARALLEL_RESEARCH_TOOLS,
+  executeTaskTool,
+  runParallelResearch,
+  type ParallelResearchProgress,
+} from "./orchestration/parallel-research.ts";
+import { TaskRuntime } from "./orchestration/task-runtime.ts";
+import {
+  WHATSAPP_TOOLS,
+  executeWhatsAppTool,
+  sendWorkspacePath,
+} from "./tools/whatsapp-tools.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -130,6 +151,10 @@ const reminderManager = new ReminderManager();
 /** Gestor de alarmas recurrentes. */
 const alarmManager = new AlarmManager();
 
+/** Workdir privado y herramientas extendidas por usuario. */
+const workspaceManager = new WorkspaceManager();
+const taskRuntime = new TaskRuntime(workspaceManager);
+
 // Variable para guardar el socket actual (para alarmas)
 let currentSock: WASocket | null = null;
 
@@ -137,7 +162,15 @@ let currentSock: WASocket | null = null;
 const compactingJids = new Set<string>();
 
 /** Tools base y herramientas opcionales según /config. */
-const BASE_TOOLS = [...MEMORY_TOOLS, ...REMINDER_TOOLS, ...ALARM_TOOLS];
+const BASE_TOOLS = [
+  ...MEMORY_TOOLS,
+  ...REMINDER_TOOLS,
+  ...ALARM_TOOLS,
+  ...WORKSPACE_TOOLS,
+  ...ARTIFACT_TOOLS,
+  ...PARALLEL_RESEARCH_TOOLS,
+  ...WHATSAPP_TOOLS,
+];
 
 function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
   const tools = [...BASE_TOOLS];
@@ -164,6 +197,11 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["admin_start_add_user", "👤 Preparando nuevo usuario..."],
   ["admin_ban_user", "🚫 Bloqueando usuario..."],
   ["admin_unban_user", "✅ Desbloqueando usuario..."],
+  ["parallel_research_report", "🤖 Preparando investigadores paralelos..."],
+  ["create_pdf_from_markdown", "📄 Generando PDF..."],
+  ["archive_folder", "🗜️ Comprimiendo carpeta..."],
+  ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
+  ["whatsapp_send", "📤 Preparando envío por WhatsApp..."],
 ]);
 
 // ─── Compactación de contexto ──────────────────────────────────
@@ -568,6 +606,24 @@ function formatResearchProgress(event: ResearchProgressEvent): string | null {
   }
 }
 
+function formatParallelResearchProgress(event: ParallelResearchProgress): string | null {
+  switch (event.type) {
+    case "task_started":
+      return `🤖 Inicié ${event.total} investigadores paralelos.
+Tarea: ${event.taskId}`;
+    case "worker_started":
+      return `🔎 Investigador ${event.index + 1}/${event.total}: ${event.name}`;
+    case "worker_completed":
+      return `${event.status === "complete" ? "✅" : "⚠️"} ${event.name}: ${event.status === "complete" ? "terminado" : "falló"} (${event.completed}/${event.total})`;
+    case "synthesizing":
+      return `📊 Analizando resultados: ${event.successful} correctos, ${event.failed} fallidos.`;
+    case "artifact_created":
+      return `📄 Informe generado: ${event.path}`;
+    case "completed":
+      return `✅ Tarea ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`;
+  }
+}
+
 function providerSetupPrompt(step: ProviderSetupStep): string {
   switch (step) {
     case "chatCompletionsUrl":
@@ -660,6 +716,9 @@ registerCommand(
   "cancelar",
   "Cancela la operación actual (selección de modelo, etc.)",
   (_cmd, senderJid) => {
+    if (taskRuntime.cancel(senderJid)) {
+      return { text: "❌ Tarea activa de subagentes cancelada." };
+    }
     if (providerSetupManager.has(senderJid)) {
       providerSetupManager.cancel(senderJid);
       return { text: "❌ Configuración del proveedor cancelada." };
@@ -1716,6 +1775,85 @@ async function handleAiChat(
         return result;
       }
 
+      if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeWorkspaceTool(name, args, workspaceManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (ARTIFACT_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeArtifactTool(name, args, workspaceManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (name === "parallel_research_report") {
+        const topics = Array.isArray(args.topics)
+          ? args.topics.flatMap((item) => {
+              if (!item || typeof item !== "object") return [];
+              const value = item as Record<string, unknown>;
+              const topicName = typeof value.name === "string" ? value.name.trim() : "";
+              const query = typeof value.query === "string" ? value.query.trim() : "";
+              return topicName && query ? [{ name: topicName, query }] : [];
+            })
+          : [];
+        result = await runParallelResearch({
+          jid: remoteJid,
+          title: typeof args.title === "string" ? args.title : "Informe de investigación",
+          topics,
+          depth: parseSearchDepth(args.depth) ?? agentConfigSnapshot.defaultSearchDepth,
+          model,
+          llmConfig: cfg,
+          agentConfig: agentConfigSnapshot,
+          workspace: workspaceManager,
+          tasks: taskRuntime,
+          deliverResult: args.deliver !== false,
+          deliver: async (path, caption) => {
+            const deliveryResult = await sendWorkspacePath(
+              sock,
+              remoteJid,
+              workspaceManager,
+              path,
+              caption,
+            );
+            if (deliveryResult.startsWith("Error:")) throw new Error(deliveryResult.slice(6).trim());
+          },
+          onProgress: async (event) => {
+            const progressText = formatParallelResearchProgress(event);
+            if (!progressText) return;
+            await sock.sendMessage(remoteJid, { text: progressText });
+            await typingSession.refresh();
+          },
+        });
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (["task_list", "task_status", "task_cancel"].includes(name)) {
+        result = await executeTaskTool(name, args, {
+          jid: remoteJid,
+          model,
+          llmConfig: cfg,
+          agentConfig: agentConfigSnapshot,
+          workspace: workspaceManager,
+          tasks: taskRuntime,
+          onProgress: undefined,
+          deliver: undefined,
+        });
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (WHATSAPP_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeWhatsAppTool(args, {
+          sock,
+          jid: remoteJid,
+          workspace: workspaceManager,
+        });
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (ADMIN_TOOLS.some((tool) => tool.function.name === name)) {
         if (!isAdminSession(remoteJid)) {
           result = "Error: esta herramienta requiere una sesión administradora activa.";
@@ -1773,6 +1911,7 @@ async function handleAiChat(
       toolExecutor,
       3,
       undefined,
+      { maxRounds: 8 },
     );
 
     const latestUsefulToolResult = [...toolResults]
@@ -1797,7 +1936,7 @@ async function handleAiChat(
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
     // La investigación ya mostró actividad real; no añadir una espera artificial.
-    if (!result.toolsCalled.includes("research_web")) {
+    if (!result.toolsCalled.includes("research_web") && !result.toolsCalled.includes("parallel_research_report")) {
       const typingDelay = 3000 + Math.floor(Math.random() * 2000);
       await new Promise((resolve) => setTimeout(resolve, typingDelay));
     }

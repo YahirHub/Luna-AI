@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-17
-- Último registro: contexto/55-confirmacion-de-tools-administracion-natural-y-timeout-parcial.md
-- Resumen: Confirmar acciones mediante resultados reales de herramientas, suprimir afirmaciones no respaldadas, bloquear creaciones negadas, habilitar administración natural restringida y devolver evidencia parcial al agotar el timeout de búsqueda.
-- Archivos del cambio: bot, prompt, memoria, herramientas administrativas, investigador, pruebas, README y contexto
+- Último registro: contexto/56-workdir-subagentes-paralelos-y-artefactos.md
+- Resumen: Integrar workdir aislado, tareas y subagentes paralelos, extracción Markdown, PDF con tablas reales, ZIP, gitzip y devolución de artefactos por WhatsApp, preservando alarmas y recordatorios y corrigiendo el cierre tras el límite de tools.
+- Archivos del cambio: bot, IA, contexto dinámico, workspace, orquestación, artefactos, WhatsApp, búsqueda, pruebas, README y contexto
 <!-- codewolf:auto-context:end -->

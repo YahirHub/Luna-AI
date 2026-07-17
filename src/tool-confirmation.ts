@@ -13,6 +13,11 @@ const MUTATING_TOOLS = new Set([
   "admin_start_add_user",
   "admin_ban_user",
   "admin_unban_user",
+  "workspace_write_text",
+  "create_pdf_from_markdown",
+  "archive_folder",
+  "gitzip",
+  "whatsapp_send",
 ]);
 
 function normalizeForIntent(value: string): string {

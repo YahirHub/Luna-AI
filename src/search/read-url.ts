@@ -158,26 +158,43 @@ function extractMeta(html: string, name: string): string | undefined {
   return undefined;
 }
 
+function stripHtml(value: string): string {
+  return decodeHtmlEntities(value.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
 function htmlToReadableText(html: string): {
   title?: string;
   description?: string;
   text: string;
 } {
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  const title = titleMatch?.[1]
-    ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim()
-    : undefined;
+  const title = titleMatch?.[1] ? stripHtml(titleMatch[1]) : undefined;
   const description = extractMeta(html, "description") ?? extractMeta(html, "og:description");
 
-  const withoutNoise = html
-    .replace(/<!--([\s\S]*?)-->/g, " ")
+  const linksConverted = html.replace(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_match, href: string, label: string) => {
+      const cleanLabel = stripHtml(label) || href;
+      return `[${cleanLabel}](${decodeHtmlEntities(href)})`;
+    },
+  );
+  const markdown = linksConverted
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style|noscript|svg|canvas|iframe|form|nav|header|footer|aside)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_m, value: string) => `\n# ${stripHtml(value)}\n`)
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_m, value: string) => `\n## ${stripHtml(value)}\n`)
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_m, value: string) => `\n### ${stripHtml(value)}\n`)
+    .replace(/<h[4-6][^>]*>([\s\S]*?)<\/h[4-6]>/gi, (_m, value: string) => `\n#### ${stripHtml(value)}\n`)
+    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_m, value: string) => `\n- ${stripHtml(value)}`)
+    .replace(/<tr[^>]*>([\s\S]*?)<\/tr>/gi, (_m, value: string) => {
+      const cells = [...value.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((match) => stripHtml(match[1] ?? ""));
+      return cells.length ? `\n| ${cells.join(" | ")} |` : `\n${stripHtml(value)}`;
+    })
     .replace(/<(br|hr)\s*\/?\s*>/gi, "\n")
-    .replace(/<\/(p|div|section|article|main|li|h[1-6]|tr|blockquote)>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<\/(p|div|section|article|main|blockquote|ul|ol|table)>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
 
-  const text = decodeHtmlEntities(withoutNoise)
+  const text = decodeHtmlEntities(markdown)
     .replace(/\r/g, "")
     .replace(/[ \t]+/g, " ")
     .replace(/ *\n */g, "\n")

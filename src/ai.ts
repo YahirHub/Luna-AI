@@ -223,7 +223,8 @@ export async function chatCompletionWithTools(
 ): Promise<{ content: string; toolsCalled: string[] }> {
   let currentMessages = [...messages];
   const toolsCalled: string[] = [];
-  const maxRounds = Math.min(10, Math.max(1, runtimeOptions.maxRounds ?? 5));
+  const maxRounds = Math.min(16, Math.max(1, runtimeOptions.maxRounds ?? 8));
+  let latestToolResult = "";
 
   for (let round = 0; round < maxRounds; round++) {
     const result = await rawChatRequest(
@@ -250,6 +251,7 @@ export async function chatCompletionWithTools(
       }
 
       const toolResult = await executeTool(call.function.name, args);
+      if (String(toolResult).trim()) latestToolResult = String(toolResult).trim();
 
       toolsCalled.push(call.function.name);
       roundToolNames.push(call.function.name);
@@ -277,9 +279,28 @@ export async function chatCompletionWithTools(
     await runtimeOptions.onToolRoundComplete?.(roundToolNames, round + 1);
   }
 
-  // Limite de rondas alcanzado
+  // Se agotó el presupuesto de rondas con herramientas. Pedimos una última
+  // respuesta SIN tools para que el modelo cierre la tarea usando los resultados
+  // ya ejecutados, en lugar de mostrar un error después de una acción exitosa.
+  try {
+    const finalResult = await rawChatRequest(
+      {
+        model,
+        messages: currentMessages,
+        signal: runtimeOptions.signal,
+      },
+      config,
+      maxRetries,
+    );
+    const finalContent = finalResult.content?.trim();
+    if (finalContent) return { content: finalContent, toolsCalled };
+  } catch (error) {
+    if (runtimeOptions.signal?.aborted) throw error;
+    console.warn("[ai] No se pudo generar el cierre después del límite de tools:", error);
+  }
+
   return {
-    content: "El modelo excedió el número de llamadas a herramientas.",
+    content: latestToolResult || "La tarea terminó, pero el modelo no generó un mensaje final.",
     toolsCalled,
   };
 }

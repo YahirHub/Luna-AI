@@ -45,6 +45,25 @@ describe("research subagent guards", () => {
       agentConfig: { ...DEFAULT_AGENT_CONFIG, researchSubagentEnabled: false },
     })).toContain("desactivado");
   });
+
+  it("propaga la cancelación externa sin convertirla en timeout parcial", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelación solicitada"));
+    let thrown: unknown;
+    try {
+      await runResearchSubagent({
+        query: "tema actual",
+        model: "model",
+        llmConfig,
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("cancelación solicitada");
+  });
 });
 
 describe("research subagent partial timeout", () => {

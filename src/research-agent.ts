@@ -72,6 +72,7 @@ export interface ResearchAgentOptions {
   agentConfig: AgentConfig;
   depth?: SearchDepth;
   onProgress?: ResearchProgressHandler;
+  signal?: AbortSignal;
 }
 
 /**
@@ -223,10 +224,16 @@ export async function runResearchSubagent(
 
   const depth = options.depth ?? options.agentConfig.defaultSearchDepth;
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(new Error("research-timeout")),
-    options.agentConfig.researcherTimeoutMs,
-  );
+  let timedOut = false;
+  const abortFromParent = (): void => {
+    controller.abort(options.signal?.reason ?? new Error("research-cancelled"));
+  };
+  if (options.signal?.aborted) abortFromParent();
+  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("research-timeout"));
+  }, options.agentConfig.researcherTimeoutMs);
 
   await emitProgress(options.onProgress, { type: "started", query, depth });
 
@@ -351,6 +358,9 @@ export async function runResearchSubagent(
     return fallbackResult;
   } catch (error) {
     if (controller.signal.aborted) {
+      if (options.signal?.aborted && !timedOut) {
+        throw options.signal.reason ?? error;
+      }
       const timeoutSeconds = Math.round(options.agentConfig.researcherTimeoutMs / 1000);
       const partial = buildPartialResearchResponse(
         query,
@@ -369,5 +379,6 @@ export async function runResearchSubagent(
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromParent);
   }
 }

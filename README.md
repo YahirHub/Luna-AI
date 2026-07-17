@@ -263,6 +263,48 @@ Después muestra un resumen de resultados con títulos y URLs, informa qué fuen
 
 Si el investigador alcanza su timeout después de obtener resultados, no descarta el trabajo realizado. Devuelve una respuesta parcial con títulos, fragmentos, URLs y las fuentes que sí alcanzó a abrir, marcada claramente como investigación incompleta. Solo devuelve un error de timeout cuando no consiguió ninguna evidencia utilizable.
 
+## Investigación paralela, subagentes y workdir
+
+Para comparaciones amplias, Luna puede llamar `parallel_research_report`. El orquestador crea una tarea persistente, divide la consulta en hasta ocho temas y ejecuta como máximo cuatro investigadores al mismo tiempo. Cada investigador conserva el aislamiento del subagente original: solo recibe `web_search` y `read_url`, sin acceso a memoria, WhatsApp, alarmas ni recordatorios.
+
+Ejemplo de petición natural:
+
+```text
+Investiga los precios de OpenAI, Claude, MiniMax y DeepSeek en sus APIs, compáralos en una tabla y entrégame un PDF.
+```
+
+Cada trabajador escribe resultados físicos dentro del sandbox del usuario:
+
+```text
+persistent/contexts/<jid>/workdir/tasks/<task-id>/
+├── agents/<tema>/
+│   ├── request.json
+│   ├── result.json
+│   ├── evidence.jsonl
+│   └── precios-<tema>.md
+├── synthesis/
+├── artifacts/
+│   ├── <informe>.md
+│   └── <informe>.pdf
+└── temp/
+```
+
+La ejecución continúa cuando un trabajador falla. El informe final marca esos datos como no verificados y conserva los resultados válidos. `/cancelar` aborta la tarea activa y `task_list`, `task_status` y `task_cancel` permiten consultar o cancelar tareas desde lenguaje natural.
+
+El workdir privado de cada usuario también expone herramientas para listar, leer y escribir archivos temporales, registrar artefactos y crear carpetas. Todas las rutas son relativas; se rechazan rutas absolutas, `..` y enlaces simbólicos que salgan del sandbox.
+
+
+## PDF, ZIP, gitzip y envío de artefactos
+
+Las herramientas de artefactos pueden:
+
+- Convertir Markdown del workdir a un PDF multipágina con encabezados, párrafos, listas y tablas Markdown renderizadas como tablas reales con celdas, ajuste de texto y encabezados repetidos al cambiar de página.
+- Comprimir una carpeta completa con `archive_folder`.
+- Crear un ZIP de código con `gitzip`, respetando `.gitignore` de la raíz y de carpetas anidadas, negaciones `!`, excluyendo `.git/` y evitando enlaces externos.
+- Detectar nombres sensibles como `.env`, claves privadas, credenciales, `persistent/` o sesiones de Baileys antes de compartir código.
+
+`whatsapp_send` solo puede devolver contenido al mismo JID que originó la tarea. Imágenes, audio y video de hasta 10 MiB se envían con su tipo nativo; archivos mayores se envían como documento. Las carpetas se comprimen como ZIP antes de enviarse y cualquier tipo desconocido se trata como documento.
+
 ## `/config`
 
 El administrador puede modificar el comportamiento del agente desde WhatsApp:
@@ -396,7 +438,8 @@ persistent/
 │   ├── context.json         # Conversación, alarmas entregadas, modelo y compactación
 │   ├── memory.md            # Memoria duradera del usuario
 │   ├── reminders.json       # Recordatorios de una sola vez
-│   └── alarms.json          # Alarmas recurrentes
+│   ├── alarms.json          # Alarmas recurrentes
+│   └── workdir/             # Tareas, temporales y artefactos privados
 ├── agent-config.json        # Configuración de herramientas y subagente
 ├── search.json              # Motores, estados, predeterminado y fallback
 ├── search-auth.json         # API keys de búsqueda; secreto
@@ -453,12 +496,16 @@ src/
 │   ├── whisper-native.ts    # WAV, resolución del runtime y ejecución de whisper-cli
 │   └── worker.ts            # OGG/Opus, whisper.cpp y OCR WASM
 ├── search/
-│   ├── read-url.ts          # Lectura de páginas con protecciones SSRF
+│   ├── read-url.ts          # Lectura y extracción Markdown con protecciones SSRF
 │   ├── search-config.ts     # Tipos, proveedores y normalización
 │   ├── search-runtime.ts    # Adaptadores y fallback multiproveedor
 │   ├── search-setup.ts      # Flujo /setup-search
 │   ├── search-storage.ts    # Preferencias y credenciales separadas
 │   └── search-tools.ts      # web_search, uso exclusivo del subagente
+├── workspace/               # Workdir aislado, rutas seguras y artefactos
+├── orchestration/           # Tareas y subagentes paralelos
+├── artifacts/               # PDF, ZIP y gitzip
+├── tools/                   # Envío de artefactos por WhatsApp
 ├── providers/
 │   └── opencode-free.ts     # Proveedor LLM gratuito integrado
 ├── llm-config.ts            # Proveedor personalizado y /setup-provider
@@ -515,6 +562,12 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 16. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
 17. Probar un audio mayor que la duración configurada y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
 18. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
+19. Pedir una comparación de cuatro proveedores y verificar que se use una sola tarea paralela, con carpetas independientes, continuación ante un fallo y entrega del PDF.
+20. Abrir el PDF y comprobar que las tablas Markdown se dibujen como celdas reales, sin mostrar los caracteres `|`.
+21. Crear un proyecto con `.gitignore` anidados, ejecutar `gitzip` y revisar que no incluya `.git/` ni archivos ignorados.
+22. Enviar una imagen menor de 10 MiB, un video mayor de 10 MiB y una carpeta; comprobar imagen nativa, documento y ZIP.
+23. Forzar el máximo de rondas de herramientas después de un envío exitoso y confirmar que Luna cierre con el resultado, sin mostrar “excedió el número de llamadas”.
+24. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
 
 ## Limpieza segura en Windows
 
