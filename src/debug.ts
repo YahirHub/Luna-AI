@@ -14,7 +14,7 @@ function redactString(value: string): string {
   return value
     .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, `$1${REDACTED}`)
     .replace(/([?&](?:api[_-]?key|key|token|secret|password)=)[^&\s]+/gi, `$1${REDACTED}`)
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|api[_-]?key-[A-Za-z0-9_-]{16,}|key-[A-Za-z0-9_-]{24,})\b/gi, REDACTED);
+    .replace(/\b(?:sk|api|key)-[A-Za-z0-9_-]{16,}\b/g, REDACTED);
 }
 
 function sanitize(value: unknown, depth = 0): unknown {

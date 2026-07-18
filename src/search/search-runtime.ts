@@ -1082,23 +1082,6 @@ export interface WebSearchRuntimeConfig {
   auth: WebSearchAuth
 }
 
-export interface WebSearchAvailability {
-  available: boolean
-  providerOrder: SearchProviderId[]
-}
-
-export function getWebSearchAvailability(
-  config?: WebSearchRuntimeConfig,
-): WebSearchAvailability {
-  const settings = config?.settings ?? loadWebSearchSettings()
-  const auth = config?.auth ?? loadWebSearchAuth()
-  const providerOrder = getSearchProviderOrder(settings, auth)
-  return {
-    available: providerOrder.length > 0,
-    providerOrder,
-  }
-}
-
 export async function runWebSearchWithFallback(
   input: WebSearchRequest,
   config?: WebSearchRuntimeConfig,

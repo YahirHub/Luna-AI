@@ -20,13 +20,13 @@ describe("agent config", () => {
       webSearchEnabled: false,
       researchSubagentEnabled: false,
       defaultSearchDepth: "deep",
-      researcherTimeoutMs: 999_999,
+      researcherTimeoutMs: 999_999_999,
     })).toEqual({
       version: 1,
       webSearchEnabled: false,
       researchSubagentEnabled: false,
       defaultSearchDepth: "deep",
-      researcherTimeoutMs: 300_000,
+      researcherTimeoutMs: 120 * 60_000,
     });
   });
 

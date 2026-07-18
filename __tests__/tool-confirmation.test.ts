@@ -136,7 +136,7 @@ describe("confirmación autoritativa de herramientas", () => {
     expect(stripUnrelatedPendingNameQuestion(
       content,
       "Investiga precios y crea un PDF",
-      ["parallel_research_report"],
+      ["spawn_agents"],
     )).toBe("📄 Aquí tienes el contenido del informe.");
   });
 

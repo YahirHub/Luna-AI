@@ -73,14 +73,8 @@ import {
 import {
   AgentConfigFlowManager,
   loadAgentConfig,
-  type SearchDepth,
 } from "./agent-config.ts";
 import { SearchSetupManager } from "./search/search-setup.ts";
-import {
-  getMainResearchTools,
-  runResearchSubagent,
-  type ResearchProgressEvent,
-} from "./research-agent.ts";
 import {
   ADMIN_TOOLS,
   executeUserAdminTool,
@@ -100,23 +94,23 @@ import {
   WORKSPACE_TOOLS,
   executeWorkspaceTool,
 } from "./workspace/workspace-tools.ts";
-import { buildArtifactContentReply, splitArtifactReply } from "./workspace/artifact-followup.ts";
 import {
   ARTIFACT_TOOLS,
   executeArtifactTool,
 } from "./artifacts/artifact-tools.ts";
-import {
-  PARALLEL_RESEARCH_TOOLS,
-  executeTaskTool,
-  runParallelResearch,
-  type ParallelResearchProgress,
-} from "./orchestration/parallel-research.ts";
 import { TaskRuntime } from "./orchestration/task-runtime.ts";
 import {
   WHATSAPP_TOOLS,
   executeWhatsAppTool,
-  sendWorkspacePath,
 } from "./tools/whatsapp-tools.ts";
+import {
+  executeAgentTaskTool,
+  executeResearcherWebTool,
+  executeSpawnAgentsTool,
+  getMainAgentTools,
+  type SpawnAgentsProgress,
+} from "./agents/spawn-agents-tool.ts";
+import { createSpawnAgentRequestDeduper } from "./agents/spawn-deduper.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -170,13 +164,12 @@ const BASE_TOOLS = [
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
   ...ARTIFACT_TOOLS,
-  ...PARALLEL_RESEARCH_TOOLS,
   ...WHATSAPP_TOOLS,
 ];
 
 function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
   const tools = [...BASE_TOOLS];
-  tools.push(...getMainResearchTools(agentConfig));
+  tools.push(...getMainAgentTools(agentConfig));
   if (jid && isAdminSession(jid)) {
     tools.push(...ADMIN_TOOLS);
   }
@@ -199,7 +192,8 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["admin_start_add_user", "👤 Preparando nuevo usuario..."],
   ["admin_ban_user", "🚫 Bloqueando usuario..."],
   ["admin_unban_user", "✅ Desbloqueando usuario..."],
-  ["parallel_research_report", "🤖 Preparando investigadores paralelos..."],
+  ["spawn_agents", "🤖 Preparando subagentes paralelos..."],
+  ["researcher_web", "🕵️ Preparando investigador web..."],
   ["create_pdf_from_markdown", "📄 Generando PDF..."],
   ["archive_folder", "🗜️ Comprimiendo carpeta..."],
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
@@ -555,10 +549,6 @@ function formatCommandName(name: string): string {
   return `${SLASH_COMMANDS.has(name) ? "/" : "!"}${name}`;
 }
 
-function parseSearchDepth(value: unknown): SearchDepth | undefined {
-  return value === "deep" || value === "standard" ? value : undefined;
-}
-
 function compactProgressText(value: string, maxLength = 120): string {
   const clean = value.replace(/\s+/g, " ").trim();
   return clean.length <= maxLength
@@ -566,67 +556,20 @@ function compactProgressText(value: string, maxLength = 120): string {
     : `${clean.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
-function formatResearchProgress(event: ResearchProgressEvent): string | null {
-  switch (event.type) {
-    case "started":
-      return [
-        "🕵️ AGENTE INVESTIGADOR",
-        "",
-        `Buscando: “${compactProgressText(event.query, 180)}”`,
-        `Profundidad: ${event.depth === "deep" ? "profunda" : "estándar"}`,
-      ].join("\n");
-    case "searching":
-      return `🔎 Agente buscando: “${compactProgressText(event.query, 180)}”`;
-    case "search_results": {
-      const visibleResults = event.results.slice(0, 5);
-      const lines = [
-        `🔎 RESULTADOS DE BÚSQUEDA — ${event.providerLabel}`,
-        `Encontrados: ${event.resultCount}`,
-        "",
-      ];
-      visibleResults.forEach((result, index) => {
-        lines.push(`${index + 1}. ${compactProgressText(result.title, 100)}`);
-        if (result.snippet) {
-          lines.push(`   ${compactProgressText(result.snippet, 180)}`);
-        }
-        lines.push(result.url);
-      });
-      const hiddenCount = Math.max(0, event.resultCount - visibleResults.length);
-      if (hiddenCount > 0) {
-        lines.push("", `…y ${hiddenCount} resultado(s) más para analizar.`);
-      }
-      return lines.join("\n");
-    }
-    case "reading_source":
-      return `📖 Agente verificando fuente:\n${event.url}`;
-    case "source_read":
-      return null;
-    case "synthesizing":
-      return "🧠 El agente está comparando la evidencia y preparando sus conclusiones...";
-    case "completed":
-      return "✅ Investigación terminada. Preparando la respuesta final...";
-  }
-}
-
-function formatParallelResearchProgress(event: ParallelResearchProgress): string | null {
+function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string | null {
   switch (event.type) {
     case "task_started":
-      return `🤖 Inicié ${event.total} investigadores paralelos.
-Tarea: ${event.taskId}`;
-    case "worker_started":
-      return `🔎 Investigador ${event.index + 1}/${event.total}: ${event.name}`;
-    case "worker_completed": {
-      const icon = event.status === "complete" ? "✅" : event.status === "partial" ? "⚠️" : "❌";
-      const label = event.status === "complete" ? "verificado" : event.status === "partial" ? "parcial" : "falló";
-      return `${icon} ${event.name}: ${label} (${event.completed}/${event.total})`;
+      return `🤖 Inicié ${event.total} subagente${event.total === 1 ? "" : "s"}.\nTarea: ${event.taskId}`;
+    case "agent_started":
+      return `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}):\n${compactProgressText(event.prompt, 220)}`;
+    case "agent_completed": {
+      const icon = event.status === "completed" ? "✅" : event.status === "cancelled" ? "⛔" : "❌";
+      const label = event.status === "completed" ? "terminado" : event.status === "cancelled" ? "cancelado" : "falló";
+      return `${icon} Subagente ${event.index + 1}/${event.total} (${event.agentType}): ${label}.`;
     }
-    case "synthesizing":
-      return `📊 Analizando resultados: ${event.successful} verificados, ${event.partial} parciales, ${event.failed} fallidos.`;
-    case "artifact_created":
-      return `📄 Informe generado: ${event.path}`;
-    case "completed":
-      if (event.status === "failed") return `❌ Tarea ${event.taskId} fallida.`;
-      return `✅ Tarea ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`;
+    case "task_completed":
+      if (event.status === "failed") return `❌ Tarea de subagentes ${event.taskId} fallida.`;
+      return `✅ Tarea de subagentes ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`;
   }
 }
 
@@ -1687,23 +1630,6 @@ async function handleAiChat(
   const activeTools = getAvailableTools(remoteJid);
   await cm.withLock(remoteJid, async () => {
 
-  const exactArtifactReply = buildArtifactContentReply(workspaceManager, remoteJid, userText);
-  if (exactArtifactReply) {
-    cm.addMessage(remoteJid, { role: "user", content: userText });
-    cm.addMessage(remoteJid, { role: "assistant", content: exactArtifactReply });
-    const typing = await startContinuousTyping(sock, remoteJid);
-    try {
-      const chunks = splitArtifactReply(exactArtifactReply);
-      for (let index = 0; index < chunks.length; index += 1) {
-        const prefix = chunks.length > 1 ? `Parte ${index + 1}/${chunks.length}\n\n` : "";
-        await sock.sendMessage(remoteJid, { text: `${prefix}${chunks[index] ?? ""}` });
-      }
-    } finally {
-      await typing.stop();
-    }
-    return;
-  }
-
   const userMessage = { role: "user" as const, content: userText };
   cm.addMessage(remoteJid, userMessage);
 
@@ -1730,6 +1656,7 @@ async function handleAiChat(
     const confirmedTools = new Set<string>();
     const toolResults: Array<{ name: string; result: string }> = [];
     const shownNotifs = new Set<string>();
+    const spawnDeduper = createSpawnAgentRequestDeduper();
 
     const recordToolResult = async (name: string, result: string): Promise<void> => {
       toolResults.push({ name, result });
@@ -1810,39 +1737,37 @@ async function handleAiChat(
         return result;
       }
 
-      if (name === "parallel_research_report") {
-        const topics = Array.isArray(args.topics)
-          ? args.topics.flatMap((item) => {
-              if (!item || typeof item !== "object") return [];
-              const value = item as Record<string, unknown>;
-              const topicName = typeof value.name === "string" ? value.name.trim() : "";
-              const query = typeof value.query === "string" ? value.query.trim() : "";
-              return topicName && query ? [{ name: topicName, query }] : [];
-            })
-          : [];
-        result = await runParallelResearch({
+      if (name === "spawn_agents") {
+        result = await executeSpawnAgentsTool(args, {
           jid: remoteJid,
-          title: typeof args.title === "string" ? args.title : "Informe de investigación",
-          topics,
-          depth: parseSearchDepth(args.depth) ?? agentConfigSnapshot.defaultSearchDepth,
           model,
           llmConfig: cfg,
           agentConfig: agentConfigSnapshot,
           workspace: workspaceManager,
           tasks: taskRuntime,
-          deliverResult: args.deliver !== false,
-          deliver: async (path, caption) => {
-            const deliveryResult = await sendWorkspacePath(
-              sock,
-              remoteJid,
-              workspaceManager,
-              path,
-              caption,
-            );
-            if (deliveryResult.startsWith("Error:")) throw new Error(deliveryResult.slice(6).trim());
-          },
+          filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
-            const progressText = formatParallelResearchProgress(event);
+            const progressText = formatSpawnAgentsProgress(event);
+            if (!progressText) return;
+            await sock.sendMessage(remoteJid, { text: progressText });
+            await typingSession.refresh();
+          },
+        });
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (name === "researcher_web") {
+        result = await executeResearcherWebTool(args, {
+          jid: remoteJid,
+          model,
+          llmConfig: cfg,
+          agentConfig: agentConfigSnapshot,
+          workspace: workspaceManager,
+          tasks: taskRuntime,
+          filterRequests: spawnDeduper.filter,
+          onProgress: async (event) => {
+            const progressText = formatSpawnAgentsProgress(event);
             if (!progressText) return;
             await sock.sendMessage(remoteJid, { text: progressText });
             await typingSession.refresh();
@@ -1853,16 +1778,7 @@ async function handleAiChat(
       }
 
       if (["task_list", "task_status", "task_cancel"].includes(name)) {
-        result = await executeTaskTool(name, args, {
-          jid: remoteJid,
-          model,
-          llmConfig: cfg,
-          agentConfig: agentConfigSnapshot,
-          workspace: workspaceManager,
-          tasks: taskRuntime,
-          onProgress: undefined,
-          deliver: undefined,
-        });
+        result = executeAgentTaskTool(name, args, { jid: remoteJid, tasks: taskRuntime });
         toolResults.push({ name, result });
         return result;
       }
@@ -1902,25 +1818,6 @@ async function handleAiChat(
         return result;
       }
 
-      if (name === "research_web") {
-        const query = typeof args.query === "string" ? args.query : "";
-        result = await runResearchSubagent({
-          query,
-          model,
-          llmConfig: cfg,
-          agentConfig: agentConfigSnapshot,
-          depth: parseSearchDepth(args.depth),
-          onProgress: async (event) => {
-            const progressText = formatResearchProgress(event);
-            if (!progressText) return;
-            await sock.sendMessage(remoteJid, { text: progressText });
-            await typingSession.refresh();
-          },
-        });
-        toolResults.push({ name, result });
-        return result;
-      }
-
       result = `Error: funcion desconocida "${name}"`;
       toolResults.push({ name, result });
       return result;
@@ -1934,7 +1831,14 @@ async function handleAiChat(
       toolExecutor,
       3,
       undefined,
-      { maxRounds: 8, terminalTools: ["parallel_research_report"] },
+      {
+        maxRounds: 64,
+        onToolRoundComplete: async () => {
+          // Igual que Codewolf: la deduplicación semántica solo aplica a las
+          // solicitudes repetidas dentro de una misma respuesta del modelo.
+          spawnDeduper.reset();
+        },
+      },
     );
 
     const latestUsefulToolResult = [...toolResults]
@@ -1964,7 +1868,7 @@ async function handleAiChat(
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
     // La investigación ya mostró actividad real; no añadir una espera artificial.
-    if (!result.toolsCalled.includes("research_web") && !result.toolsCalled.includes("parallel_research_report")) {
+    if (!result.toolsCalled.includes("researcher_web") && !result.toolsCalled.includes("spawn_agents")) {
       const typingDelay = 3000 + Math.floor(Math.random() * 2000);
       await new Promise((resolve) => setTimeout(resolve, typingDelay));
     }

@@ -228,7 +228,7 @@ export async function chatCompletionWithTools(
 ): Promise<{ content: string; toolsCalled: string[] }> {
   let currentMessages = [...messages];
   const toolsCalled: string[] = [];
-  const maxRounds = Math.min(16, Math.max(1, runtimeOptions.maxRounds ?? 8));
+  const maxRounds = Math.min(200, Math.max(1, runtimeOptions.maxRounds ?? 16));
   let latestToolResult = "";
 
   for (let round = 0; round < maxRounds; round++) {

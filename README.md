@@ -228,84 +228,94 @@ persistent/search-auth.json
 
 Ambos archivos permanecen dentro del volumen persistente y están excluidos de Git. Las API keys no se agregan al contexto, no se muestran completas y no se escriben en logs.
 
-Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si no existe ningún motor habilitado, las investigaciones generales explican que el administrador debe usar `/setup-search`. Las comparativas de precios pueden continuar en modo de lectura oficial directa, consultando únicamente URLs oficiales predefinidas y dejando constancia de que no se utilizó un buscador.
+Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`.
 
-## Subagente investigador
+## Runtime agéntico y subagentes
 
-Cuando una consulta necesita información actual o verificación externa, el modelo principal solo puede llamar a `research_web`. Esa herramienta crea un investigador independiente con su propio contexto temporal.
+Luna usa un runtime de subagentes inspirado en el patrón probado de Codewolf, pero integrado directamente en el proyecto y sin MCP. El agente principal conserva el control del flujo: delega investigaciones, recibe únicamente las respuestas finales de los especialistas y después decide si necesita investigar algo más, sintetizar, crear archivos o enviar resultados.
 
-Dentro de ese contexto aislado, el subagente puede:
+El agente disponible inicialmente es `researcher-web`. Tiene:
 
-- Buscar con `web_search` usando el motor configurado y sus respaldos.
-- Leer páginas públicas con `read_url` para verificar las fuentes relevantes.
-- Abrir automáticamente las mejores fuentes cuando el modelo solo hizo una búsqueda y no ejecutó `read_url`.
-- Ejecutar varias rondas de búsqueda y comparación.
-- Priorizar documentación oficial y fuentes primarias mediante el dominio, el título y rutas como `pricing`, `docs` o `api`.
-- Devolver al bot principal únicamente la síntesis final y las URLs realmente abiertas.
+- Contexto aislado y sin historial del agente padre.
+- Solo las herramientas `web_search` y `read_url`.
+- Un loop propio de modelo → herramienta → modelo, con hasta 64 pasos como protección contra loops.
+- Timeout de seguridad independiente de 15 minutos por defecto; no es un objetivo de duración.
+- Instrucciones para construir una checklist privada de evidencia, priorizar fuentes oficiales, abrir las páginas antes de concluir, evitar búsquedas duplicadas y marcar explícitamente lo no resuelto.
+- Salida `last_message`: el agente principal recibe únicamente la síntesis final, no las páginas completas ni todo el historial intermedio.
 
-Un resultado ya no se considera verificado por el solo hecho de completar una búsqueda. Debe existir evidencia utilizable y, cuando la página lo permite, contenido abierto y legible. En investigaciones de precios también deben encontrarse importes numéricos y unidades; de lo contrario el resultado queda como parcial o fallido.
+El modelo principal no recibe `web_search` ni `read_url` directamente. Para una investigación individual usa `researcher_web`; para dos o más investigaciones independientes usa `spawn_agents`.
 
-Las comparativas de precios usan un pipeline determinista adicional al modelo. Cuando el usuario nombra únicamente al proveedor, las búsquedas se dirigen a sus modelos API activos actuales y no a familias heredadas elegidas por el modelo. El lector recupera tablas HTML, Markdown, JSON incrustado, datos de Next.js/Docusaurus y fragmentos relevantes de scripts. Después, un extractor interpreta tablas normales, filas compactas sin separadores, precios por millón o por mil tokens, columnas de caché y promociones con importes anteriores tachados. Cuando una página oficial dinámica no expone sus datos al fetch, puede rescatar el fragmento indexado por el buscador únicamente si la URL pertenece al dominio oficial del proveedor. Si el fragmento ya contiene importes, solo se intentan abrir hasta dos páginas para elevar la evidencia y evitar agotar el timeout recorriendo URLs dinámicas; una investigación de precios nunca supera cuatro lecturas de página por trabajador.
-
-Si `/setup-search` todavía no tiene motores con API key, el trabajador no entra en la cola ni genera stacks de error repetidos. Pasa directamente a las páginas oficiales candidatas, descarga su contenido en tiempo real y marca el resultado como `direct_official`; no usa precios en caché ni valores fijados en el código. El informe final y `result.json` indican si cada proveedor se obtuvo mediante búsqueda y lectura o únicamente mediante lectura oficial directa.
-
-El extractor prioriza tablas y filas compactas estructuradas. Solo usa el parser de prosa cuando no existe una estructura reconocible, filtra nombres que no coinciden con el proveedor y exige precio de entrada o salida. Esto evita que navegación, metadatos accesibles o párrafos repetidos creen decenas de modelos falsos. En modo debug se registra `research.pricing/extracted_rows` con cada fila, importe y URL exacta antes de construir el PDF.
-
-Los resultados completos, páginas leídas y mensajes intermedios del investigador no se agregan al historial principal. Así se evita saturar el contexto persistente del usuario con evidencia temporal.
-
-El modelo principal no recibe `web_search` ni `read_url` directamente. Toda búsqueda pasa obligatoriamente por el subagente. Si el gateway LLM ignora function calling dentro del investigador, el fallback de búsqueda continúa ejecutándose dentro de ese mismo contexto aislado.
-
-La búsqueda tampoco se expone como comando para los usuarios. Luna analiza cada mensaje y decide automáticamente cuándo necesita investigar.
-
-### Progreso visible en WhatsApp
-
-Mientras investiga, Luna mantiene activo el estado `escribiendo` sin añadir una espera artificial y envía avances reales como:
+Ejemplo natural:
 
 ```text
-🕵️ AGENTE INVESTIGADOR
-
-Buscando: “Versiones actuales de Laravel”
-Profundidad: estándar
+Investiga los precios actuales de las APIs de DeepSeek, MiniMax, OpenAI y Anthropic. Compáralos y crea un PDF.
 ```
 
-Después muestra un resumen de resultados con títulos y URLs, informa qué fuentes está verificando y avisa cuando está comparando la evidencia. Al terminar, la respuesta final se envía inmediatamente, sin simular otros 3 a 5 segundos de escritura.
-
-Si el investigador alcanza su timeout después de obtener resultados, no descarta el trabajo realizado. Devuelve una respuesta parcial con títulos, fragmentos, URLs y las fuentes que sí alcanzó a abrir, marcada claramente como investigación incompleta. Solo devuelve un error de timeout cuando no consiguió ninguna evidencia utilizable.
-
-## Investigación paralela, subagentes y workdir
-
-Para comparaciones amplias, Luna puede llamar `parallel_research_report`. El orquestador crea una tarea persistente, divide la consulta en hasta ocho temas y ejecuta como máximo cuatro investigadores al mismo tiempo. Cada investigador conserva el aislamiento del subagente original: solo recibe `web_search` y `read_url`, sin acceso a memoria, WhatsApp, alarmas ni recordatorios.
-
-Ejemplo de petición natural:
+El flujo esperado es:
 
 ```text
-Investiga los precios de OpenAI, Claude, MiniMax y DeepSeek en sus APIs, compáralos en una tabla y entrégame un PDF.
+Luna principal
+  ↓
+spawn_agents
+  ├─ researcher-web: DeepSeek
+  ├─ researcher-web: MiniMax
+  ├─ researcher-web: OpenAI
+  └─ researcher-web: Anthropic
+  ↓
+los cuatro resultados vuelven como tool_result
+  ↓
+Luna principal revisa todo
+  ├─ si algo falta o parece dudoso → researcher_web adicional
+  └─ si ya es suficiente → sintetiza
+  ↓
+workspace_write_text
+  ↓
+create_pdf_from_markdown
+  ↓
+whatsapp_send
 ```
 
-Cada trabajador escribe resultados físicos dentro del sandbox del usuario:
+`spawn_agents` no es terminal y no crea PDFs por sí mismo. Después de terminar, el agente principal sigue razonando normalmente. Esto permite que una investigación fallida se repita de forma enfocada sin reiniciar las demás y evita convertir la investigación en una mega-herramienta rígida.
+
+Las solicitudes de subagentes se deduplican semánticamente dentro de la misma respuesta del modelo. Si un proveedor OpenAI-compatible repite accidentalmente la misma llamada con otro `tool_call_id`, el trabajo se ejecuta una sola vez.
+
+Los subagentes de una misma llamada se ejecutan mediante `Promise.allSettled`, por lo que un fallo no cancela a los demás. La cancelación explícita con `/cancelar` sí se propaga desde la tarea padre hasta los `AbortController` de todos los hijos y sus búsquedas/lecturas en curso.
+
+Las búsquedas de investigadores paralelos conservan la cola global multiproveedor: Tavily/Brave y los demás motores se serializan y respetan el intervalo mínimo configurado para evitar ráfagas HTTP 429, mientras otros agentes pueden seguir leyendo URLs en paralelo.
+
+Cada ejecución se persiste en el workdir privado del usuario:
 
 ```text
 persistent/contexts/<jid>/workdir/tasks/<task-id>/
-├── agents/<tema>/
-│   ├── request.json
-│   ├── result.json
-│   ├── evidence.jsonl
-│   └── precios-<tema>.md
-├── synthesis/
-├── artifacts/
-│   ├── <informe>.md
-│   └── <informe>.pdf
-└── temp/
+├── agents/
+│   ├── 01-researcher-web/
+│   │   ├── request.json
+│   │   ├── events.jsonl
+│   │   ├── result.json
+│   │   └── result.md
+│   └── ...
+└── result.json
 ```
 
-La ejecución continúa cuando un trabajador falla. Cada trabajador registra por separado fuentes abiertas, errores de lectura y calidad del resultado. Para informes de precios, los datos se extraen a una estructura estable por proveedor y la tabla final se construye de forma determinista, sin permitir que el sintetizador invente celdas o altere el número de columnas.
+`events.jsonl` registra inicio, herramientas usadas, finalización o fallo sin inyectar los cuerpos completos de las páginas al contexto principal. `result.md` conserva la respuesta completa del investigador y el resultado devuelto a Luna se limita cuando excede un tamaño seguro para el contexto.
 
-El PDF solo se genera cuando existe al menos una fila con un importe realmente extraído. Si todas las fuentes fallan o ningún proveedor expone precios verificables, la tarea guarda un diagnóstico Markdown, marca el estado como fallido y responde con claridad, pero no crea ni envía un PDF vacío. Un proveedor con cifras recuperadas desde un fragmento oficial puede aparecer como parcial por no haberse abierto la página, conservando aun así los importes y la advertencia correspondiente.
+`task_list`, `task_status` y `task_cancel` siguen disponibles para consultar o cancelar tareas desde lenguaje natural.
 
-`parallel_research_report` es una herramienta terminal: después de generar y entregar el informe, el ciclo principal devuelve directamente el resultado confirmado, sin volver a consultar al modelo, ejecutar `research_web`, regenerar el PDF, reenviar el mismo artefacto ni añadir preguntas ajenas a la tarea. `/cancelar` aborta la tarea activa y `task_list`, `task_status` y `task_cancel` permiten consultar o cancelar tareas desde lenguaje natural.
+### Progreso visible en WhatsApp
 
-El workdir privado de cada usuario también expone herramientas para listar, leer y escribir archivos temporales, registrar artefactos y crear carpetas. Todas las rutas son relativas; se rechazan rutas absolutas, `..` y enlaces simbólicos que salgan del sandbox.
+Luna muestra solo eventos importantes:
 
+```text
+🤖 Inicié 4 subagentes.
+Tarea: ...
+
+🔎 Subagente 1/4 (researcher-web):
+Investiga los precios actuales de DeepSeek...
+
+✅ Subagente 1/4 (researcher-web): terminado.
+```
+
+El detalle completo de `web_search`, `read_url`, tiempos y errores permanece en el log debug de consola y en `events.jsonl`.
 
 ## PDF, ZIP, gitzip y envío de artefactos
 
@@ -332,7 +342,7 @@ Opciones disponibles:
 1. Activar o desactivar el acceso web del investigador.
 2. Activar o desactivar el subagente investigador.
 3. Cambiar la profundidad predeterminada entre estándar y profunda.
-4. Cambiar el timeout del investigador entre 60, 120, 180 y 300 segundos.
+4. Cambiar el timeout de seguridad del investigador entre 5, 10, 15 y 30 minutos.
 
 La configuración se guarda inmediatamente en:
 
@@ -341,6 +351,37 @@ persistent/agent-config.json
 ```
 
 La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda solicita hasta 15 y permite un flujo de investigación más amplio.
+
+## Depuración completa en consola
+
+La depuración estructurada está activa de forma predeterminada. Durante una investigación se muestran en consola:
+
+- ID de tarea, trabajador, proveedor y consulta;
+- entrada y salida de la cola global de búsquedas;
+- motor intentado, resultados, fallos, HTTP 429 y reintentos;
+- URL abierta, duración, caracteres extraídos y errores de fetch;
+- cantidad de precios, fuentes y advertencias obtenidas por cada parser;
+- creación del Markdown/PDF, entrega por WhatsApp y stack completo de excepciones.
+
+Los campos con nombres como `apiKey`, `token`, `authorization`, `cookie`, `password`, `secret` o `credential` se sustituyen por `[REDACTED]`. Las cadenas extensas se truncan salvo que se habilite el modo detallado.
+
+Variables disponibles:
+
+```bash
+# Desactivar completamente los logs de depuración
+LUNA_DEBUG=false
+
+# Mostrar cadenas extensas sin truncarlas
+LUNA_DEBUG_VERBOSE=true
+
+# Ajustar la cola global de motores de búsqueda
+LUNA_SEARCH_CONCURRENCY=1
+LUNA_SEARCH_MIN_INTERVAL_MS=1250
+LUNA_SEARCH_RETRY_ATTEMPTS=3
+LUNA_SEARCH_RETRY_BASE_MS=1500
+```
+
+Para Tavily Free se recomienda conservar concurrencia `1` e intervalo mínimo de `1250` ms. Los investigadores continúan en paralelo mientras esperan su turno para buscar y pueden leer y procesar sus fuentes de forma independiente.
 
 ## Recordatorios, alarmas y contexto persistente
 
@@ -498,7 +539,8 @@ scripts/
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
 ├── agent-config.ts          # Configuración persistente y flujo /config
-├── research-agent.ts        # Subagente aislado, progreso, evidencia parcial y timeout
+├── agents/                  # Runtime agéntico, registro, eventos y subagentes aislados
+│   └── definitions/         # Definiciones como researcher-web
 ├── scheduled-context.ts     # Registro de recordatorios y alarmas entregados
 ├── media.ts                 # Validación y descarga en memoria de audio/imágenes
 ├── whisper-config.ts        # Catálogo, persistencia y descarga segura de modelos
@@ -517,7 +559,7 @@ src/
 │   ├── search-storage.ts    # Preferencias y credenciales separadas
 │   └── search-tools.ts      # web_search, uso exclusivo del subagente
 ├── workspace/               # Workdir aislado, rutas seguras y artefactos
-├── orchestration/           # Tareas y subagentes paralelos
+├── orchestration/           # Persistencia y cancelación de tareas
 ├── artifacts/               # PDF, ZIP y gitzip
 ├── tools/                   # Envío de artefactos por WhatsApp
 ├── providers/
@@ -564,12 +606,13 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 4. Preguntar después por la alarma y verificar que el asistente recuerde el evento.
 5. Abrir `/setup-search`, configurar un motor y probar la conexión.
 6. Configurar dos motores, forzar el fallo del predeterminado y verificar el fallback.
-7. Enviar una pregunta sobre información actual sin usar comandos y confirmar que el modelo principal llame únicamente `research_web`.
-8. Verificar que aparezcan el estado `escribiendo`, la consulta del agente, los resultados encontrados y las fuentes que está revisando.
-9. Confirmar que la respuesta final se envíe sin una espera artificial después de terminar la investigación.
-10. Revisar `context.json` y comprobar que no contenga resultados completos ni páginas leídas por el subagente.
-11. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
-12. Desactivar búsqueda y subagente desde `/config` y comprobar que `research_web` desaparezca.
+7. Enviar una pregunta sobre un único tema actual y confirmar que el modelo principal use `researcher_web`.
+8. Pedir una comparativa de cuatro temas y confirmar que use una sola llamada `spawn_agents` con cuatro `researcher-web` en paralelo.
+9. Confirmar que, al terminar `spawn_agents`, Luna recupere el control y pueda crear Markdown/PDF y enviarlo sin que el subagente haga esas acciones.
+10. Forzar el fallo de un investigador y comprobar que los demás terminen y que Luna pueda lanzar solo una investigación adicional para el tema faltante.
+11. Revisar `context.json` y comprobar que no contenga páginas completas; revisar `workdir/tasks/<task-id>/agents/*/events.jsonl` para la trazabilidad.
+12. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
+13. Desactivar búsqueda y subagentes desde `/config` y comprobar que `researcher_web` y `spawn_agents` desaparezcan.
 13. Abrir `!setup-whisper`, comprobar el catálogo, cambiar un parámetro y verificar `persistent/whisper.json`.
 14. Descargar un modelo alternativo pequeño, activarlo y comprobar que se conserve después de reiniciar.
 15. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
@@ -582,8 +625,6 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 22. Enviar una imagen menor de 10 MiB, un video mayor de 10 MiB y una carpeta; comprobar imagen nativa, documento y ZIP.
 23. Forzar el máximo de rondas de herramientas después de un envío exitoso y confirmar que Luna cierre con el resultado, sin mostrar “excedió el número de llamadas”.
 24. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
-25. Pedir una comparativa de precios y revisar en el log `research.pricing extracted_rows` que solo aparezcan modelos canónicos, con entrada y salida asociadas a una página oficial abierta.
-26. Después de recibir el PDF, pedir “dame el contenido completo del PDF” y comprobar que Luna entregue el Markdown exacto asociado, sin resumir, corregir ni cambiar cifras mediante el modelo.
 
 ## Limpieza segura en Windows
 

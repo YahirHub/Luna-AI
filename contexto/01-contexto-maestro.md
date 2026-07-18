@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-17
-- Último registro: contexto/61-coherencia-artefactos-y-parser-estricto-de-precios.md
-- Resumen: Corregir filas y columnas de precios con parsers estrictos por proveedor y responder el contenido de PDFs desde su Markdown autoritativo, sin reconstrucción del modelo.
-- Archivos del cambio: extractor e investigador de precios, orquestador, workdir de artefactos, bot, contexto y pruebas
+- Última actualización: 2026-07-18
+- Último registro: contexto/60-runtime-agentico-generico-y-spawn-agents.md
+- Resumen: Sustituir la investigación especializada por un runtime genérico de subagentes inspirado en Codewolf, con `spawn_agents` no terminal, `researcher-web` aislado, deduplicación, ejecución paralela, timeouts independientes y retorno compacto al agente principal.
+- Archivos del cambio: runtime y definiciones de agentes, registro, eventos, deduplicación, herramientas `spawn_agents`/`researcher_web`, bot, configuración, prompts, README, pruebas, script de eliminación y contexto
 <!-- codewolf:auto-context:end -->

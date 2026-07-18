@@ -17,7 +17,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   webSearchEnabled: true,
   researchSubagentEnabled: true,
   defaultSearchDepth: "standard",
-  researcherTimeoutMs: 120_000,
+  researcherTimeoutMs: 15 * 60_000,
 };
 
 export function getAgentConfigPath(): string {
@@ -28,7 +28,7 @@ function normalizeTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_AGENT_CONFIG.researcherTimeoutMs;
   }
-  return Math.min(300_000, Math.max(30_000, Math.trunc(value)));
+  return Math.min(120 * 60_000, Math.max(60_000, Math.trunc(value)));
 }
 
 export function normalizeAgentConfig(value: unknown): AgentConfig {
@@ -91,7 +91,7 @@ export class AgentConfigFlowManager {
       `1. Acceso web del investigador: ${config.webSearchEnabled ? "ACTIVO" : "INACTIVO"}`,
       `2. Subagente investigador: ${config.researchSubagentEnabled ? "ACTIVO" : "INACTIVO"}`,
       `3. Profundidad predeterminada: ${config.defaultSearchDepth === "deep" ? "PROFUNDA" : "ESTÁNDAR"}`,
-      `4. Timeout del investigador: ${Math.round(config.researcherTimeoutMs / 1000)} segundos`,
+      `4. Timeout de seguridad del investigador: ${config.researcherTimeoutMs >= 60_000 ? `${Math.round(config.researcherTimeoutMs / 60_000)} minutos` : `${Math.round(config.researcherTimeoutMs / 1000)} segundos`}`,
       "",
       "Envía el número de una opción para cambiarla.",
       "Envía 0 para guardar y salir, o /cancelar para cerrar sin más cambios.",
@@ -129,9 +129,9 @@ export class AgentConfigFlowManager {
           : "standard";
         break;
       case "4": {
-        const values = [60_000, 120_000, 180_000, 300_000];
+        const values = [5 * 60_000, 10 * 60_000, 15 * 60_000, 30 * 60_000];
         const index = values.indexOf(next.researcherTimeoutMs);
-        next.researcherTimeoutMs = values[(index + 1) % values.length] ?? 120_000;
+        next.researcherTimeoutMs = values[(index + 1) % values.length] ?? 15 * 60_000;
         break;
       }
       default:

@@ -38,7 +38,7 @@ export async function executeArtifactTool(name: string, args: Record<string, unk
       const markdownPath = typeof args.markdown_path === "string" ? args.markdown_path : "";
       if (!markdownPath || !output) return "Error: markdown_path y output_path son obligatorios.";
       const stored = writePdfArtifact(workspace, jid, markdownPath, output);
-      const artifact = workspace.registerArtifact(jid, stored, "create_pdf_from_markdown", { sourcePath: markdownPath });
+      const artifact = workspace.registerArtifact(jid, stored, "create_pdf_from_markdown");
       return `✅ PDF creado en ${artifact.path} (${artifact.size} bytes).`;
     }
     if (name === "archive_folder" || name === "gitzip") {

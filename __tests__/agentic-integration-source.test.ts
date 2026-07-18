@@ -15,33 +15,35 @@ describe("integración agéntica", () => {
     expect(bot).toContain('name === "create_reminder" || name === "create_alarm"');
   });
 
-  it("los subagentes de investigación solo reciben herramientas web", () => {
-    const research = source("src/research-agent.ts");
-    expect(research).toContain("WEB_SEARCH_TOOL");
-    expect(research).toContain("READ_URL_TOOL");
-    expect(research).not.toContain("WHATSAPP_TOOLS");
-    expect(research).not.toContain("REMINDER_TOOLS");
-    expect(research).not.toContain("ALARM_TOOLS");
+  it("el investigador web aislado solo recibe web_search y read_url", () => {
+    const definition = source("src/agents/definitions/researcher-web.ts");
+    expect(definition).toContain('["web_search", "read_url"]');
+    expect(definition).toContain("includeMessageHistory: false");
+    expect(definition).toContain('outputMode: "last_message"');
+    expect(definition).not.toContain("WHATSAPP_TOOLS");
+    expect(definition).not.toContain("REMINDER_TOOLS");
+    expect(definition).not.toContain("ALARM_TOOLS");
   });
 
-  it("incluye cancelación, PDF, gitzip y envío de artefactos", () => {
+  it("el agente principal usa spawn_agents no terminal y conserva herramientas de artefactos", () => {
     const bot = source("src/bot.ts");
-    expect(bot).toContain("parallel_research_report");
-    expect(bot).toContain("taskRuntime.cancel");
+    const context = source("src/context.ts");
+    expect(bot).toContain('name === "spawn_agents"');
+    expect(bot).toContain('name === "researcher_web"');
+    expect(bot).not.toContain('name === "parallel_research_report"');
     expect(bot).toContain("executeArtifactTool");
     expect(bot).toContain("executeWhatsAppTool");
+    expect(context).toContain("spawn_agents NO genera informes ni PDFs y NO es terminal");
     expect(source("src/artifacts/artifact-tools.ts")).toContain('name: "gitzip"');
-    const orchestrator = source("src/orchestration/parallel-research.ts");
-    expect(orchestrator).toContain("evidence.jsonl");
-    expect(orchestrator).toContain("synthesis/result.json");
   });
 
-  it("responde el contenido de artefactos desde su fuente exacta antes del LLM", () => {
+  it("incluye cancelación jerárquica y persistencia de resultados de subagentes", () => {
     const bot = source("src/bot.ts");
-    expect(bot).toContain("buildArtifactContentReply(workspaceManager, remoteJid, userText)");
-    expect(bot).toContain("splitArtifactReply(exactArtifactReply)");
-    expect(source("src/workspace/workspace-manager.ts")).toContain("readArtifactText");
-    expect(source("src/workspace/workspace-manager.ts")).toContain("sourcePath");
+    const spawn = source("src/agents/spawn-agents-tool.ts");
+    expect(bot).toContain("taskRuntime.cancel");
+    expect(spawn).toContain("Promise.allSettled");
+    expect(spawn).toContain("events.jsonl");
+    expect(spawn).toContain("result.md");
+    expect(spawn).toContain("parentSignal: task.signal");
   });
-
 });

@@ -86,15 +86,15 @@ describe("límite de rondas de herramientas", () => {
 });
 
 
-it("detiene herramientas adicionales después de una investigación paralela terminal", async () => {
+it("detiene herramientas adicionales después de una herramienta terminal", async () => {
   const terminalTools: ToolDefinition[] = [
     {
       type: "function",
-      function: { name: "research_web", description: "Investiga", parameters: { type: "object", properties: {} } },
+      function: { name: "secondary_tool", description: "Herramienta secundaria", parameters: { type: "object", properties: {} } },
     },
     {
       type: "function",
-      function: { name: "parallel_research_report", description: "Informe", parameters: { type: "object", properties: {} } },
+      function: { name: "terminal_job", description: "Trabajo terminal", parameters: { type: "object", properties: {} } },
     },
   ];
   let calls = 0;
@@ -103,8 +103,8 @@ it("detiene herramientas adicionales después de una investigación paralela ter
     if (calls === 1) {
       return new Response(JSON.stringify({
         choices: [{ message: { content: null, tool_calls: [
-          { id: "research", type: "function", function: { name: "research_web", arguments: "{}" } },
-          { id: "parallel", type: "function", function: { name: "parallel_research_report", arguments: "{}" } },
+          { id: "secondary", type: "function", function: { name: "secondary_tool", arguments: "{}" } },
+          { id: "terminal", type: "function", function: { name: "terminal_job", arguments: "{}" } },
         ] } }],
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
@@ -121,15 +121,15 @@ it("detiene herramientas adicionales después de una investigación paralela ter
     terminalTools,
     async (name) => {
       executed.push(name);
-      return name === "parallel_research_report" ? "✅ PDF creado y enviado." : "investigación adicional";
+      return name === "terminal_job" ? "✅ Trabajo terminal completado." : "resultado secundario";
     },
     1,
     undefined,
-    { maxRounds: 8, terminalTools: ["parallel_research_report"] },
+    { maxRounds: 8, terminalTools: ["terminal_job"] },
   );
 
-  expect(executed).toEqual(["parallel_research_report"]);
-  expect(result.toolsCalled).toEqual(["parallel_research_report"]);
-  expect(result.content).toBe("✅ PDF creado y enviado.");
+  expect(executed).toEqual(["terminal_job"]);
+  expect(result.toolsCalled).toEqual(["terminal_job"]);
+  expect(result.content).toBe("✅ Trabajo terminal completado.");
   expect(calls).toBe(1);
 });
