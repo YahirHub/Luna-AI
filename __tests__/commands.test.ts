@@ -180,6 +180,15 @@ describe("configuración administrativa de Whisper", () => {
   });
 });
 
+describe("limpieza explícita del workdir", () => {
+  it("registra comandos para limpiar el workdir del usuario", async () => {
+    const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
+    expect(hasRegisteredCommand(source, "clear-workdir")).toBe(true);
+    expect(hasRegisteredCommand(source, "limpiar-workdir")).toBe(true);
+    expect(source).toContain("workspaceManager.clearWorkdir");
+  });
+});
+
 describe("superficie pública de búsqueda", () => {
   it("no expone comandos para ejecutar búsquedas manualmente", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();

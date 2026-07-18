@@ -172,6 +172,50 @@ describe("ProviderSetupManager", () => {
     }
   });
 
+  it("acepta URLs y modelo expresados dentro de frases naturales", () => {
+    const setup = new ProviderSetupManager();
+    const jid = "admin-natural-fields@s.whatsapp.net";
+
+    setup.start(jid);
+    expect(setup.submit(jid, "El endpoint de chat es https://api.example.com/v1/chat/completions")).toEqual({
+      completed: false,
+      nextStep: "modelsUrl",
+    });
+    expect(setup.submit(jid, "El catálogo está en https://api.example.com/v1/models")).toEqual({
+      completed: false,
+      nextStep: "defaultModel",
+    });
+    expect(setup.submit(jid, "Usa el modelo vendor/model-main")).toEqual({
+      completed: false,
+      nextStep: "apiKey",
+    });
+    const result = setup.submit(jid, "sin-clave");
+
+    expect(result.completed).toBe(true);
+    if (result.completed) {
+      expect(result.config.chatCompletionsUrl).toBe("https://api.example.com/v1/chat/completions");
+      expect(result.config.modelsUrl).toBe("https://api.example.com/v1/models");
+      expect(result.config.defaultModel).toBe("vendor/model-main");
+    }
+  });
+
+  it("extrae la API key cuando el administrador la envía dentro de una frase natural", () => {
+    const setup = new ProviderSetupManager();
+    const jid = "admin-natural@s.whatsapp.net";
+
+    setup.start(jid);
+    setup.submit(jid, "https://api.example.com/v1/chat/completions");
+    setup.submit(jid, "https://api.example.com/v1/models");
+    setup.submit(jid, "vendor/model-main");
+    const result = setup.submit(jid, "Esta es mi API key: sk-natural-secret");
+
+    expect(result.completed).toBe(true);
+    if (result.completed) {
+      expect(result.config.apiKey).toBe("sk-natural-secret");
+      expect(result.secretInput).toBe(true);
+    }
+  });
+
   it("acepta sin-clave y conserva el timeout previo", () => {
     const setup = new ProviderSetupManager();
     const jid = "admin2@s.whatsapp.net";

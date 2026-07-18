@@ -183,7 +183,7 @@ Para restaurar el proveedor gratuito:
 /setup-provider gratis
 ```
 
-Luna intenta eliminar del chat el mensaje que contiene la API key. Aun así, realiza la configuración únicamente en una conversación privada.
+Luna intenta eliminar del chat el mensaje que contiene la API key. Aun así, realiza la configuración únicamente en una conversación privada. El administrador también puede decir “configura un proveedor personalizado” para iniciar el mismo flujo seguro o “vuelve a OpenCode Free” para restaurar el proveedor integrado.
 
 ## Búsqueda web
 
@@ -228,7 +228,7 @@ persistent/search-auth.json
 
 Ambos archivos permanecen dentro del volumen persistente y están excluidos de Git. Las API keys no se agregan al contexto, no se muestran completas y no se escriben en logs.
 
-Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`.
+Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`. El administrador puede realizar las mismas operaciones mediante lenguaje natural: consultar estados, activar o desactivar motores, cambiar el predeterminado, reordenar el fallback, probar proveedores, eliminar una clave o iniciar la captura segura de una nueva API key.
 
 ## Runtime agéntico y subagentes
 
@@ -509,6 +509,8 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!id` | Muestra el JID de WhatsApp. |
 | `/cancelar` | Cancela el flujo interactivo actual. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
+| `!clear-workdir confirmar` | Limpia todo el workdir privado del usuario sin borrar conversación, memoria ni configuración. |
+| `!limpiar-workdir confirmar` | Alias en español de `!clear-workdir`. |
 | `!modelos` | Actualiza el catálogo y permite seleccionar un modelo. |
 | `!setup` | Crea la primera cuenta administradora. |
 | `!login` | Inicia sesión. |
@@ -522,7 +524,23 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!desban` | Desbloquea un usuario; solo administrador. |
 | `!userlist` | Lista usuarios; solo administrador. |
 
-Los administradores pueden realizar las mismas operaciones de usuarios con lenguaje natural: listar cuentas, iniciar de forma segura la creación de un usuario, bloquearlo o desbloquearlo. La contraseña nunca se pasa como argumento al modelo; después de iniciar la creación, el bot la solicita en un mensaje separado, la procesa fuera del chat LLM e intenta borrar el mensaje de WhatsApp.
+Todos los comandos funcionales de una sesión autenticada tienen una vía equivalente por lenguaje natural. Un usuario puede pedir ayuda, consultar su JID, cancelar una operación, limpiar su conversación, listar o cambiar el modelo y limpiar su propio workdir sin recordar el comando exacto. `!setup` y `!login` también aceptan frases naturales como “crear administrador” o “iniciar sesión”, pero siguen procesándose localmente para no enviar credenciales al proveedor LLM.
+
+Los administradores heredan todas las capacidades normales y además pueden administrar por lenguaje natural usuarios, Whisper, proveedor LLM, motores de búsqueda y las opciones funcionales de `/config`. Las API keys y contraseñas nunca se pasan como argumentos al modelo: Luna inicia un flujo seguro y captura el secreto en el siguiente mensaje, fuera del chat LLM, intentando eliminarlo de WhatsApp después de guardarlo. Los parámetros internos de resiliencia, reintentos y backoff no se exponen como herramientas naturales.
+
+Ejemplos de administración natural:
+
+- “¿Qué proveedor LLM estamos usando?”
+- “Vuelve a OpenCode Free.”
+- “Quiero configurar un proveedor personalizado.”
+- “Muéstrame los buscadores configurados.”
+- “Pon Brave primero y Tavily como segundo fallback.”
+- “Prueba todos los motores activos.”
+- “Configura la API key de Exa.”
+- “Usa investigación profunda por defecto.”
+- “Desactiva temporalmente el subagente investigador.”
+- “Muéstrame los modelos Whisper disponibles.”
+- “Crea un usuario llamado pedro.”
 
 ## Persistencia
 

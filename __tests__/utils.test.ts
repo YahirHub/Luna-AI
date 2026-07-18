@@ -3,6 +3,7 @@ import {
   normalizePhoneNumber,
   isValidPhoneNumber,
   isValidYmdDate,
+  extractSecretTokenFromMessage,
 } from "../src/utils.ts";
 
 describe("normalizePhoneNumber", () => {
@@ -95,5 +96,20 @@ describe("isValidYmdDate", () => {
     expect(isValidYmdDate("2026-02-29")).toBe(false);
     expect(isValidYmdDate("2026-13-01")).toBe(false);
     expect(isValidYmdDate("16/07/2026")).toBe(false);
+  });
+});
+
+
+describe("extractSecretTokenFromMessage", () => {
+  it("conserva una API key pegada directamente", () => {
+    expect(extractSecretTokenFromMessage("sk-direct-secret")).toBe("sk-direct-secret");
+  });
+
+  it("extrae la API key desde frases naturales con dos puntos", () => {
+    expect(extractSecretTokenFromMessage("Este es el de exa.ai:exa-secret-123")).toBe("exa-secret-123");
+  });
+
+  it("extrae la API key desde frases con 'es'", () => {
+    expect(extractSecretTokenFromMessage("Mi API key es sk-natural-123")).toBe("sk-natural-123");
   });
 });

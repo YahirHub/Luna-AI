@@ -114,6 +114,33 @@ export function getMexicoCityNow(): {
   };
 }
 
+
+/**
+ * Extrae un token secreto de un mensaje natural sin enviarlo al LLM.
+ * Está pensado para API keys/tokens (no contraseñas): acepta tanto el valor
+ * aislado como frases del tipo "esta es mi API key: sk-...".
+ */
+export function extractSecretTokenFromMessage(raw: string): string {
+  let value = raw.trim();
+  if (!value) return "";
+
+  // Quitar fences o comillas que suelen usarse al pegar credenciales.
+  const fenced = /^```(?:\w+)?\s*([\s\S]*?)\s*```$/u.exec(value);
+  if (fenced?.[1]) value = fenced[1].trim();
+  value = value.replace(/^[`"']+|[`"']+$/g, "").trim();
+
+  // Caso más común en lenguaje natural: "...: TOKEN" o "... = TOKEN".
+  const delimited = /[:=]\s*([^\s`"']{6,})\s*$/u.exec(value);
+  if (delimited?.[1]) return delimited[1].replace(/[.,;]+$/g, "");
+
+  // También aceptar "mi api key es TOKEN", "la clave es TOKEN", etc.
+  const natural = /(?:api[\s_-]*key|clave|token|key)\s+(?:es|is)\s+([^\s`"']{6,})\s*$/iu.exec(value);
+  if (natural?.[1]) return natural[1].replace(/[.,;]+$/g, "");
+
+  // Si no parece una frase, conservar el valor completo tal como fue pegado.
+  return value;
+}
+
 /** Valida una fecha calendario real en formato YYYY-MM-DD. */
 export function isValidYmdDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);

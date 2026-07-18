@@ -6,6 +6,7 @@ import {
   dispatchCommand,
   isPositiveInteger,
 } from "./commands.ts";
+import type { ParsedCommand } from "./commands.ts";
 import {
   buildAudioContextText,
   buildImageContextText,
@@ -74,8 +75,27 @@ import {
 import {
   AgentConfigFlowManager,
   loadAgentConfig,
+  saveAgentConfig,
 } from "./agent-config.ts";
 import { SearchSetupManager } from "./search/search-setup.ts";
+import {
+  SEARCH_PROVIDER_IDS,
+  SEARCH_PROVIDER_LABELS,
+  isSearchProviderId,
+  normalizeSearchProviderOrder,
+  resolveSearchProviderState,
+  type SearchProviderId,
+} from "./search/search-config.ts";
+import {
+  loadWebSearchAuth,
+  loadWebSearchSettings,
+  recordSearchProviderTest,
+  removeSearchProviderApiKey,
+  setDefaultSearchProvider,
+  setSearchFallbackOrder,
+  setSearchProviderEnabled,
+} from "./search/search-storage.ts";
+import { testSearchProvider } from "./search/search-runtime.ts";
 import {
   ADMIN_TOOLS,
   executeUserAdminTool,
@@ -112,6 +132,10 @@ import {
   type SpawnAgentsProgress,
 } from "./agents/spawn-agents-tool.ts";
 import { createSpawnAgentRequestDeduper } from "./agents/spawn-deduper.ts";
+import {
+  USER_CONTROL_TOOLS,
+  ADMIN_CONTROL_TOOLS,
+} from "./control-tools.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -166,6 +190,7 @@ const BASE_TOOLS = [
   ...WORKSPACE_TOOLS,
   ...ARTIFACT_TOOLS,
   ...WHATSAPP_TOOLS,
+  ...USER_CONTROL_TOOLS,
 ];
 
 function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
@@ -173,6 +198,7 @@ function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
   tools.push(...getMainAgentTools(agentConfig));
   if (jid && isAdminSession(jid)) {
     tools.push(...ADMIN_TOOLS);
+    tools.push(...ADMIN_CONTROL_TOOLS);
   }
   return tools;
 }
@@ -199,6 +225,12 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["archive_folder", "🗜️ Comprimiendo carpeta..."],
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
   ["whatsapp_send", "📤 Preparando envío por WhatsApp..."],
+  ["workspace_clear", "🧹 Limpiando tu workdir..."],
+  ["model_list", "📋 Actualizando modelos disponibles..."],
+  ["model_set", "🧠 Cambiando modelo de la conversación..."],
+  ["llm_provider_start_setup", "🧠 Preparando configuración del proveedor LLM..."],
+  ["search_admin_test", "🧪 Probando motores de búsqueda..."],
+  ["search_admin_start_set_api_key", "🔑 Preparando configuración segura de API key..."],
 ]);
 
 // ─── Compactación de contexto ──────────────────────────────────
@@ -621,6 +653,282 @@ async function deleteSensitiveIncomingMessage(
   }
 }
 
+function buildHelpText(jid: string): string {
+  const username = authManager.getUsername(jid);
+  const admin = username ? authManager.isAdmin(username) : false;
+  const commands = getCommands(admin)
+    .map((item) => `${formatCommandName(item.name)} — ${item.description}`)
+    .join("\n");
+  return [
+    "🤖 COMANDOS DISPONIBLES",
+    "",
+    commands,
+    "",
+    "💬 También puedes pedirme estas acciones con lenguaje natural.",
+  ].join("\n");
+}
+
+function cancelCurrentOperation(jid: string): string {
+  if (taskRuntime.cancel(jid)) return "✅ Tarea activa de subagentes cancelada.";
+  if (providerSetupManager.has(jid)) {
+    providerSetupManager.cancel(jid);
+    return "✅ Configuración del proveedor cancelada.";
+  }
+  if (searchSetupManager.has(jid)) {
+    searchSetupManager.cancel(jid);
+    return "✅ Configuración de búsqueda cancelada.";
+  }
+  if (agentConfigFlowManager.has(jid)) {
+    agentConfigFlowManager.cancel(jid);
+    return "✅ Configuración del agente cancelada.";
+  }
+  if (whisperSetupManager.has(jid)) {
+    whisperSetupManager.cancel(jid);
+    return "✅ Configuración de Whisper cancelada.";
+  }
+  if (contextManager?.isAwaitingModelSelection(jid)) {
+    contextManager.clearAwaitingModelSelection(jid);
+    return "✅ Selección de modelo cancelada.";
+  }
+  return "No hay una operación interactiva o tarea activa que cancelar.";
+}
+
+async function formatModelsForUser(jid: string): Promise<string> {
+  if (!llmConfig || !contextManager) return "Error: el proveedor LLM todavía está iniciando.";
+  const usedFallback = await refreshAvailableModels();
+  const current = contextManager.getModel(jid) || "ninguno";
+  const rows = availableModels.map((model, index) => `${index + 1}. ${model}`);
+  return [
+    "📋 MODELOS DISPONIBLES",
+    "",
+    ...rows,
+    "",
+    `Modelo actual: ${current}`,
+    ...(usedFallback ? ["Nota: se está mostrando un catálogo de respaldo porque el endpoint de modelos no respondió correctamente."] : []),
+  ].join("\n");
+}
+
+function formatAgentConfigStatus(config = agentConfig): string {
+  return [
+    "⚙️ CONFIGURACIÓN DEL AGENTE",
+    `Acceso web: ${config.webSearchEnabled ? "activo" : "inactivo"}`,
+    `Subagente investigador: ${config.researchSubagentEnabled ? "activo" : "inactivo"}`,
+    `Profundidad predeterminada: ${config.defaultSearchDepth}`,
+    `Timeout investigador: ${Math.round(config.researcherTimeoutMs / 60_000)} minutos`,
+  ].join("\n");
+}
+
+function formatSearchAdminStatus(): string {
+  const settings = loadWebSearchSettings();
+  const auth = loadWebSearchAuth();
+  const rows = SEARCH_PROVIDER_IDS.map((provider) => {
+    const state = resolveSearchProviderState(provider, settings, auth);
+    const status = state.enabled ? "activo" : state.configured ? "desactivado" : "sin API key";
+    const defaultMark = settings.defaultProvider === provider ? " · predeterminado" : "";
+    const test = state.lastTest ? ` · última prueba: ${state.lastTest.ok ? "correcta" : "fallida"}` : "";
+    return `- ${SEARCH_PROVIDER_LABELS[provider]}: ${status}${defaultMark}${test}`;
+  });
+  return [
+    "🔎 MOTORES DE BÚSQUEDA",
+    ...rows,
+    `Orden de fallback: ${settings.fallbackOrder.map((provider) => SEARCH_PROVIDER_LABELS[provider]).join(" → ")}`,
+  ].join("\n");
+}
+
+function parseSearchProviderArg(value: unknown): SearchProviderId | null {
+  if (isSearchProviderId(value)) return value;
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+  const aliases: Record<string, SearchProviderId> = {
+    tavily: "tavily",
+    brave: "brave",
+    bravesearch: "brave",
+    exa: "exa",
+    exaai: "exa",
+    linkup: "linkup",
+    firecrawl: "firecrawl",
+    fireclaw: "firecrawl",
+    serpapi: "serpapi",
+    zenserp: "zenserp",
+  };
+  return aliases[normalized] ?? null;
+}
+
+async function testSearchProvidersNatural(providerArg: unknown): Promise<string> {
+  const settings = loadWebSearchSettings();
+  const auth = loadWebSearchAuth();
+  const requested = providerArg === "all"
+    ? SEARCH_PROVIDER_IDS.filter((provider) => resolveSearchProviderState(provider, settings, auth).enabled)
+    : [parseSearchProviderArg(providerArg)].filter((provider): provider is SearchProviderId => Boolean(provider));
+  if (requested.length === 0) return "Error: no hay motores activos para probar o el proveedor indicado no es válido.";
+  const rows: string[] = [];
+  for (const provider of requested) {
+    const result = await testSearchProvider(provider, { settings: loadWebSearchSettings(), auth: loadWebSearchAuth() });
+    recordSearchProviderTest(provider, result);
+    rows.push(`${result.ok ? "✅" : "❌"} ${SEARCH_PROVIDER_LABELS[provider]}: ${result.message}`);
+  }
+  return rows.join("\n");
+}
+
+async function executeUserControlTool(
+  name: string,
+  args: Record<string, unknown>,
+  jid: string,
+): Promise<string> {
+  switch (name) {
+    case "control_help":
+      return buildHelpText(jid);
+    case "control_ping":
+      return "🏓 pong";
+    case "control_get_id":
+      return `🆔 Tu JID: ${jid}`;
+    case "control_cancel":
+      return cancelCurrentOperation(jid);
+    case "conversation_clear":
+      contextManager?.clearConversation(jid);
+      return "✅ Conversación reiniciada. La memoria persistente y el workdir se conservaron.";
+    case "model_status":
+      return `Modelo actual: ${contextManager?.getModel(jid) ?? "ninguno"}`;
+    case "model_list":
+      return await formatModelsForUser(jid);
+    case "model_set": {
+      if (!contextManager) return "Error: el gestor de contexto no está disponible.";
+      const requested = typeof args.model_id === "string" ? args.model_id.trim() : "";
+      if (!requested) return "Error: model_id es obligatorio.";
+      await refreshAvailableModels();
+      const exact = availableModels.find((model) => model.toLowerCase() === requested.toLowerCase());
+      if (!exact) {
+        const partial = availableModels.filter((model) => model.toLowerCase().includes(requested.toLowerCase()));
+        if (partial.length === 1) {
+          contextManager.setModel(jid, partial[0]!);
+          return `✅ Modelo seleccionado: ${partial[0]}`;
+        }
+        return `Error: el modelo '${requested}' no está disponible. Usa model_list para consultar los modelos actuales.`;
+      }
+      contextManager.setModel(jid, exact);
+      return `✅ Modelo seleccionado: ${exact}`;
+    }
+    default:
+      return `Error: herramienta de control desconocida '${name}'.`;
+  }
+}
+
+async function executeAdminControlTool(
+  name: string,
+  args: Record<string, unknown>,
+  jid: string,
+): Promise<string> {
+  if (!isAdminSession(jid)) return "Error: esta herramienta requiere una sesión administradora activa.";
+
+  switch (name) {
+    case "llm_provider_status":
+      return [
+        "🧠 PROVEEDOR LLM",
+        `Modo: ${llmProviderMode === "opencode-free" ? OPENCODE_FREE_PROVIDER_NAME : "personalizado"}`,
+        `Chat completions: ${llmConfig?.chatCompletionsUrl ?? "no disponible"}`,
+        `Modelos: ${llmConfig?.modelsUrl ?? "no disponible"}`,
+        `Modelo predeterminado: ${llmConfig?.defaultModel ?? "no disponible"}`,
+        `API key configurada: ${llmConfig?.apiKey ? "sí" : "no"}`,
+      ].join("\n");
+
+    case "llm_provider_use_opencode_free":
+      if (args.confirmed !== true) return "Error: restaurar OpenCode Free requiere una petición explícita y confirmed=true.";
+      deleteLlmConfig(llmConfigPath);
+      providerSetupManager.cancel(jid);
+      initLlm(null, llmConfigPath);
+      return `✅ ${OPENCODE_FREE_PROVIDER_NAME} activado como proveedor global.`;
+
+    case "llm_provider_start_setup":
+      providerSetupManager.start(jid, llmProviderMode === "custom" ? llmConfig : null);
+      return [
+        "✅ Flujo seguro de configuración LLM iniciado.",
+        providerSetupPrompt("chatCompletionsUrl"),
+      ].join("\n\n");
+
+    case "search_admin_status":
+      return formatSearchAdminStatus();
+
+    case "search_admin_set_enabled": {
+      const provider = parseSearchProviderArg(args.provider);
+      if (!provider || typeof args.enabled !== "boolean") return "Error: provider y enabled son obligatorios.";
+      try {
+        setSearchProviderEnabled(provider, args.enabled);
+        return `✅ ${SEARCH_PROVIDER_LABELS[provider]} ${args.enabled ? "activado" : "desactivado"}.`;
+      } catch (error) {
+        return `Error: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+
+    case "search_admin_set_default": {
+      const provider = parseSearchProviderArg(args.provider);
+      if (!provider) return "Error: proveedor inválido.";
+      try {
+        setDefaultSearchProvider(provider);
+        return `✅ ${SEARCH_PROVIDER_LABELS[provider]} establecido como motor predeterminado.`;
+      } catch (error) {
+        return `Error: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+
+    case "search_admin_set_fallback_order": {
+      const raw = Array.isArray(args.providers) ? args.providers : [];
+      const providers = raw.filter((value): value is SearchProviderId => isSearchProviderId(value));
+      if (providers.length === 0) return "Error: indica al menos un proveedor válido.";
+      const normalized = normalizeSearchProviderOrder(providers);
+      setSearchFallbackOrder(normalized);
+      return `✅ Orden de fallback actualizado: ${normalized.map((provider) => SEARCH_PROVIDER_LABELS[provider]).join(" → ")}`;
+    }
+
+    case "search_admin_test":
+      return await testSearchProvidersNatural(args.provider);
+
+    case "search_admin_start_set_api_key": {
+      const provider = parseSearchProviderArg(args.provider);
+      if (!provider) return "Error: proveedor inválido.";
+      return `✅ Flujo seguro iniciado.\n\n${searchSetupManager.startApiKey(jid, provider)}`;
+    }
+
+    case "search_admin_remove_api_key": {
+      const provider = parseSearchProviderArg(args.provider);
+      if (!provider) return "Error: proveedor inválido.";
+      if (args.confirmed !== true) return "Error: eliminar la API key requiere una petición explícita y confirmed=true.";
+      removeSearchProviderApiKey(provider);
+      return `✅ API key de ${SEARCH_PROVIDER_LABELS[provider]} eliminada y motor desactivado.`;
+    }
+
+    case "agent_config_status":
+      agentConfig = loadAgentConfig();
+      return formatAgentConfigStatus(agentConfig);
+
+    case "agent_config_update": {
+      const next = { ...agentConfig };
+      if (typeof args.web_search_enabled === "boolean") next.webSearchEnabled = args.web_search_enabled;
+      if (typeof args.research_subagent_enabled === "boolean") next.researchSubagentEnabled = args.research_subagent_enabled;
+      if (args.default_search_depth === "standard" || args.default_search_depth === "deep") {
+        next.defaultSearchDepth = args.default_search_depth;
+      }
+      if (typeof args.researcher_timeout_minutes === "number" && Number.isFinite(args.researcher_timeout_minutes)) {
+        const allowedTimeouts = new Set([5, 10, 15, 30]);
+        const minutes = Math.trunc(args.researcher_timeout_minutes);
+        if (!allowedTimeouts.has(minutes)) {
+          return "Error: researcher_timeout_minutes debe ser 5, 10, 15 o 30, igual que en /config.";
+        }
+        next.researcherTimeoutMs = minutes * 60_000;
+      }
+      agentConfig = saveAgentConfig(next);
+      return `✅ Configuración del agente actualizada.\n${formatAgentConfigStatus(agentConfig)}`;
+    }
+
+    default:
+      return `Error: herramienta administrativa de control desconocida '${name}'.`;
+  }
+}
+
 // ─── Registro de comandos ────────────────────────────────────────
 
 registerCommand(
@@ -701,6 +1009,38 @@ registerCommand(
     contextManager?.clearConversation(senderJid);
     return { text: "🧹 Conversación reiniciada. Empezamos de cero." };
   },
+);
+
+const clearWorkdirCommandHandler = (cmd: import("./commands.ts").ParsedCommand, senderJid: string) => {
+  const confirmed = ["confirmar", "confirmo", "si", "sí", "yes"].includes(cmd.args[0]?.toLowerCase() ?? "");
+  if (!confirmed) {
+    return {
+      text: [
+        "⚠️ Esto eliminará todos los archivos temporales, tareas e informes de tu workdir.",
+        "No elimina tu conversación, memoria, usuario ni configuraciones.",
+        "",
+        `Para continuar usa ${formatCommandName(cmd.name)} confirmar`,
+      ].join("\n"),
+    };
+  }
+  const hasActiveTask = taskRuntime.list(senderJid).some((task) => task.status === "running" || task.status === "synthesizing");
+  if (hasActiveTask) {
+    return { text: "❌ No se puede limpiar el workdir mientras hay una tarea de subagentes activa. Cancélala o espera a que termine." };
+  }
+  workspaceManager.clearWorkdir(senderJid);
+  return { text: "🧹 Workdir limpiado por completo. Se recrearon tasks, inbox y exports." };
+};
+
+registerCommand(
+  "clear-workdir",
+  "Limpia todos los archivos y tareas del workdir privado del usuario",
+  clearWorkdirCommandHandler,
+);
+
+registerCommand(
+  "limpiar-workdir",
+  "Alias en español para limpiar el workdir privado del usuario",
+  clearWorkdirCommandHandler,
 );
 
 registerCommand(
@@ -1338,6 +1678,46 @@ async function handlePendingWhisperSetup(
   }
 }
 
+// Frases locales que deben funcionar incluso antes de que exista acceso al LLM.
+// Las credenciales siguen procesándose fuera del modelo.
+function parseNaturalLocalCommand(text: string, jid: string): ParsedCommand | null {
+  const normalized = text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[¿?¡!.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const cancelPhrases = new Set([
+    "cancelar", "cancela", "cancelalo", "cancelar esto", "salir", "sal",
+    "olvidalo", "dejalo", "abortar", "aborta", "detener", "detenlo",
+  ]);
+  if (cancelPhrases.has(normalized)) {
+    return { name: "cancelar", args: [], body: "" };
+  }
+
+  if (!authManager.userExists()) {
+    const setupPhrases = [
+      "setup", "crear administrador", "crear cuenta de administrador",
+      "configurar administrador", "crear el administrador", "configurar cuenta administrador",
+    ];
+    if (setupPhrases.some((phrase) => normalized === phrase || normalized.includes(phrase))) {
+      return { name: "setup", args: [], body: "" };
+    }
+  } else if (!authManager.isLoggedIn(jid)) {
+    const loginPhrases = [
+      "login", "iniciar sesion", "inicia sesion", "quiero iniciar sesion",
+      "entrar", "quiero entrar", "acceder", "quiero acceder",
+    ];
+    if (loginPhrases.some((phrase) => normalized === phrase || normalized.includes(phrase))) {
+      return { name: "login", args: [], body: "" };
+    }
+  }
+
+  return null;
+}
+
 // ─── Procesamiento de mensajes ───────────────────────────────────
 
 export async function handleMessage(
@@ -1370,8 +1750,10 @@ export async function handleMessage(
     return;
   }
 
-  // ── Parsear comando ──────────────────────────────────────────────
-  const command = parseCommand(text);
+  // ── Parsear comando o intención local segura ─────────────────────
+  // Login/setup/cancelación deben poder expresarse naturalmente sin enviar
+  // credenciales ni estados de autenticación al proveedor LLM.
+  const command = parseCommand(text) ?? parseNaturalLocalCommand(text, remoteJid);
 
   // ── Acción pendiente de auth ─────────────────────────────────────
   const pendingAction = authManager.getPendingAction(remoteJid);
@@ -1659,6 +2041,7 @@ async function handleAiChat(
     const toolResults: Array<{ name: string; result: string }> = [];
     const shownNotifs = new Set<string>();
     const spawnDeduper = createSpawnAgentRequestDeduper();
+    let clearConversationAfterResponse = false;
 
     const recordToolResult = async (name: string, result: string): Promise<void> => {
       toolResults.push({ name, result });
@@ -1725,7 +2108,30 @@ async function handleAiChat(
         return result;
       }
 
+      if (USER_CONTROL_TOOLS.some((tool) => tool.function.name === name)) {
+        if (name === "conversation_clear") clearConversationAfterResponse = true;
+        result = await executeUserControlTool(name, args, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (ADMIN_CONTROL_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeAdminControlTool(name, args, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
+        if (name === "workspace_clear") {
+          const hasActiveTask = taskRuntime.list(remoteJid).some(
+            (task) => task.status === "running" || task.status === "synthesizing",
+          );
+          if (hasActiveTask) {
+            result = "Error: no se puede limpiar el workdir mientras hay una tarea de subagentes activa. Cancélala o espera a que termine.";
+            await recordToolResult(name, result);
+            return result;
+          }
+        }
         result = await executeWorkspaceTool(name, args, workspaceManager, remoteJid);
         await recordToolResult(name, result);
         return result;
@@ -1873,6 +2279,11 @@ async function handleAiChat(
     // Si WhatsApp se desconectó durante la tarea, queda pendiente y se envía
     // automáticamente al reconectar sin abortar el flujo del agente.
     await sendWithTyping(sock, remoteJid, finalContent, 1_500, 3_000);
+    if (clearConversationAfterResponse) {
+      // La confirmación se entrega por WhatsApp, pero el historial queda realmente
+      // limpio igual que con !clear; memoria, modelo y workdir se conservan.
+      cm.clearConversation(remoteJid);
+    }
   } catch (err: unknown) {
     const errorMsg =
       err instanceof Error ? err.message : "Error desconocido";

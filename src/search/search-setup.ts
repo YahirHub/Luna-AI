@@ -18,11 +18,12 @@ import {
   setSearchProviderEnabled,
 } from "./search-storage.ts";
 import { testSearchProvider } from "./search-runtime.ts";
+import { extractSecretTokenFromMessage } from "../utils.ts";
 
 type SearchSetupState =
   | { stage: "main" }
   | { stage: "provider"; provider: SearchProviderId }
-  | { stage: "api-key"; provider: SearchProviderId }
+  | { stage: "api-key"; provider: SearchProviderId; returnToMenu: boolean }
   | { stage: "fallback-order" };
 
 export interface SearchSetupResult {
@@ -48,6 +49,17 @@ export class SearchSetupManager {
   start(jid: string): string {
     this.states.set(jid, { stage: "main" });
     return this.renderMainMenu();
+  }
+
+  /** Inicia directamente el paso seguro de captura de API key para un motor. */
+  startApiKey(jid: string, provider: SearchProviderId): string {
+    this.states.set(jid, { stage: "api-key", provider, returnToMenu: false });
+    return [
+      `🔑 API KEY DE ${SEARCH_PROVIDER_LABELS[provider].toUpperCase()}`,
+      "",
+      "Envía la clave en tu siguiente mensaje. Luna intentará borrar ese mensaje después de guardarla.",
+      "Usa /cancelar o di 'cancelar' para salir sin modificarla.",
+    ].join("\n");
   }
 
   cancel(jid: string): void {
@@ -140,7 +152,28 @@ export class SearchSetupManager {
     const value = input.trim();
 
     if (state.stage === "api-key") {
-      saveSearchProviderApiKey(state.provider, value, this.configDir);
+      const apiKey = extractSecretTokenFromMessage(value);
+      if (!apiKey) {
+        return {
+          done: false,
+          text: "❌ No pude detectar una API key válida. Envíala de nuevo o di 'cancelar'.",
+        };
+      }
+      saveSearchProviderApiKey(state.provider, apiKey, this.configDir);
+
+      // Cuando la captura fue iniciada desde lenguaje natural, es una acción
+      // de una sola vez: al guardar la clave se cierra el estado interactivo
+      // para que el siguiente mensaje vuelva al agente principal. El menú
+      // numérico tradicional conserva su comportamiento y regresa al motor.
+      if (!state.returnToMenu) {
+        this.cancel(jid);
+        return {
+          done: true,
+          secretInput: true,
+          text: `✅ API key guardada y ${SEARCH_PROVIDER_LABELS[state.provider]} activado.`,
+        };
+      }
+
       this.states.set(jid, { stage: "provider", provider: state.provider });
       return {
         done: false,
@@ -207,7 +240,7 @@ export class SearchSetupManager {
 
     switch (value) {
       case "1":
-        this.states.set(jid, { stage: "api-key", provider: state.provider });
+        this.states.set(jid, { stage: "api-key", provider: state.provider, returnToMenu: true });
         return {
           done: false,
           text: [

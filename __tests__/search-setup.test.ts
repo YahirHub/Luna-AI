@@ -21,8 +21,25 @@ describe("SearchSetupManager", () => {
     const saved = await manager.submit(jid, "tvly-secret");
 
     expect(saved.secretInput).toBe(true);
+    expect(saved.done).toBe(false);
+    expect(manager.has(jid)).toBe(true);
     expect(loadWebSearchAuth(TEST_DIR).apiKeys.tavily).toBe("tvly-secret");
     expect(loadWebSearchSettings(TEST_DIR).defaultProvider).toBe("tavily");
+  });
+
+  it("cierra la captura natural de API key y no deja atrapado al usuario en el menú", async () => {
+    const manager = new SearchSetupManager(TEST_DIR);
+    const jid = "natural@s.whatsapp.net";
+    manager.startApiKey(jid, "exa");
+
+    const saved = await manager.submit(jid, "Este es el de exa.ai:exa-secret-123");
+
+    expect(saved.secretInput).toBe(true);
+    expect(saved.done).toBe(true);
+    expect(saved.text).toContain("Exa activado");
+    expect(saved.text).not.toContain("1. Configurar o reemplazar API key");
+    expect(manager.has(jid)).toBe(false);
+    expect(loadWebSearchAuth(TEST_DIR).apiKeys.exa).toBe("exa-secret-123");
   });
 
   it("actualiza el orden de respaldo sin perder motores", async () => {

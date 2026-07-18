@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/61-fallback-busqueda-reintentos-llm-y-cola-whatsapp.md
-- Resumen: Fallback silencioso entre motores de búsqueda, reintentos configurables para fallos transitorios del proveedor LLM y respuestas vacías, logs debug coloreados y cola resiliente para todos los mensajes salientes de WhatsApp durante desconexiones.
-- Archivos del cambio: AI/reintentos, debug, search runtime, messaging, bot, whatsapp tools, README, pruebas y contexto
+- Último registro: contexto/62-control-natural-de-comandos-y-limpieza-workdir.md
+- Resumen: Los comandos funcionales existentes pueden controlarse también por lenguaje natural con filtros por rol; administración natural de proveedor LLM, buscadores, configuración del agente, Whisper y usuarios, además de limpieza segura del workdir por usuario.
+- Archivos del cambio: control tools, bot, contexto del agente, búsqueda setup, workspace, confirmaciones, README y pruebas
 <!-- codewolf:auto-context:end -->

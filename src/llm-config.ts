@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { writeJsonFileAtomically } from "./storage.ts";
-import { getAppDir } from "./utils.ts";
+import { extractSecretTokenFromMessage, getAppDir } from "./utils.ts";
 
 export const DEFAULT_LLM_CONFIG_FILE = join("persistent", "llm.config.json");
 export const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 60_000;
@@ -71,6 +71,26 @@ export function normalizeLlmHttpUrl(value: unknown, field: string): string {
 /** Valida el identificador del modelo predeterminado. */
 export function normalizeDefaultModel(value: unknown): string {
   return requireString(value, "defaultModel");
+}
+
+function extractHttpUrlInput(value: string): string {
+  const trimmed = value.trim();
+  const match = /https?:\/\/[^\s<>{}\[\]`"']+/iu.exec(trimmed);
+  return (match?.[0] ?? trimmed).replace(/[.,;]+$/g, "");
+}
+
+function extractModelIdInput(value: string): string {
+  const trimmed = value.trim();
+  const quoted = /[`"']([^`"']+)[`"']\s*$/u.exec(trimmed);
+  if (quoted?.[1]) return quoted[1].trim();
+
+  const natural = /(?:modelo|model)\s+(?:es|is|:)?\s*([a-z0-9._:/-]+)\s*$/iu.exec(trimmed);
+  if (natural?.[1]) return natural[1];
+
+  const delimited = /[:=]\s*([a-z0-9._:/-]+)\s*$/iu.exec(trimmed);
+  if (delimited?.[1]) return delimited[1];
+
+  return trimmed;
 }
 
 function parseApiKey(value: unknown): string {
@@ -240,19 +260,19 @@ export class ProviderSetupManager {
     switch (session.step) {
       case "chatCompletionsUrl":
         session.draft.chatCompletionsUrl = normalizeLlmHttpUrl(
-          input,
+          extractHttpUrlInput(input),
           "chatCompletionsUrl",
         );
         session.step = "modelsUrl";
         return { completed: false, nextStep: session.step };
 
       case "modelsUrl":
-        session.draft.modelsUrl = normalizeLlmHttpUrl(input, "modelsUrl");
+        session.draft.modelsUrl = normalizeLlmHttpUrl(extractHttpUrlInput(input), "modelsUrl");
         session.step = "defaultModel";
         return { completed: false, nextStep: session.step };
 
       case "defaultModel":
-        session.draft.defaultModel = normalizeDefaultModel(input);
+        session.draft.defaultModel = normalizeDefaultModel(extractModelIdInput(input));
         session.step = "apiKey";
         return { completed: false, nextStep: session.step };
 
@@ -261,7 +281,7 @@ export class ProviderSetupManager {
         const withoutKey = new Set(["-", "no", "ninguna", "sin-clave", "sin clave"]);
         session.draft.apiKey = withoutKey.has(normalizedInput.toLowerCase())
           ? ""
-          : normalizedInput;
+          : extractSecretTokenFromMessage(normalizedInput);
 
         const config = normalizeLlmConfig({
           ...session.draft,

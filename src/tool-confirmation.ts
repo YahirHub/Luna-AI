@@ -18,6 +18,17 @@ const MUTATING_TOOLS = new Set([
   "archive_folder",
   "gitzip",
   "whatsapp_send",
+  "conversation_clear",
+  "model_set",
+  "workspace_clear",
+  "llm_provider_use_opencode_free",
+  "llm_provider_start_setup",
+  "search_admin_set_enabled",
+  "search_admin_set_default",
+  "search_admin_set_fallback_order",
+  "search_admin_start_set_api_key",
+  "search_admin_remove_api_key",
+  "agent_config_update",
 ]);
 
 function normalizeForIntent(value: string): string {

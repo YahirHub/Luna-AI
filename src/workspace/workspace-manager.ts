@@ -177,6 +177,21 @@ export class WorkspaceManager {
     rmSync(target, { recursive: true, force: true });
   }
 
+  /**
+   * Vacía por completo el workdir privado del usuario y recrea su estructura base.
+   * No toca context.json, memory.md, credenciales ni ninguna otra persistencia
+   * ubicada fuera de workdir/.
+   */
+  clearWorkdir(jid: string): void {
+    const workdir = this.getWorkdir(jid);
+    for (const entry of readdirSync(workdir)) {
+      rmSync(join(workdir, entry), { recursive: true, force: true });
+    }
+    for (const folder of ["tasks", "inbox", "exports"]) {
+      mkdirSync(join(workdir, folder), { recursive: true });
+    }
+  }
+
   registerArtifact(
     jid: string,
     path: string,

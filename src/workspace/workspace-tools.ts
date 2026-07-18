@@ -48,6 +48,25 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "workspace_clear",
+      description:
+        "Vacía por completo el workdir privado del usuario (tasks, inbox, exports y artefactos temporales). Es destructiva: úsala solo cuando el usuario pida explícitamente limpiar o borrar todo su workdir y confirmed sea true.",
+      parameters: {
+        type: "object",
+        properties: {
+          confirmed: {
+            type: "boolean",
+            description: "Debe ser true cuando el usuario haya pedido explícitamente vaciar todo el workdir.",
+          },
+        },
+        required: ["confirmed"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export async function executeWorkspaceTool(
@@ -79,6 +98,13 @@ export async function executeWorkspaceTool(
       const artifacts = manager.listArtifacts(jid);
       if (artifacts.length === 0) return "No hay artefactos registrados.";
       return artifacts.map((item, index) => `${index + 1}. ${item.path} — ${item.mimeType} — ${item.size} bytes`).join("\n");
+    }
+    if (name === "workspace_clear") {
+      if (args.confirmed !== true) {
+        return "Error: limpiar todo el workdir requiere una petición explícita del usuario y confirmed=true.";
+      }
+      manager.clearWorkdir(jid);
+      return "✅ Workdir limpiado por completo. Se recrearon las carpetas base tasks, inbox y exports.";
     }
     return `Error: herramienta de workdir desconocida "${name}".`;
   } catch (error) {

@@ -45,6 +45,21 @@ describe("WorkspaceManager", () => {
     symlinkSync(external, join(workdir, "escape-link"));
     expect(() => workspace.resolvePath("user", "escape-link", { mustExist: true })).toThrow(/enlace simbólico/i);
   });
+
+  it("limpia todo el workdir y recrea únicamente la estructura base", () => {
+    const { workspace } = createWorkspace();
+    workspace.writeText("user", "exports/reporte.md", "contenido");
+    workspace.writeText("user", "inbox/entrada.txt", "entrada");
+    workspace.createTask("user", "investigación");
+    workspace.registerArtifact("user", "exports/reporte.md", "test");
+
+    workspace.clearWorkdir("user");
+
+    expect(workspace.list("user", "exports")).toEqual([]);
+    expect(workspace.list("user", "inbox")).toEqual([]);
+    expect(workspace.list("user", "tasks")).toEqual([]);
+    expect(workspace.listArtifacts("user")).toEqual([]);
+  });
 });
 
 describe("TaskRuntime", () => {
