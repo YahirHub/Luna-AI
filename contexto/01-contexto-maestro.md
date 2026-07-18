@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/63-captura-inline-de-credenciales-y-cambio-de-password.md
-- Resumen: Las API keys de buscadores incluidas en la misma frase natural se aplican inmediatamente sin pedirlas de nuevo; todos los usuarios autenticados pueden cambiar su propia contraseña por lenguaje natural o comando.
-- Archivos del cambio: bot, auth, control tools, utilidades de secretos, README, contexto y pruebas
+- Último registro: contexto/64-emojis-twemoji-en-pdf.md
+- Resumen: Los PDF detectan emojis Unicode con @twemoji/parser y los renderizan como vectores Twemoji locales, conservando el Markdown original y funcionando offline de forma consistente en Windows y Linux.
+- Archivos del cambio: renderer PDF, módulo Twemoji, assets runtime, empaquetado, dependencias, README, contexto y pruebas
 <!-- codewolf:auto-context:end -->

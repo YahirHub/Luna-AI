@@ -322,6 +322,7 @@ El detalle completo de `web_search`, `read_url`, tiempos y errores permanece en 
 Las herramientas de artefactos pueden:
 
 - Convertir Markdown del workdir a un PDF multipágina con encabezados, párrafos, listas y tablas Markdown renderizadas como tablas reales con celdas, ajuste de texto y encabezados repetidos al cambiar de página.
+- Detectar emojis Unicode con `@twemoji/parser` y renderizarlos como vectores Twemoji locales dentro del PDF, incluyendo secuencias compuestas y banderas, sin modificar el Markdown original ni depender de las fuentes emoji instaladas en Windows o Linux.
 - Usar orientación horizontal automáticamente cuando una tabla tiene cinco o más columnas, evitando tablas de precios comprimidas o ilegibles.
 - Comprimir una carpeta completa con `archive_folder`.
 - Crear un ZIP de código con `gitzip`, respetando `.gitignore` de la raíz y de carpetas anidadas, negaciones `!`, excluyendo `.git/` y evitando enlaces externos.

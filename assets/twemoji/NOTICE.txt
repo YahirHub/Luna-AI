@@ -1,0 +1,9 @@
+Twemoji assets
+
+Emoji artwork derived from Twemoji.
+Project: https://github.com/jdecked/twemoji
+Original project copyright Twitter, Inc. and other contributors.
+Graphics license: CC BY 4.0.
+Parser dependency: @twemoji/parser (MIT).
+
+These SVG assets are embedded locally so PDF generation works offline and consistently on Windows and Linux.

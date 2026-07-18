@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
+import { emojiAwareCharacterCount, parseEmojiRuns, renderTwemojiPdf } from "./twemoji.ts";
 
 const WIN_ANSI_EXTENDED: Record<number, number> = {
   0x20ac: 0x80, 0x201a: 0x82, 0x0192: 0x83, 0x201e: 0x84, 0x2026: 0x85,
@@ -177,13 +178,27 @@ function parseMarkdown(markdown: string): MarkdownBlock[] {
 
 function approximateTextWidth(value: string, size: number, font: PdfFont): number {
   const factor = font === "F2" ? 0.6 : font === "F3" ? 0.54 : 0.5;
-  return value.length * size * factor;
+  let width = 0;
+  for (const run of parseEmojiRuns(value)) {
+    if (run.kind === "emoji") width += size * 1.05;
+    else width += Array.from(run.text).length * size * factor;
+  }
+  return width;
+}
+
+function visualUnits(value: string): string[] {
+  const units: string[] = [];
+  for (const run of parseEmojiRuns(value)) {
+    if (run.kind === "emoji") units.push(run.text);
+    else units.push(...Array.from(run.text));
+  }
+  return units;
 }
 
 function breakLongWord(word: string, maxWidth: number, size: number, font: PdfFont): string[] {
   const chunks: string[] = [];
   let current = "";
-  for (const character of word) {
+  for (const character of visualUnits(word)) {
     const candidate = current + character;
     if (current && approximateTextWidth(candidate, size, font) > maxWidth) {
       chunks.push(current);
@@ -256,7 +271,21 @@ class PdfLayout {
   }
 
   private addText(text: string, x: number, y: number, size: number, font: PdfFont): void {
-    this.currentPage.push(`BT /${font} ${number(size)} Tf ${number(x)} ${number(y)} Td (${pdfEscape(text)}) Tj ET`);
+    let cursor = x;
+    for (const run of parseEmojiRuns(text)) {
+      if (run.kind === "text") {
+        if (run.text) {
+          this.currentPage.push(`BT /${font} ${number(size)} Tf ${number(cursor)} ${number(y)} Td (${pdfEscape(run.text)}) Tj ET`);
+          cursor += approximateTextWidth(run.text, size, font);
+        }
+        continue;
+      }
+
+      const emojiSize = size * 0.95;
+      const emojiBottom = y - size * 0.18;
+      this.currentPage.push(renderTwemojiPdf(run.codepoint, cursor, emojiBottom, emojiSize));
+      cursor += size * 1.05;
+    }
   }
 
   addTextBlock(block: TextBlock): void {
@@ -285,7 +314,7 @@ class PdfLayout {
     const base = Array.from({ length: count }, () => absoluteMinimum);
     const remaining = Math.max(0, available - absoluteMinimum * count);
     const weights = Array.from({ length: count }, (_, column) => {
-      const longest = Math.max(...rows.map((row) => (row[column] ?? "").length), 4);
+      const longest = Math.max(...rows.map((row) => emojiAwareCharacterCount(row[column] ?? "")), 4);
       return Math.min(42, Math.max(6, longest));
     });
     const totalWeight = weights.reduce((sum, value) => sum + value, 0) || 1;

@@ -33,6 +33,18 @@ describe("artefactos PDF y ZIP", () => {
     expect(workspace.readBuffer("user", path).subarray(0, 4).toString()).toBe("%PDF");
   });
 
+
+  it("renderiza emojis Unicode como vectores Twemoji en texto y tablas", () => {
+    const pdf = createPdfFromMarkdown(
+      "# ✅ Reporte 🔥\n\nTrabajo 👩‍💻 y bandera 🇲🇽\n\n| Estado | Valor |\n|---|---|\n| ✅ | Listo 🔥 |\n",
+    ).toString("latin1");
+    expect(pdf).toContain("% twemoji:2705");
+    expect(pdf).toContain("% twemoji:1f525");
+    expect(pdf).toContain("% twemoji:1f469-200d-1f4bb");
+    expect(pdf).toContain("% twemoji:1f1f2-1f1fd");
+    expect(pdf).not.toContain("(?) Tj");
+  });
+
   it("usa orientación horizontal para tablas comparativas anchas", () => {
     const pdf = createPdfFromMarkdown(
       "# Precios\n\n| Proveedor | Modelo | Entrada | Salida | Caché | Contexto |\n|---|---|---:|---:|---:|---|\n| OpenAI | GPT-X | 1 | 4 | 0.25 | 128K |\n",
