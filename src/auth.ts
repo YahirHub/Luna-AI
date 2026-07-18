@@ -15,7 +15,7 @@ export interface UserRecord {
 
 /** Estado de una acción interactiva pendiente (login, setup, adduser). */
 export interface PendingAction {
-  type: "login" | "setup" | "adduser";
+  type: "login" | "setup" | "adduser" | "change-password";
   step: "awaiting-username" | "awaiting-password";
   /** Nombre de usuario capturado en el paso anterior. */
   username?: string;
@@ -166,6 +166,19 @@ export class AuthManager {
 
   getUserList(): UserRecord[] {
     return this.users.map((user) => ({ ...user }));
+  }
+
+  /** Cambia la contraseña de un usuario existente conservando sus sesiones activas. */
+  async changePassword(username: string, password: string): Promise<void> {
+    const user = this.findUser(username);
+    if (!user) throw new Error(`El usuario '${normalizeUsername(username)}' no existe.`);
+    if (!password || password.length < 4) {
+      throw new Error("La contraseña debe tener al menos 4 caracteres.");
+    }
+    const passwordHash = await Bun.password.hash(password);
+    this.persistMutation(() => {
+      user.passwordHash = passwordHash;
+    });
   }
 
   // ── Sesiones ─────────────────────────────────────────────────

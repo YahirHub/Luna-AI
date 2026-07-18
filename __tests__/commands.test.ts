@@ -180,6 +180,15 @@ describe("configuración administrativa de Whisper", () => {
   });
 });
 
+describe("cambio de contraseña", () => {
+  it("registra un comando disponible para cualquier usuario autenticado", async () => {
+    const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
+    expect(hasRegisteredCommand(source, "cambiar-password")).toBe(true);
+    expect(source).toContain('type: "change-password"');
+    expect(source).toContain("tryHandleNaturalPasswordChange");
+  });
+});
+
 describe("limpieza explícita del workdir", () => {
   it("registra comandos para limpiar el workdir del usuario", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();

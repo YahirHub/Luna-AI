@@ -17,7 +17,7 @@ COPY src ./src
 RUN bun run build
 
 # ─── Runtime glibc: compatible con los binarios oficiales Ubuntu ─────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

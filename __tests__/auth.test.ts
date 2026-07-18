@@ -346,3 +346,25 @@ describe("AuthManager — persistencia de baneo", () => {
     try { unlinkSync(path); } catch {}
   });
 });
+
+
+describe("AuthManager — cambio de contraseña", () => {
+  it("cambia la contraseña y conserva la sesión activa", async () => {
+    const auth = createIsolatedAuth();
+    await auth.createAdmin("admin", "anterior123");
+    await auth.login("jid-pass@s.whatsapp.net", "admin", "anterior123");
+
+    await auth.changePassword("admin", "nueva456");
+
+    expect(auth.isLoggedIn("jid-pass@s.whatsapp.net")).toBe(true);
+    auth.logout("jid-pass@s.whatsapp.net");
+    expect(await auth.login("jid-pass@s.whatsapp.net", "admin", "anterior123")).toBe(false);
+    expect(await auth.login("jid-pass@s.whatsapp.net", "admin", "nueva456")).toBe(true);
+  });
+
+  it("rechaza contraseñas demasiado cortas", async () => {
+    const auth = createIsolatedAuth();
+    await auth.createAdmin("admin", "anterior123");
+    await expect(auth.changePassword("admin", "abc")).rejects.toThrow();
+  });
+});

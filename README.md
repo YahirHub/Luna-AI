@@ -507,6 +507,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!ayuda` | Muestra los comandos permitidos para la sesión. |
 | `!ping` | Responde con `pong`. |
 | `!id` | Muestra el JID de WhatsApp. |
+| `!cambiar-password` | Cambia la contraseña de la cuenta autenticada; si no se incluye el valor, inicia una captura segura. |
 | `/cancelar` | Cancela el flujo interactivo actual. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
 | `!clear-workdir confirmar` | Limpia todo el workdir privado del usuario sin borrar conversación, memoria ni configuración. |
@@ -526,7 +527,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 
 Todos los comandos funcionales de una sesión autenticada tienen una vía equivalente por lenguaje natural. Un usuario puede pedir ayuda, consultar su JID, cancelar una operación, limpiar su conversación, listar o cambiar el modelo y limpiar su propio workdir sin recordar el comando exacto. `!setup` y `!login` también aceptan frases naturales como “crear administrador” o “iniciar sesión”, pero siguen procesándose localmente para no enviar credenciales al proveedor LLM.
 
-Los administradores heredan todas las capacidades normales y además pueden administrar por lenguaje natural usuarios, Whisper, proveedor LLM, motores de búsqueda y las opciones funcionales de `/config`. Las API keys y contraseñas nunca se pasan como argumentos al modelo: Luna inicia un flujo seguro y captura el secreto en el siguiente mensaje, fuera del chat LLM, intentando eliminarlo de WhatsApp después de guardarlo. Los parámetros internos de resiliencia, reintentos y backoff no se exponen como herramientas naturales.
+Los administradores heredan todas las capacidades normales y además pueden administrar por lenguaje natural usuarios, Whisper, proveedor LLM, motores de búsqueda y las opciones funcionales de `/config`. Si una API key de un motor se incluye directamente en la misma frase natural (por ejemplo, "usa esta key en Firecrawl: ..."), Luna detecta proveedor y secreto localmente, la guarda de inmediato y evita pedirla otra vez. Si el secreto todavía no se proporcionó, inicia la captura segura en el siguiente mensaje. El cambio de contraseña funciona de la misma manera para cualquier usuario autenticado y también está disponible mediante `!cambiar-password`. Los secretos capturados por estas rutas se procesan fuera del LLM cuando es posible y Luna intenta borrar el mensaje que los contiene. Los parámetros internos de resiliencia, reintentos y backoff no se exponen como herramientas naturales.
 
 Ejemplos de administración natural:
 

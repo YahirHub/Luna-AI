@@ -52,6 +52,15 @@ export const USER_CONTROL_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "account_password_change_start",
+      description:
+        "Inicia el cambio seguro de contraseña de la cuenta autenticada. Úsala cuando el usuario pida cambiar su propia contraseña pero no haya incluido la nueva contraseña en el mismo mensaje. La contraseña se capturará en el siguiente mensaje fuera del LLM.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "model_status",
       description: "Consulta el modelo LLM seleccionado actualmente para la conversación del usuario.",
       parameters: { type: "object", properties: {}, additionalProperties: false },

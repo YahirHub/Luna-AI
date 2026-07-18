@@ -14,6 +14,7 @@ describe("control natural de comandos existentes", () => {
     expect(names).toContain("control_get_id");
     expect(names).toContain("control_cancel");
     expect(names).toContain("conversation_clear");
+    expect(names).toContain("account_password_change_start");
     expect(names).toContain("model_status");
     expect(names).toContain("model_list");
     expect(names).toContain("model_set");
@@ -49,6 +50,15 @@ describe("control natural de comandos existentes", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("extrae una API key incluida al final de una frase natural", async () => {
+    const { extractSecretTokenFromMessage } = await import("../src/utils.ts");
+    expect(
+      extractSecretTokenFromMessage(
+        "Configura el de fireclaw, quiero reemplazar la key actual por este fc-8d49b39928b8479d914a974e4c21cada",
+      ),
+    ).toBe("fc-8d49b39928b8479d914a974e4c21cada");
   });
 
   it("mantiene las tools administrativas separadas de las tools de usuario", async () => {

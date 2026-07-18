@@ -137,6 +137,16 @@ export function extractSecretTokenFromMessage(raw: string): string {
   const natural = /(?:api[\s_-]*key|clave|token|key)\s+(?:es|is)\s+([^\s`"']{6,})\s*$/iu.exec(value);
   if (natural?.[1]) return natural[1].replace(/[.,;]+$/g, "");
 
+  // Lenguaje natural libre: "reemplaza la key actual por este fc-...".
+  // Elegimos el último token largo con mezcla alfanumérica, que es el patrón
+  // habitual de API keys. Esto evita guardar toda la frase como secreto.
+  const candidates = value.match(/[A-Za-z0-9][A-Za-z0-9._-]{7,}/gu) ?? [];
+  for (const candidate of candidates.reverse()) {
+    if (/^https?$/i.test(candidate)) continue;
+    if (!/[A-Za-z]/.test(candidate) || !/\d/.test(candidate)) continue;
+    return candidate.replace(/[.,;]+$/g, "");
+  }
+
   // Si no parece una frase, conservar el valor completo tal como fue pegado.
   return value;
 }

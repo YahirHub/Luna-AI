@@ -91,6 +91,7 @@ import {
   loadWebSearchSettings,
   recordSearchProviderTest,
   removeSearchProviderApiKey,
+  saveSearchProviderApiKey,
   setDefaultSearchProvider,
   setSearchFallbackOrder,
   setSearchProviderEnabled,
@@ -136,6 +137,7 @@ import {
   USER_CONTROL_TOOLS,
   ADMIN_CONTROL_TOOLS,
 } from "./control-tools.ts";
+import { extractSecretTokenFromMessage } from "./utils.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -792,6 +794,12 @@ async function executeUserControlTool(
     case "conversation_clear":
       contextManager?.clearConversation(jid);
       return "✅ Conversación reiniciada. La memoria persistente y el workdir se conservaron.";
+    case "account_password_change_start": {
+      const username = authManager.getUsername(jid);
+      if (!username) return "Error: necesitas una sesión autenticada para cambiar la contraseña.";
+      authManager.setPendingAction(jid, { type: "change-password", step: "awaiting-password", username });
+      return "🔐 Envía tu nueva contraseña en el siguiente mensaje. Se procesará fuera del LLM y Luna intentará borrar el mensaje después.";
+    }
     case "model_status":
       return `Modelo actual: ${contextManager?.getModel(jid) ?? "ninguno"}`;
     case "model_list":
@@ -969,6 +977,29 @@ registerCommand(
   (_cmd, senderJid) => ({
     text: `🆔 Tu JID: ${senderJid}`,
   }),
+);
+
+registerCommand(
+  "cambiar-password",
+  "Cambia la contraseña de tu propia cuenta",
+  async (cmd, senderJid) => {
+    const username = authManager.getUsername(senderJid);
+    if (!username) return { text: "⚠️ Debes iniciar sesión para cambiar tu contraseña." };
+    const inlinePassword = cmd.body.trim();
+    if (inlinePassword) {
+      if (inlinePassword.length < 4) {
+        return { text: "❌ La contraseña debe tener al menos 4 caracteres." };
+      }
+      await authManager.changePassword(username, inlinePassword);
+      return { text: "✅ Tu contraseña fue actualizada correctamente." };
+    }
+    authManager.setPendingAction(senderJid, {
+      type: "change-password",
+      step: "awaiting-password",
+      username,
+    });
+    return { text: "🔐 Envía tu nueva contraseña en el siguiente mensaje. Luna intentará borrar ese mensaje después." };
+  },
 );
 
 registerCommand(
@@ -1352,6 +1383,9 @@ async function handlePendingAuthAction(
       case "adduser":
         await handleAdduserStep(sock, jid, text, action);
         break;
+      case "change-password":
+        await handleChangePasswordStep(sock, jid, text, action);
+        break;
     }
   } catch (err) {
     console.error(`[auth] Error en flujo ${action.type}:`, err);
@@ -1557,6 +1591,28 @@ async function handleAdduserStep(
   );
 }
 
+async function handleChangePasswordStep(
+  sock: WASocket,
+  jid: string,
+  text: string,
+  action: PendingAction,
+): Promise<void> {
+  const username = action.username ?? authManager.getUsername(jid);
+  if (!username) {
+    authManager.clearPendingAction(jid);
+    await sendWithTyping(sock, jid, "❌ No pude identificar tu cuenta activa.");
+    return;
+  }
+  const password = text.trim();
+  if (!password || password.length < 4) {
+    await sendWithTyping(sock, jid, "❌ La contraseña debe tener al menos 4 caracteres. Intenta de nuevo:");
+    return;
+  }
+  await authManager.changePassword(username, password);
+  authManager.clearPendingAction(jid);
+  await sendWithTyping(sock, jid, "✅ Tu contraseña fue actualizada correctamente.");
+}
+
 async function handlePendingProviderSetup(
   sock: WASocket,
   message: WAMessage,
@@ -1676,6 +1732,109 @@ async function handlePendingWhisperSetup(
   } finally {
     await typing.stop();
   }
+}
+
+function normalizeNaturalText(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[¿?¡!.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectSearchProviderMention(text: string): SearchProviderId | null {
+  const normalized = normalizeNaturalText(text);
+  const aliases: Array<[RegExp, SearchProviderId]> = [
+    [/\b(?:firecrawl|fireclaw)\b/i, "firecrawl"],
+    [/\b(?:brave(?: search)?)\b/i, "brave"],
+    [/\b(?:exa(?: ai)?)\b/i, "exa"],
+    [/\btavily\b/i, "tavily"],
+    [/\blinkup\b/i, "linkup"],
+    [/\bserpapi\b/i, "serpapi"],
+    [/\bzenserp\b/i, "zenserp"],
+  ];
+  for (const [pattern, provider] of aliases) {
+    if (pattern.test(normalized)) return provider;
+  }
+  return null;
+}
+
+function hasInlineCredentialIntent(text: string): boolean {
+  const normalized = normalizeNaturalText(text);
+  return /(api key|apikey|key|clave|token|configur|reemplaz|cambi|agreg|anad|usar|usa|este es el de|es este)/i.test(normalized);
+}
+
+async function tryHandleInlineSearchCredential(
+  sock: WASocket,
+  message: WAMessage,
+  jid: string,
+  text: string,
+): Promise<boolean> {
+  if (!isAdminSession(jid) || !hasInlineCredentialIntent(text)) return false;
+  const provider = detectSearchProviderMention(text);
+  if (!provider) return false;
+  const secret = extractSecretTokenFromMessage(text);
+  // Si el extractor devolvió la frase completa, no encontramos una credencial
+  // inequívoca y dejamos que el agente procese la intención normalmente.
+  if (!secret || secret === text.trim() || secret.length < 8 || /\s/.test(secret)) return false;
+
+  saveSearchProviderApiKey(provider, secret);
+  searchSetupManager.cancel(jid);
+  await deleteSensitiveIncomingMessage(sock, message);
+  await sendWithTyping(
+    sock,
+    jid,
+    `✅ API key de ${SEARCH_PROVIDER_LABELS[provider]} actualizada y motor activado.`,
+  );
+  return true;
+}
+
+function extractInlinePasswordChange(text: string): string | null {
+  const normalized = normalizeNaturalText(text);
+  if (!/(contrasena|password)/i.test(normalized)) return null;
+  if (!/(cambi|actualiz|reemplaz|pon|poner)/i.test(normalized)) return null;
+
+  // Se trabaja sobre el texto original para preservar mayúsculas y símbolos.
+  const patterns = [
+    /(?:contrase(?:ñ|n)a|password)\s+(?:a|por|es|sera|será)\s+(.+)$/iu,
+    /(?:nueva\s+contrase(?:ñ|n)a|nuevo\s+password)\s*(?:es|:|=)?\s+(.+)$/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text.trim());
+    const candidate = match?.[1]?.trim();
+    if (candidate && candidate.length >= 4) return candidate;
+  }
+  return "";
+}
+
+async function tryHandleNaturalPasswordChange(
+  sock: WASocket,
+  message: WAMessage,
+  jid: string,
+  text: string,
+): Promise<boolean> {
+  if (!authManager.isLoggedIn(jid)) return false;
+  const extracted = extractInlinePasswordChange(text);
+  if (extracted === null) return false;
+  const username = authManager.getUsername(jid);
+  if (!username) return false;
+
+  if (!extracted) {
+    authManager.setPendingAction(jid, { type: "change-password", step: "awaiting-password", username });
+    await sendWithTyping(
+      sock,
+      jid,
+      "🔐 Envía tu nueva contraseña en el siguiente mensaje. Luna intentará borrar ese mensaje después de procesarlo.",
+    );
+    return true;
+  }
+
+  await authManager.changePassword(username, extracted);
+  await deleteSensitiveIncomingMessage(sock, message);
+  await sendWithTyping(sock, jid, "✅ Tu contraseña fue actualizada correctamente.");
+  return true;
 }
 
 // Frases locales que deben funcionar incluso antes de que exista acceso al LLM.
@@ -1809,6 +1968,16 @@ export async function handleMessage(
     }
   }
 
+  // ── Credenciales y contraseña incluidas directamente en lenguaje natural ──
+  // Se procesan antes del LLM y antes de cualquier menú pendiente para evitar
+  // pedir de nuevo secretos que el usuario ya proporcionó en el mismo mensaje.
+  if (await tryHandleInlineSearchCredential(sock, message, remoteJid, text)) {
+    return;
+  }
+  if (!command && await tryHandleNaturalPasswordChange(sock, message, remoteJid, text)) {
+    return;
+  }
+
   // ── Configuración interactiva del proveedor ───────────────────
   if (providerSetupManager.has(remoteJid)) {
     if (!isAdminSession(remoteJid)) {
@@ -1928,6 +2097,9 @@ export async function handleMessage(
 
   // ── Comandos con prefijo ───────────────────────────────────────
   if (command) {
+    if (command.name === "cambiar-password" && command.body.trim()) {
+      await deleteSensitiveIncomingMessage(sock, message);
+    }
     const result = await dispatchCommand(command, remoteJid, sock);
 
     if (result) {

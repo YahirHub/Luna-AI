@@ -1,8 +1,8 @@
-﻿# 01 — Contexto maestro del proyecto
+﻿# 000 — Contexto maestro del proyecto
 
 # Fecha
 
-2026-07-16
+2026-07-18
 
 # Objetivo
 
@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-18
-- Último registro: contexto/63-captura-inline-de-credenciales-y-cambio-de-password.md
-- Resumen: Las API keys de buscadores incluidas en la misma frase natural se aplican inmediatamente sin pedirlas de nuevo; todos los usuarios autenticados pueden cambiar su propia contraseña por lenguaje natural o comando.
-- Archivos del cambio: bot, auth, control tools, utilidades de secretos, README, contexto y pruebas
+- Última actualización: 2026-07-18T19:04:19.124Z
+- Último registro: contexto/065-actualizar-dockerfile.md
+- Resumen: Actualizar Dockerfile.
+- Archivos del cambio: Dockerfile
 <!-- codewolf:auto-context:end -->

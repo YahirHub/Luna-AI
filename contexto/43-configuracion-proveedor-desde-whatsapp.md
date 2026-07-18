@@ -1,4 +1,4 @@
-# 43 — Configuración del proveedor desde WhatsApp
+﻿# 43 — Configuración del proveedor desde WhatsApp
 
 > Estado: corregido por `44-restaurar-opencode-free.md`; `/setup-provider` es opcional y no reemplaza el proveedor gratuito integrado cuando falta configuración.
 
