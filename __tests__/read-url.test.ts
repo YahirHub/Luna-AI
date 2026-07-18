@@ -29,4 +29,34 @@ describe("readUrl", () => {
       }),
     })).rejects.toThrow("red privada");
   });
+  it("recupera precios incrustados en datos de páginas dinámicas", async () => {
+    const html = `
+      <html><head><title>Pricing</title></head><body><div id="app"></div>
+      <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"rows":["GPT-Test input $1.25 per 1M tokens and output $5.00 per 1M tokens"]}}}
+      </script></body></html>`;
+    const result = await readUrl("https://93.184.216.34/pricing", 5_000, {
+      fetchImpl: async () => new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    });
+
+    expect(result).toContain("Datos estructurados y fragmentos relevantes");
+    expect(result).toContain("GPT-Test input $1.25 per 1M tokens");
+    expect(result).toContain("output $5.00 per 1M tokens");
+  });
+
+
+  it("conserva precios tachados para distinguir promociones vigentes", async () => {
+    const html = "<html><body><p>MiniMax-M3 Permanent 50% off <del>$0.60</del> $0.30 / M tokens</p></body></html>";
+    const result = await readUrl("https://93.184.216.34/pricing", 5_000, {
+      fetchImpl: async () => new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    });
+    expect(result).toContain("~~$0.60~~ $0.30 / M tokens");
+  });
+
 });

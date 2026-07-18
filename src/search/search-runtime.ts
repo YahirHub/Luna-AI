@@ -7,6 +7,7 @@ import {
   type WebSearchSettings,
 } from "./search-config.ts"
 import { loadWebSearchAuth, loadWebSearchSettings } from "./search-storage.ts"
+import { debugError, debugInfo, debugLog, debugWarn } from "../debug.ts"
 
 export const DEFAULT_SEARCH_TIMEOUT_MS = 20_000
 
@@ -16,7 +17,9 @@ export type FetchLike = (
 ) => Promise<Response>
 
 const SEARCH_PROVIDER_MIN_INTERVAL_MS: Record<SearchProviderId, number> = {
-  tavily: 0,
+  // Tavily Free limita especialmente las ráfagas. La cola por proveedor evita
+  // que cuatro subagentes paralelos consuman la primera búsqueda a la vez.
+  tavily: 1_250,
   brave: 1_100,
   exa: 0,
   linkup: 0,
@@ -344,7 +347,13 @@ async function runWithProviderSpacing<T>(
   await previous.catch(() => undefined)
   try {
     const nextAllowedAt = providerNextAllowedAt.get(provider) ?? 0
-    await sleep(Math.max(0, nextAllowedAt - Date.now()), signal)
+    const waitMs = Math.max(0, nextAllowedAt - Date.now())
+    debugLog("search.provider_queue", "ready", {
+      provider,
+      waitMs,
+      minimumIntervalMs: SEARCH_PROVIDER_MIN_INTERVAL_MS[provider],
+    })
+    await sleep(waitMs, signal)
     providerNextAllowedAt.set(
       provider,
       Date.now() + SEARCH_PROVIDER_MIN_INTERVAL_MS[provider],
@@ -415,6 +424,13 @@ async function fetchJson(
         SEARCH_PROVIDER_MIN_INTERVAL_MS[provider],
         1_000,
       )
+      debugWarn("search.provider", "rate_limited", {
+        provider,
+        attempt: attempt + 1,
+        retryDelay,
+        retryAfterMs: error.retryAfterMs,
+        message: error.message,
+      })
       // Long provider cooldowns should trigger the next configured engine rather
       // than making the user wait for a minute inside a single tool call.
       if (retryDelay > MAX_RATE_LIMIT_RETRY_DELAY_MS) throw error
@@ -1066,6 +1082,23 @@ export interface WebSearchRuntimeConfig {
   auth: WebSearchAuth
 }
 
+export interface WebSearchAvailability {
+  available: boolean
+  providerOrder: SearchProviderId[]
+}
+
+export function getWebSearchAvailability(
+  config?: WebSearchRuntimeConfig,
+): WebSearchAvailability {
+  const settings = config?.settings ?? loadWebSearchSettings()
+  const auth = config?.auth ?? loadWebSearchAuth()
+  const providerOrder = getSearchProviderOrder(settings, auth)
+  return {
+    available: providerOrder.length > 0,
+    providerOrder,
+  }
+}
+
 export async function runWebSearchWithFallback(
   input: WebSearchRequest,
   config?: WebSearchRuntimeConfig,
@@ -1077,6 +1110,13 @@ export async function runWebSearchWithFallback(
   const settings = config?.settings ?? loadWebSearchSettings()
   const auth = config?.auth ?? loadWebSearchAuth()
   const order = getSearchProviderOrder(settings, auth)
+  debugInfo("search.runtime", "started", {
+    query: request.query,
+    type: request.type,
+    numResults: request.numResults,
+    livecrawl: request.livecrawl,
+    providerOrder: order,
+  })
   if (order.length === 0) {
     throw new Error(
       'web_search no está disponible: no hay motores habilitados con una API key. Configúralos desde /setup-search.',
@@ -1085,8 +1125,16 @@ export async function runWebSearchWithFallback(
 
   for (const provider of order) {
     const state = resolveSearchProviderState(provider, settings, auth)
-    if (!state.apiKey || !state.enabled) continue
+    if (!state.apiKey || !state.enabled) {
+      debugLog("search.runtime", "provider_skipped", {
+        provider,
+        enabled: state.enabled,
+        hasApiKey: Boolean(state.apiKey),
+      })
+      continue
+    }
     try {
+      debugLog("search.runtime", "provider_attempt", { provider, query: request.query })
       const response = await runProviderSearch(
         provider,
         request,
@@ -1103,6 +1151,12 @@ export async function runWebSearchWithFallback(
         provider,
         status: 'success',
         message: `${response.results.length} resultado(s).`,
+      })
+      debugInfo("search.runtime", "provider_success", {
+        provider,
+        query: request.query,
+        resultCount: response.results.length,
+        endpoint: response.endpoint,
       })
       return {
         provider,
@@ -1124,6 +1178,10 @@ export async function runWebSearchWithFallback(
         status: 'failed',
         message: error instanceof Error ? error.message : String(error),
       })
+      debugError("search.runtime", "provider_failed", error, {
+        provider,
+        query: request.query,
+      })
     }
   }
 
@@ -1136,9 +1194,14 @@ export async function runWebSearchWithFallback(
   const suffix = summary
     ? ` ${summary}`
     : ' Usa /setup-search para configurar al menos un motor de búsqueda.'
-  throw new Error(
+  const finalError = new Error(
     `No fue posible completar la búsqueda con ningún motor configurado.${suffix}`,
   )
+  debugError("search.runtime", "all_providers_failed", finalError, {
+    query: request.query,
+    attempts,
+  })
+  throw finalError
 }
 
 export async function testSearchProvider(

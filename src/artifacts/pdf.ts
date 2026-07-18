@@ -225,12 +225,18 @@ function wrapText(value: string, maxWidth: number, size: number, font: PdfFont):
 }
 
 class PdfLayout {
-  readonly pageWidth = 612;
-  readonly pageHeight = 792;
+  readonly pageWidth: number;
+  readonly pageHeight: number;
   readonly margin = 48;
   readonly footerHeight = 22;
   readonly pages: string[][] = [[]];
-  private y = this.pageHeight - this.margin;
+  private y: number;
+
+  constructor(landscape = false) {
+    this.pageWidth = landscape ? 792 : 612;
+    this.pageHeight = landscape ? 612 : 792;
+    this.y = this.pageHeight - this.margin;
+  }
 
   private get bottom(): number {
     return this.margin + this.footerHeight;
@@ -292,7 +298,14 @@ class PdfLayout {
   private wrapRow(row: string[], widths: number[], header: boolean): string[][] {
     const font: PdfFont = header ? "F3" : "F1";
     const fontSize = header ? 7.4 : 7.2;
-    return widths.map((width, index) => wrapText(row[index] ?? "", Math.max(10, width - 8), fontSize, font));
+    const maximumLines = header ? 6 : 9;
+    return widths.map((width, index) => {
+      const lines = wrapText(row[index] ?? "", Math.max(10, width - 8), fontSize, font);
+      if (lines.length <= maximumLines) return lines;
+      const visible = lines.slice(0, maximumLines);
+      visible[maximumLines - 1] = `${visible[maximumLines - 1] ?? ""}...`;
+      return visible;
+    });
   }
 
   private rowHeight(wrapped: string[][]): number {
@@ -367,8 +380,12 @@ class PdfLayout {
 }
 
 export function createPdfFromMarkdown(markdown: string): Buffer {
-  const layout = new PdfLayout();
-  for (const block of parseMarkdown(markdown)) {
+  const blocks = parseMarkdown(markdown);
+  const widestTable = Math.max(0, ...blocks
+    .filter((block): block is TableBlock => block.kind === "table")
+    .map((block) => Math.max(0, ...block.rows.map((row) => row.length))));
+  const layout = new PdfLayout(widestTable >= 5);
+  for (const block of blocks) {
     if (block.kind === "text") layout.addTextBlock(block);
     else if (block.kind === "rule") layout.addRule(block);
     else layout.addTable(block);

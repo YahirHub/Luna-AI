@@ -177,3 +177,29 @@ export function guardUnconfirmedScheduledCreationClaim(
     "Puedo consultar la lista existente antes de intentar cualquier cambio.",
   ].join("\n");
 }
+
+
+const NAME_QUESTION_PATTERN = /(?:\b(?:como|cómo)\s+te\s+llamas\b|\b(?:cual|cuál)\s+es\s+tu\s+nombre\b|\b(?:me\s+)?(?:dices|dirias|dirías|compartes)\s+tu\s+nombre\b)/i;
+const OPERATIONAL_REQUEST_PATTERN = /\b(?:investig\w*|busc\w*|precios?|pdf|markdown|archivos?|tablas?|informes?|gener\w*|cre\w*|corr\w*|errores?|tareas?|resultados?|contenido|comprim\w*|zip|envi\w*|muestr\w*|dame|lee\w*|analiz\w*|configur\w*|recordatorios?|alarmas?|proyectos?)\b/i;
+
+/**
+ * Evita que la invitación inicial para conocer el nombre se pegue al final de
+ * una investigación, un archivo, una ejecución de herramienta o una respuesta
+ * operativa. La pregunta sigue permitida durante una charla casual y cuando el
+ * usuario la solicita explícitamente.
+ */
+export function stripUnrelatedPendingNameQuestion(
+  content: string,
+  userText: string,
+  toolsCalled: readonly string[] = [],
+): string {
+  const clean = content.trim();
+  if (!clean || NAME_QUESTION_PATTERN.test(userText)) return clean;
+  if (toolsCalled.length === 0 && !OPERATIONAL_REQUEST_PATTERN.test(userText)) return clean;
+
+  const paragraphs = clean.split(/\n{2,}/);
+  while (paragraphs.length > 1 && NAME_QUESTION_PATTERN.test(paragraphs.at(-1) ?? "")) {
+    paragraphs.pop();
+  }
+  return paragraphs.join("\n\n").trim();
+}

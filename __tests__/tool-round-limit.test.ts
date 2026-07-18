@@ -84,3 +84,52 @@ describe("límite de rondas de herramientas", () => {
     expect(result.content).not.toContain("excedió");
   });
 });
+
+
+it("detiene herramientas adicionales después de una investigación paralela terminal", async () => {
+  const terminalTools: ToolDefinition[] = [
+    {
+      type: "function",
+      function: { name: "research_web", description: "Investiga", parameters: { type: "object", properties: {} } },
+    },
+    {
+      type: "function",
+      function: { name: "parallel_research_report", description: "Informe", parameters: { type: "object", properties: {} } },
+    },
+  ];
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: null, tool_calls: [
+          { id: "research", type: "function", function: { name: "research_web", arguments: "{}" } },
+          { id: "parallel", type: "function", function: { name: "parallel_research_report", arguments: "{}" } },
+        ] } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: "✅ Informe entregado." } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
+
+  const executed: string[] = [];
+  const result = await chatCompletionWithTools(
+    [{ role: "user", content: "Compara proveedores" }],
+    "test-model",
+    config,
+    terminalTools,
+    async (name) => {
+      executed.push(name);
+      return name === "parallel_research_report" ? "✅ PDF creado y enviado." : "investigación adicional";
+    },
+    1,
+    undefined,
+    { maxRounds: 8, terminalTools: ["parallel_research_report"] },
+  );
+
+  expect(executed).toEqual(["parallel_research_report"]);
+  expect(result.toolsCalled).toEqual(["parallel_research_report"]);
+  expect(result.content).toBe("✅ PDF creado y enviado.");
+  expect(calls).toBe(1);
+});

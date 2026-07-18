@@ -228,7 +228,7 @@ persistent/search-auth.json
 
 Ambos archivos permanecen dentro del volumen persistente y están excluidos de Git. Las API keys no se agregan al contexto, no se muestran completas y no se escriben en logs.
 
-Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si ninguno está disponible, explica que el administrador debe usar `/setup-search`.
+Si el motor predeterminado falla, Luna prueba los motores activos siguientes en el orden configurado. Si no existe ningún motor habilitado, las investigaciones generales explican que el administrador debe usar `/setup-search`. Las comparativas de precios pueden continuar en modo de lectura oficial directa, consultando únicamente URLs oficiales predefinidas y dejando constancia de que no se utilizó un buscador.
 
 ## Subagente investigador
 
@@ -238,9 +238,18 @@ Dentro de ese contexto aislado, el subagente puede:
 
 - Buscar con `web_search` usando el motor configurado y sus respaldos.
 - Leer páginas públicas con `read_url` para verificar las fuentes relevantes.
+- Abrir automáticamente las mejores fuentes cuando el modelo solo hizo una búsqueda y no ejecutó `read_url`.
 - Ejecutar varias rondas de búsqueda y comparación.
-- Priorizar documentación oficial y fuentes primarias.
-- Devolver al bot principal únicamente la síntesis final y las URLs utilizadas.
+- Priorizar documentación oficial y fuentes primarias mediante el dominio, el título y rutas como `pricing`, `docs` o `api`.
+- Devolver al bot principal únicamente la síntesis final y las URLs realmente abiertas.
+
+Un resultado ya no se considera verificado por el solo hecho de completar una búsqueda. Debe existir evidencia utilizable y, cuando la página lo permite, contenido abierto y legible. En investigaciones de precios también deben encontrarse importes numéricos y unidades; de lo contrario el resultado queda como parcial o fallido.
+
+Las comparativas de precios usan un pipeline determinista adicional al modelo. Cuando el usuario nombra únicamente al proveedor, las búsquedas se dirigen a sus modelos API activos actuales y no a familias heredadas elegidas por el modelo. El lector recupera tablas HTML, Markdown, JSON incrustado, datos de Next.js/Docusaurus y fragmentos relevantes de scripts. Después, un extractor interpreta tablas normales, filas compactas sin separadores, precios por millón o por mil tokens, columnas de caché y promociones con importes anteriores tachados. Cuando una página oficial dinámica no expone sus datos al fetch, puede rescatar el fragmento indexado por el buscador únicamente si la URL pertenece al dominio oficial del proveedor. Si el fragmento ya contiene importes, solo se intentan abrir hasta dos páginas para elevar la evidencia y evitar agotar el timeout recorriendo URLs dinámicas; una investigación de precios nunca supera cuatro lecturas de página por trabajador.
+
+Si `/setup-search` todavía no tiene motores con API key, el trabajador no entra en la cola ni genera stacks de error repetidos. Pasa directamente a las páginas oficiales candidatas, descarga su contenido en tiempo real y marca el resultado como `direct_official`; no usa precios en caché ni valores fijados en el código. El informe final y `result.json` indican si cada proveedor se obtuvo mediante búsqueda y lectura o únicamente mediante lectura oficial directa.
+
+El extractor prioriza tablas y filas compactas estructuradas. Solo usa el parser de prosa cuando no existe una estructura reconocible, filtra nombres que no coinciden con el proveedor y exige precio de entrada o salida. Esto evita que navegación, metadatos accesibles o párrafos repetidos creen decenas de modelos falsos. En modo debug se registra `research.pricing/extracted_rows` con cada fila, importe y URL exacta antes de construir el PDF.
 
 Los resultados completos, páginas leídas y mensajes intermedios del investigador no se agregan al historial principal. Así se evita saturar el contexto persistente del usuario con evidencia temporal.
 
@@ -289,7 +298,11 @@ persistent/contexts/<jid>/workdir/tasks/<task-id>/
 └── temp/
 ```
 
-La ejecución continúa cuando un trabajador falla. El informe final marca esos datos como no verificados y conserva los resultados válidos. `/cancelar` aborta la tarea activa y `task_list`, `task_status` y `task_cancel` permiten consultar o cancelar tareas desde lenguaje natural.
+La ejecución continúa cuando un trabajador falla. Cada trabajador registra por separado fuentes abiertas, errores de lectura y calidad del resultado. Para informes de precios, los datos se extraen a una estructura estable por proveedor y la tabla final se construye de forma determinista, sin permitir que el sintetizador invente celdas o altere el número de columnas.
+
+El PDF solo se genera cuando existe al menos una fila con un importe realmente extraído. Si todas las fuentes fallan o ningún proveedor expone precios verificables, la tarea guarda un diagnóstico Markdown, marca el estado como fallido y responde con claridad, pero no crea ni envía un PDF vacío. Un proveedor con cifras recuperadas desde un fragmento oficial puede aparecer como parcial por no haberse abierto la página, conservando aun así los importes y la advertencia correspondiente.
+
+`parallel_research_report` es una herramienta terminal: después de generar y entregar el informe, el ciclo principal devuelve directamente el resultado confirmado, sin volver a consultar al modelo, ejecutar `research_web`, regenerar el PDF, reenviar el mismo artefacto ni añadir preguntas ajenas a la tarea. `/cancelar` aborta la tarea activa y `task_list`, `task_status` y `task_cancel` permiten consultar o cancelar tareas desde lenguaje natural.
 
 El workdir privado de cada usuario también expone herramientas para listar, leer y escribir archivos temporales, registrar artefactos y crear carpetas. Todas las rutas son relativas; se rechazan rutas absolutas, `..` y enlaces simbólicos que salgan del sandbox.
 
@@ -299,6 +312,7 @@ El workdir privado de cada usuario también expone herramientas para listar, lee
 Las herramientas de artefactos pueden:
 
 - Convertir Markdown del workdir a un PDF multipágina con encabezados, párrafos, listas y tablas Markdown renderizadas como tablas reales con celdas, ajuste de texto y encabezados repetidos al cambiar de página.
+- Usar orientación horizontal automáticamente cuando una tabla tiene cinco o más columnas, evitando tablas de precios comprimidas o ilegibles.
 - Comprimir una carpeta completa con `archive_folder`.
 - Crear un ZIP de código con `gitzip`, respetando `.gitignore` de la raíz y de carpetas anidadas, negaciones `!`, excluyendo `.git/` y evitando enlaces externos.
 - Detectar nombres sensibles como `.env`, claves privadas, credenciales, `persistent/` o sesiones de Baileys antes de compartir código.
@@ -568,6 +582,8 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 22. Enviar una imagen menor de 10 MiB, un video mayor de 10 MiB y una carpeta; comprobar imagen nativa, documento y ZIP.
 23. Forzar el máximo de rondas de herramientas después de un envío exitoso y confirmar que Luna cierre con el resultado, sin mostrar “excedió el número de llamadas”.
 24. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
+25. Pedir una comparativa de precios y revisar en el log `research.pricing extracted_rows` que solo aparezcan modelos canónicos, con entrada y salida asociadas a una página oficial abierta.
+26. Después de recibir el PDF, pedir “dame el contenido completo del PDF” y comprobar que Luna entregue el Markdown exacto asociado, sin resumir, corregir ni cambiar cifras mediante el modelo.
 
 ## Limpieza segura en Windows
 

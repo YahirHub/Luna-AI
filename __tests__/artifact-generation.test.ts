@@ -33,6 +33,14 @@ describe("artefactos PDF y ZIP", () => {
     expect(workspace.readBuffer("user", path).subarray(0, 4).toString()).toBe("%PDF");
   });
 
+  it("usa orientación horizontal para tablas comparativas anchas", () => {
+    const pdf = createPdfFromMarkdown(
+      "# Precios\n\n| Proveedor | Modelo | Entrada | Salida | Caché | Contexto |\n|---|---|---:|---:|---:|---|\n| OpenAI | GPT-X | 1 | 4 | 0.25 | 128K |\n",
+    ).toString("latin1");
+    expect(pdf).toContain("/MediaBox [0 0 792 612]");
+    expect(pdf).not.toContain("| Proveedor | Modelo |");
+  });
+
   it("repite el encabezado de tablas largas al cambiar de página", () => {
     const rows = Array.from({ length: 80 }, (_, index) =>
       `| Proveedor ${index + 1} | Modelo con descripción suficientemente larga ${index + 1} | $${index}.00 |`

@@ -23,6 +23,7 @@ export interface WorkspaceArtifact {
   createdBy: string;
   createdAt: string;
   temporary: boolean;
+  sourcePath?: string;
 }
 
 interface ArtifactFile {
@@ -181,9 +182,14 @@ export class WorkspaceManager {
     jid: string,
     path: string,
     createdBy: string,
-    options: { taskId?: string; temporary?: boolean } = {},
+    options: { taskId?: string; temporary?: boolean; sourcePath?: string } = {},
   ): WorkspaceArtifact {
     const target = this.resolvePath(jid, path, { mustExist: true });
+    let sourcePath: string | undefined;
+    if (options.sourcePath) {
+      const sourceTarget = this.resolvePath(jid, options.sourcePath, { mustExist: true });
+      sourcePath = this.relativePath(jid, sourceTarget);
+    }
     const artifact: WorkspaceArtifact = {
       id: crypto.randomUUID(),
       taskId: options.taskId,
@@ -194,6 +200,7 @@ export class WorkspaceManager {
       createdBy,
       createdAt: new Date().toISOString(),
       temporary: options.temporary ?? true,
+      ...(sourcePath ? { sourcePath } : {}),
     };
     const registryPath = join(this.getWorkdir(jid), "artifacts.json");
     let current: ArtifactFile = { artifacts: [] };
@@ -217,6 +224,34 @@ export class WorkspaceManager {
     } catch {
       return [];
     }
+  }
+
+  findArtifact(jid: string, idOrPath?: string): WorkspaceArtifact | undefined {
+    const artifacts = this.listArtifacts(jid);
+    if (!idOrPath) return artifacts.at(-1);
+    const needle = idOrPath.trim().replace(/\\/g, "/").toLowerCase();
+    return artifacts.find((item) => item.id.toLowerCase() === needle || item.path.toLowerCase() === needle || item.filename.toLowerCase() === needle);
+  }
+
+  readArtifactText(jid: string, idOrPath?: string, maxChars = 100_000): { artifact: WorkspaceArtifact; sourcePath: string; content: string } {
+    const artifact = this.findArtifact(jid, idOrPath);
+    if (!artifact) throw new Error(idOrPath ? `No existe el artefacto "${idOrPath}".` : "No hay artefactos registrados.");
+    let sourcePath = artifact.sourcePath;
+    if (!sourcePath && artifact.path.toLowerCase().endsWith(".pdf")) {
+      const sibling = artifact.path.replace(/\.pdf$/i, ".md");
+      try {
+        this.resolvePath(jid, sibling, { mustExist: true });
+        sourcePath = sibling;
+      } catch {
+        // PDF externo o sin Markdown fuente asociado.
+      }
+    }
+    sourcePath ??= artifact.path;
+    const mime = guessMimeType(sourcePath);
+    if (!mime.startsWith("text/") && !mime.includes("json") && !sourcePath.toLowerCase().endsWith(".md")) {
+      throw new Error(`El artefacto ${artifact.filename} no tiene una fuente de texto legible asociada.`);
+    }
+    return { artifact, sourcePath, content: this.readText(jid, sourcePath, maxChars) };
   }
 
   assertNoExternalSymlinks(jid: string, path: string): void {

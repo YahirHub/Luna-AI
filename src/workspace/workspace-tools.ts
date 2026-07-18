@@ -30,6 +30,21 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "workspace_read_artifact",
+      description: "Lee el contenido fuente exacto de un artefacto generado. Para PDFs creados por Luna devuelve el Markdown original asociado, no una reconstrucción del modelo.",
+      parameters: {
+        type: "object",
+        properties: {
+          artifact: { type: "string", description: "ID, ruta o nombre del artefacto. Si se omite, usa el artefacto más reciente." },
+          max_chars: { type: "integer", minimum: 1000, maximum: 100000 },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "workspace_write_text",
       description: "Crea o reemplaza un archivo de texto dentro del workdir privado del usuario.",
       parameters: {
@@ -68,6 +83,17 @@ export async function executeWorkspaceTool(
       const maxChars = typeof args.max_chars === "number" ? args.max_chars : 100_000;
       return manager.readText(jid, path, maxChars);
     }
+    if (name === "workspace_read_artifact") {
+      const artifact = typeof args.artifact === "string" ? args.artifact : undefined;
+      const maxChars = typeof args.max_chars === "number" ? args.max_chars : 100_000;
+      const result = manager.readArtifactText(jid, artifact, maxChars);
+      return [
+        `Artefacto: ${result.artifact.path}`,
+        `Fuente exacta: ${result.sourcePath}`,
+        "",
+        result.content,
+      ].join("\n");
+    }
     if (name === "workspace_write_text") {
       const path = typeof args.path === "string" ? args.path : "";
       const content = typeof args.content === "string" ? args.content : "";
@@ -78,7 +104,7 @@ export async function executeWorkspaceTool(
     if (name === "workspace_list_artifacts") {
       const artifacts = manager.listArtifacts(jid);
       if (artifacts.length === 0) return "No hay artefactos registrados.";
-      return artifacts.map((item, index) => `${index + 1}. ${item.path} — ${item.mimeType} — ${item.size} bytes`).join("\n");
+      return artifacts.map((item, index) => `${index + 1}. ${item.path} — ${item.mimeType} — ${item.size} bytes — ID ${item.id}${item.sourcePath ? ` — fuente ${item.sourcePath}` : ""}`).join("\n");
     }
     return `Error: herramienta de workdir desconocida "${name}".`;
   } catch (error) {

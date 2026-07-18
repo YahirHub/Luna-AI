@@ -92,6 +92,7 @@ import {
   guardUnconfirmedScheduledCreationClaim,
   isConfirmedScheduledCreation,
   isConfirmedToolSuccess,
+  stripUnrelatedPendingNameQuestion,
   userExplicitlyBlocksScheduledCreation,
 } from "./tool-confirmation.ts";
 import { WorkspaceManager } from "./workspace/workspace-manager.ts";
@@ -99,6 +100,7 @@ import {
   WORKSPACE_TOOLS,
   executeWorkspaceTool,
 } from "./workspace/workspace-tools.ts";
+import { buildArtifactContentReply, splitArtifactReply } from "./workspace/artifact-followup.ts";
 import {
   ARTIFACT_TOOLS,
   executeArtifactTool,
@@ -613,13 +615,17 @@ function formatParallelResearchProgress(event: ParallelResearchProgress): string
 Tarea: ${event.taskId}`;
     case "worker_started":
       return `🔎 Investigador ${event.index + 1}/${event.total}: ${event.name}`;
-    case "worker_completed":
-      return `${event.status === "complete" ? "✅" : "⚠️"} ${event.name}: ${event.status === "complete" ? "terminado" : "falló"} (${event.completed}/${event.total})`;
+    case "worker_completed": {
+      const icon = event.status === "complete" ? "✅" : event.status === "partial" ? "⚠️" : "❌";
+      const label = event.status === "complete" ? "verificado" : event.status === "partial" ? "parcial" : "falló";
+      return `${icon} ${event.name}: ${label} (${event.completed}/${event.total})`;
+    }
     case "synthesizing":
-      return `📊 Analizando resultados: ${event.successful} correctos, ${event.failed} fallidos.`;
+      return `📊 Analizando resultados: ${event.successful} verificados, ${event.partial} parciales, ${event.failed} fallidos.`;
     case "artifact_created":
       return `📄 Informe generado: ${event.path}`;
     case "completed":
+      if (event.status === "failed") return `❌ Tarea ${event.taskId} fallida.`;
       return `✅ Tarea ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`;
   }
 }
@@ -1681,6 +1687,23 @@ async function handleAiChat(
   const activeTools = getAvailableTools(remoteJid);
   await cm.withLock(remoteJid, async () => {
 
+  const exactArtifactReply = buildArtifactContentReply(workspaceManager, remoteJid, userText);
+  if (exactArtifactReply) {
+    cm.addMessage(remoteJid, { role: "user", content: userText });
+    cm.addMessage(remoteJid, { role: "assistant", content: exactArtifactReply });
+    const typing = await startContinuousTyping(sock, remoteJid);
+    try {
+      const chunks = splitArtifactReply(exactArtifactReply);
+      for (let index = 0; index < chunks.length; index += 1) {
+        const prefix = chunks.length > 1 ? `Parte ${index + 1}/${chunks.length}\n\n` : "";
+        await sock.sendMessage(remoteJid, { text: `${prefix}${chunks[index] ?? ""}` });
+      }
+    } finally {
+      await typing.stop();
+    }
+    return;
+  }
+
   const userMessage = { role: "user" as const, content: userText };
   cm.addMessage(remoteJid, userMessage);
 
@@ -1911,7 +1934,7 @@ async function handleAiChat(
       toolExecutor,
       3,
       undefined,
-      { maxRounds: 8 },
+      { maxRounds: 8, terminalTools: ["parallel_research_report"] },
     );
 
     const latestUsefulToolResult = [...toolResults]
@@ -1919,9 +1942,14 @@ async function handleAiChat(
       .find((entry) => !entry.result.startsWith("Error:"))?.result;
     const rawFinalContent = result.content.trim() || latestUsefulToolResult ||
       "No pude generar una respuesta útil en esta ronda.";
-    const finalContent = guardUnconfirmedScheduledCreationClaim(
+    const guardedContent = guardUnconfirmedScheduledCreationClaim(
       rawFinalContent,
       confirmedTools,
+    );
+    const finalContent = stripUnrelatedPendingNameQuestion(
+      guardedContent,
+      userText,
+      result.toolsCalled,
     );
 
     const assistantMessage: import("./ai.ts").ChatMessage = {

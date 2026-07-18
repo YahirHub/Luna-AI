@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ToolDefinition } from "../ai.ts";
+import { debugError, debugInfo, debugLog } from "../debug.ts";
 
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 2_000_000;
@@ -162,6 +163,138 @@ function stripHtml(value: string): string {
   return decodeHtmlEntities(value.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
+
+function decodeEmbeddedEscapes(value: string): string {
+  return decodeHtmlEntities(value)
+    .replace(/\\u([0-9a-f]{4})/gi, (_match, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (_match, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/\\\//g, "/")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n")
+    .replace(/\\t/g, " ")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'");
+}
+
+function collectJsonStrings(value: unknown, output: string[], depth = 0): void {
+  if (depth > 12 || output.length >= 2_000) return;
+  if (typeof value === "string") {
+    const clean = decodeEmbeddedEscapes(value).replace(/\s+/g, " ").trim();
+    if (clean.length >= 2 && clean.length <= 20_000) output.push(clean);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonStrings(item, output, depth + 1);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    collectJsonStrings(child, output, depth + 1);
+  }
+}
+
+
+function primitiveText(value: unknown): string | null {
+  if (typeof value === "string") return decodeEmbeddedEscapes(value).replace(/\s+/g, " ").trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function collectStructuredPricingRecords(value: unknown, output: string[], depth = 0): void {
+  if (depth > 12 || output.length >= 500 || !value) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectStructuredPricingRecords(item, output, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+
+  const record = value as Record<string, unknown>;
+  const entries = Object.entries(record).flatMap(([key, child]) => {
+    const text = primitiveText(child);
+    return text ? [{ key, text }] : [];
+  });
+  const normalizedKeys = entries.map(({ key }) => key.toLowerCase().replace(/[^a-z0-9]+/g, " "));
+  const hasModel = normalizedKeys.some((key) => /\b(model|name|id|sku)\b/.test(key));
+  const hasPriceField = normalizedKeys.some((key) => /\b(price|pricing|input|output|cache|prompt|completion|cost)\b/.test(key));
+  const hasMoney = entries.some(({ text }) => /(?:US\$|USD\s*|\$)\s*\d|\b\d+(?:[.,]\d+)?\s*(?:USD|dollars?)\b/i.test(text));
+  if ((hasModel && hasPriceField) || (hasPriceField && hasMoney)) {
+    output.push(entries.map(({ key, text }) => `${key}: ${text}`).join(" | "));
+  }
+
+  for (const child of Object.values(record)) {
+    collectStructuredPricingRecords(child, output, depth + 1);
+  }
+}
+
+function priceRelevantContexts(value: string, maxContexts = 80): string[] {
+  const decoded = decodeEmbeddedEscapes(value)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ");
+  const pattern = /(?:US\$|USD\s*|\$)\s*\d+(?:[.,]\d+)?|\b(?:input|output|cached?\s*input|cache\s*(?:hit|miss)|pricing|price|precio|entrada|salida)\b/gi;
+  const contexts: string[] = [];
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(decoded)) !== null && contexts.length < maxContexts) {
+    const start = Math.max(0, match.index - 220);
+    const end = Math.min(decoded.length, match.index + match[0].length + 360);
+    const context = decoded.slice(start, end).trim();
+    const key = context.toLowerCase();
+    if (context.length >= 20 && !seen.has(key)) {
+      seen.add(key);
+      contexts.push(context);
+    }
+  }
+  return contexts;
+}
+
+function extractEmbeddedPageText(html: string): string {
+  const sections: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string): void => {
+    const clean = decodeEmbeddedEscapes(value)
+      .replace(/<[^>]+>/g, " ")
+      .replace(/[ \t]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (!clean || clean.length < 2) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    sections.push(clean);
+  };
+
+  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const attrs = match[1] ?? "";
+    const body = match[2] ?? "";
+    const isStructured = /application\/(?:ld\+json|json)/i.test(attrs) || /id=["']__NEXT_DATA__["']/i.test(attrs);
+    if (isStructured) {
+      try {
+        const parsed = JSON.parse(decodeHtmlEntities(body));
+        const records: string[] = [];
+        collectStructuredPricingRecords(parsed, records);
+        for (const record of records) add(record);
+        const strings: string[] = [];
+        collectJsonStrings(parsed, strings);
+        for (const value of strings) {
+          if (/\b(?:pricing|price|input|output|cache|tokens?|model|precio|entrada|salida)\b/i.test(value) || /(?:US\$|USD\s*|\$)\s*\d/.test(value)) add(value);
+        }
+      } catch {
+        for (const context of priceRelevantContexts(body, 30)) add(context);
+      }
+      continue;
+    }
+    // Next.js, Docusaurus y otros generadores suelen incrustar el contenido
+    // renderizado en scripts aunque el body inicial esté casi vacío.
+    if (/__next|self\.__next_f|docusaurus|pricing|price|input|output|cache|tokens?/i.test(body)) {
+      for (const context of priceRelevantContexts(body, 30)) add(context);
+    }
+  }
+
+  for (const context of priceRelevantContexts(html, 50)) add(context);
+  return sections.slice(0, 120).join("\n");
+}
+
 function htmlToReadableText(html: string): {
   title?: string;
   description?: string;
@@ -170,6 +303,7 @@ function htmlToReadableText(html: string): {
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   const title = titleMatch?.[1] ? stripHtml(titleMatch[1]) : undefined;
   const description = extractMeta(html, "description") ?? extractMeta(html, "og:description");
+  const embeddedText = extractEmbeddedPageText(html);
 
   const linksConverted = html.replace(
     /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
@@ -179,6 +313,7 @@ function htmlToReadableText(html: string): {
     },
   );
   const markdown = linksConverted
+    .replace(/<(del|s|strike)[^>]*>([\s\S]*?)<\/\1>/gi, (_match, _tag: string, value: string) => `~~${stripHtml(value)}~~`)
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style|noscript|svg|canvas|iframe|form|nav|header|footer|aside)[^>]*>[\s\S]*?<\/\1>/gi, " ")
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_m, value: string) => `\n# ${stripHtml(value)}\n`)
@@ -194,12 +329,17 @@ function htmlToReadableText(html: string): {
     .replace(/<\/(p|div|section|article|main|blockquote|ul|ol|table)>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
 
-  const text = decodeHtmlEntities(markdown)
+  const visibleText = decodeHtmlEntities(markdown)
     .replace(/\r/g, "")
     .replace(/[ \t]+/g, " ")
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  const text = [
+    embeddedText ? "## Datos estructurados y fragmentos relevantes\n" + embeddedText : "",
+    visibleText,
+  ].filter(Boolean).join("\n\n");
 
   return { title, description, text };
 }
@@ -325,9 +465,23 @@ export async function executeReadUrlTool(
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!url) return "Error: la URL es obligatoria.";
   const maxChars = typeof args.max_chars === "number" ? args.max_chars : DEFAULT_MAX_CHARS;
+  const startedAt = Date.now();
+  debugLog("read_url", "started", { url, maxChars });
   try {
-    return await readUrl(url, maxChars, { signal });
+    const content = await readUrl(url, maxChars, { signal });
+    debugInfo("read_url", "completed", {
+      url,
+      maxChars,
+      contentChars: content.length,
+      durationMs: Date.now() - startedAt,
+    });
+    return content;
   } catch (error) {
+    debugError("read_url", "failed", error, {
+      url,
+      maxChars,
+      durationMs: Date.now() - startedAt,
+    });
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   }
 }

@@ -3,6 +3,7 @@ import {
   buildConfirmedToolEvent,
   guardUnconfirmedScheduledCreationClaim,
   isConfirmedScheduledCreation,
+  stripUnrelatedPendingNameQuestion,
   userExplicitlyBlocksScheduledCreation,
 } from "../src/tool-confirmation.ts";
 
@@ -115,4 +116,28 @@ describe("confirmación autoritativa de herramientas", () => {
     expect(result).toContain("ACCIÓN NO CONFIRMADA");
     expect(result).not.toContain("te va a llegar");
   });
+
+  it("elimina la pregunta pendiente del nombre en respuestas operativas", () => {
+    const content = [
+      "📄 Aquí tienes el contenido del informe.",
+      "",
+      "Y bueno, ya que estamos… ¿y tú cómo te llamas? 😊",
+    ].join("\n");
+    expect(stripUnrelatedPendingNameQuestion(
+      content,
+      "Dame el contenido del markdown generado",
+      [],
+    )).toBe("📄 Aquí tienes el contenido del informe.");
+    expect(stripUnrelatedPendingNameQuestion(
+      content,
+      "Hola, ¿cómo estás?",
+      [],
+    )).toBe(content);
+    expect(stripUnrelatedPendingNameQuestion(
+      content,
+      "Investiga precios y crea un PDF",
+      ["parallel_research_report"],
+    )).toBe("📄 Aquí tienes el contenido del informe.");
+  });
+
 });

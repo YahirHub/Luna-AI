@@ -28,7 +28,8 @@ describe("MemoryManager — init", () => {
     const content = mm.getContent(TEST_JID);
     expect(content).toContain("Memoria personal de Luna");
     expect(content).toContain("Nombre: pendiente de preguntar");
-    expect(content).toContain("pregúntalo de manera natural y amable");
+    expect(content).toContain("pregúntalo de manera natural únicamente durante un saludo o charla casual");
+    expect(content).toContain("Nunca anexes la pregunta del nombre a investigaciones");
   });
 
   it("init no sobreescribe si ya existe", () => {

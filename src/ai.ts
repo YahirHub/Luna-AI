@@ -209,6 +209,11 @@ export interface ToolChatRuntimeOptions {
   maxRounds?: number;
   signal?: AbortSignal;
   onToolRoundComplete?: (toolNames: string[], round: number) => void | Promise<void>;
+  /**
+   * Herramientas que completan por sí solas la tarea actual. Después de una
+   * ejecución exitosa se solicita el cierre final sin exponer más tools.
+   */
+  terminalTools?: string[];
 }
 
 export async function chatCompletionWithTools(
@@ -238,35 +243,51 @@ export async function chatCompletionWithTools(
       return { content: result.content ?? "", toolsCalled };
     }
 
-    // Ejecutar todos los tool_calls de esta ronda
-    const toolMessages: ChatMessage[] = [];
+    // Las herramientas terminales se ejecutan primero. Si una completa la
+    // tarea, las demás llamadas de la misma ronda se responden como omitidas
+    // para evitar repetir investigaciones, envíos o mutaciones.
+    const terminalTools = new Set(runtimeOptions.terminalTools ?? []);
+    const orderedCalls = terminalTools.size > 0
+      ? [
+          ...result.tool_calls.filter((call) => terminalTools.has(call.function.name)),
+          ...result.tool_calls.filter((call) => !terminalTools.has(call.function.name)),
+        ]
+      : result.tool_calls;
+    const toolResultsById = new Map<string, string>();
     const roundToolNames: string[] = [];
+    let terminalSucceeded = false;
 
-    for (const call of result.tool_calls) {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(call.function.arguments);
-      } catch {
-        args = {};
+    for (const call of orderedCalls) {
+      let toolResult: string;
+      if (terminalSucceeded) {
+        toolResult = "Omitida: una herramienta terminal ya completó esta tarea.";
+      } else {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(call.function.arguments);
+        } catch {
+          args = {};
+        }
+        toolResult = await executeTool(call.function.name, args);
+        const normalizedResult = String(toolResult).trim();
+        if (normalizedResult) latestToolResult = normalizedResult;
+        toolsCalled.push(call.function.name);
+        roundToolNames.push(call.function.name);
+
+        const succeeded = !normalizedResult.startsWith("Error:");
+        if (succeeded) {
+          onToolCall?.(call.function.name);
+          if (terminalTools.has(call.function.name)) terminalSucceeded = true;
+        }
       }
-
-      const toolResult = await executeTool(call.function.name, args);
-      if (String(toolResult).trim()) latestToolResult = String(toolResult).trim();
-
-      toolsCalled.push(call.function.name);
-      roundToolNames.push(call.function.name);
-
-      // Notificar solo si la ejecución fue exitosa
-      if (!String(toolResult).startsWith("Error:")) {
-        onToolCall?.(call.function.name);
-      }
-
-      toolMessages.push({
-        role: "tool",
-        content: toolResult,
-        tool_call_id: call.id,
-      });
+      toolResultsById.set(call.id, toolResult);
     }
+
+    const toolMessages: ChatMessage[] = result.tool_calls.map((call) => ({
+      role: "tool",
+      content: toolResultsById.get(call.id) ?? "Omitida: no se ejecutó esta llamada.",
+      tool_call_id: call.id,
+    }));
 
     // Agregar assistant message con tool_calls + tool results al historial
     const assistantToolMsg: ChatMessage = {
@@ -277,6 +298,14 @@ export async function chatCompletionWithTools(
 
     currentMessages = [...currentMessages, assistantToolMsg, ...toolMessages];
     await runtimeOptions.onToolRoundComplete?.(roundToolNames, round + 1);
+
+    if (terminalSucceeded) {
+      // Una herramienta terminal ya construyó y, cuando corresponde, entregó
+      // el resultado final. No se vuelve a consultar al modelo principal: ese
+      // cierre podía añadir preguntas ajenas (por ejemplo el nombre pendiente),
+      // contradecir el estado de la tarea o iniciar otra investigación.
+      return { content: latestToolResult || "La tarea fue completada.", toolsCalled };
+    }
   }
 
   // Se agotó el presupuesto de rondas con herramientas. Pedimos una última

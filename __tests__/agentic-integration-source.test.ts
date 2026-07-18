@@ -35,4 +35,13 @@ describe("integración agéntica", () => {
     expect(orchestrator).toContain("evidence.jsonl");
     expect(orchestrator).toContain("synthesis/result.json");
   });
+
+  it("responde el contenido de artefactos desde su fuente exacta antes del LLM", () => {
+    const bot = source("src/bot.ts");
+    expect(bot).toContain("buildArtifactContentReply(workspaceManager, remoteJid, userText)");
+    expect(bot).toContain("splitArtifactReply(exactArtifactReply)");
+    expect(source("src/workspace/workspace-manager.ts")).toContain("readArtifactText");
+    expect(source("src/workspace/workspace-manager.ts")).toContain("sourcePath");
+  });
+
 });
