@@ -5,6 +5,7 @@ import type { ToolDefinition } from "../ai.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import { guessMimeType } from "../workspace/workspace-manager.ts";
 import { createFolderArchive } from "../artifacts/zip.ts";
+import { sendWhatsAppMessage } from "../messaging.ts";
 
 const MEDIA_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const SENSITIVE_NAME = /(^|\/)(?:\.env(?:\.|$)|id_rsa(?:\.pub)?$|id_ed25519(?:\.pub)?$|[^/]+\.(?:pem|key|p12|pfx)$|(?:credentials|secrets?|auth)[^/]*\.json$|auth_info_baileys(?:\/|$)|persistent(?:\/|$))/i;
@@ -84,13 +85,16 @@ export async function sendWorkspacePath(
 
   const fileName = basename(resolved);
   const kind = content.length <= MEDIA_THRESHOLD_BYTES ? mediaKind(mime) : "document";
-  if (kind === "image") await sock.sendMessage(jid, { image: content, caption: caption || undefined, mimetype: mime });
-  else if (kind === "audio") await sock.sendMessage(jid, { audio: content, mimetype: mime, ptt: false });
-  else if (kind === "video") await sock.sendMessage(jid, { video: content, caption: caption || undefined, mimetype: mime });
-  else await sock.sendMessage(jid, { document: content, mimetype: mime, fileName, caption: caption || undefined });
+  let delivery: "sent" | "queued";
+  if (kind === "image") delivery = await sendWhatsAppMessage(sock, jid, { image: content, caption: caption || undefined, mimetype: mime });
+  else if (kind === "audio") delivery = await sendWhatsAppMessage(sock, jid, { audio: content, mimetype: mime, ptt: false });
+  else if (kind === "video") delivery = await sendWhatsAppMessage(sock, jid, { video: content, caption: caption || undefined, mimetype: mime });
+  else delivery = await sendWhatsAppMessage(sock, jid, { document: content, mimetype: mime, fileName, caption: caption || undefined });
 
   workspace.registerArtifact(jid, relativePath, "whatsapp_send", { temporary: false });
-  return `✅ ${fileName} enviado por WhatsApp como ${kind === "document" ? "documento" : kind}.`;
+  return delivery === "queued"
+    ? `⏳ ${fileName} quedó en cola y se enviará automáticamente cuando WhatsApp reconecte.`
+    : `✅ ${fileName} enviado por WhatsApp como ${kind === "document" ? "documento" : kind}.`;
 }
 
 export async function executeWhatsAppTool(
@@ -102,8 +106,13 @@ export async function executeWhatsAppTool(
     const path = typeof args.path === "string" ? args.path.trim() : "";
     const caption = typeof args.caption === "string" ? args.caption.trim() : "";
     if (!text && !path) return "Error: debes proporcionar text o path.";
-    if (text) await dependencies.sock.sendMessage(dependencies.jid, { text });
-    if (!path) return "✅ Mensaje enviado por WhatsApp.";
+    let textDelivery: "sent" | "queued" | undefined;
+    if (text) textDelivery = await sendWhatsAppMessage(dependencies.sock, dependencies.jid, { text });
+    if (!path) {
+      return textDelivery === "queued"
+        ? "⏳ Mensaje en cola; se enviará automáticamente cuando WhatsApp reconecte."
+        : "✅ Mensaje enviado por WhatsApp.";
+    }
     return await sendWorkspacePath(dependencies.sock, dependencies.jid, dependencies.workspace, path, caption, args.allow_sensitive === true);
   } catch (error) {
     return `Error: ${error instanceof Error ? error.message : String(error)}`;

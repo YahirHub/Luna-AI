@@ -22,6 +22,7 @@ import {
   fetchModels,
   chatCompletion,
   chatCompletionWithTools,
+  LlmRetriesExhaustedError,
 } from "./ai.ts";
 import {
   ProviderSetupManager,
@@ -64,7 +65,7 @@ import {
   estimateRequestTokens,
 } from "./compaction.ts";
 import { estimateTokensAccurate } from "./ai.ts";
-import { sendWithTyping, startContinuousTyping } from "./messaging.ts";
+import { sendWithTyping, startContinuousTyping, sendWhatsAppMessage, setMessagingSocket } from "./messaging.ts";
 import { deliverScheduledMessage } from "./scheduled-messages.ts";
 import {
   recordAlarmDeliveryInContext,
@@ -240,7 +241,7 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
   compactingJids.add(jid);
   try {
     // Notificar al usuario
-    sock.sendMessage(jid, { text: "🧹 Espera un momento, estoy limpiando mi memoria..." }).catch(() => {});
+    void sendWhatsAppMessage(sock, jid, { text: "🧹 Espera un momento, estoy limpiando mi memoria..." }, { waitForDelivery: false });
 
     console.log(
       `[compact] Contexto de ${jid}: ~${currentTokens} tokens, ` +
@@ -428,6 +429,7 @@ export function initLlm(
 export function setSocket(sock: WASocket | null): void {
   reminderManager.setSock(sock);
   currentSock = sock;
+  setMessagingSocket(sock);
 }
 
 /** Callback cuando una alarma recurrente debe dispararse. */
@@ -1320,9 +1322,9 @@ async function handlePendingWhisperSetup(
     const result = await whisperSetupManager.submit(jid, text, async (progress) => {
       if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
       lastProgress = progress.percent;
-      await sock.sendMessage(jid, {
+      await sendWhatsAppMessage(sock, jid, {
         text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
-      });
+      }, { waitForDelivery: false });
     });
     await sendWithTyping(sock, jid, result.text);
   } catch (error) {
@@ -1675,11 +1677,9 @@ async function handleAiChat(
       });
 
       if (isConfirmedScheduledCreation(name, result)) {
-        await sock.sendMessage(remoteJid, {
+        await sendWhatsAppMessage(sock, remoteJid, {
           text: buildVisibleSystemConfirmation(result),
-        }).catch((error: unknown) => {
-          console.warn("[tools] No se pudo enviar confirmación visible:", error);
-        });
+        }, { waitForDelivery: false });
         await typingSession.refresh();
       }
     };
@@ -1691,7 +1691,7 @@ async function handleAiChat(
       if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
         shownNotifs.add(name);
         const notification = TOOL_NOTIFICATION_TEXTS.get(name) ?? "";
-        await sock.sendMessage(remoteJid, { text: notification }).catch(() => {});
+        await sendWhatsAppMessage(sock, remoteJid, { text: notification }, { waitForDelivery: false });
         await typingSession.refresh();
       }
 
@@ -1749,7 +1749,7 @@ async function handleAiChat(
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);
             if (!progressText) return;
-            await sock.sendMessage(remoteJid, { text: progressText });
+            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             await typingSession.refresh();
           },
         });
@@ -1769,7 +1769,7 @@ async function handleAiChat(
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);
             if (!progressText) return;
-            await sock.sendMessage(remoteJid, { text: progressText });
+            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             await typingSession.refresh();
           },
         });
@@ -1808,9 +1808,9 @@ async function handleAiChat(
           result = await executeWhisperAdminTool(name, args, async (progress) => {
             if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
             lastProgress = progress.percent;
-            await sock.sendMessage(remoteJid, {
+            await sendWhatsAppMessage(sock, remoteJid, {
               text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
-            });
+            }, { waitForDelivery: false });
             await typingSession.refresh();
           });
         }
@@ -1829,10 +1829,12 @@ async function handleAiChat(
       cfg,
       activeTools,
       toolExecutor,
-      3,
+      5,
       undefined,
       {
         maxRounds: 64,
+        maxTokens: 4096,
+        truncationRecoveryAttempts: 1,
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
@@ -1867,17 +1869,18 @@ async function handleAiChat(
     // próximo user message via buildDynamicContext().
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
-    // La investigación ya mostró actividad real; no añadir una espera artificial.
-    if (!result.toolsCalled.includes("researcher_web") && !result.toolsCalled.includes("spawn_agents")) {
-      const typingDelay = 3000 + Math.floor(Math.random() * 2000);
-      await new Promise((resolve) => setTimeout(resolve, typingDelay));
-    }
-
-    await sock.sendMessage(remoteJid, { text: finalContent });
+    // Todo mensaje saliente pasa por la cola resiliente y simula escritura.
+    // Si WhatsApp se desconectó durante la tarea, queda pendiente y se envía
+    // automáticamente al reconectar sin abortar el flujo del agente.
+    await sendWithTyping(sock, remoteJid, finalContent, 1_500, 3_000);
   } catch (err: unknown) {
-    console.error("[ai] Error en chat (agotados reintentos):", err);
     const errorMsg =
       err instanceof Error ? err.message : "Error desconocido";
+    if (err instanceof LlmRetriesExhaustedError) {
+      console.error(`[ai] Proveedor LLM no disponible después de ${err.attempts} intento(s): ${err.lastError.message}`);
+    } else {
+      console.error("[ai] Error en chat:", err);
+    }
 
     // Detectar error de desbordamiento de contexto y compactar de emergencia
     const isOverflow = /context_length_exceeded|maximum context length|prompt is too long|too many tokens|context.*exceed|request.*too large/i.test(errorMsg);
@@ -1934,7 +1937,9 @@ async function handleAiChat(
       remoteJid,
       isOverflow
         ? "⚠️ La conversación alcanzó su límite y fue compactada. Envía tu mensaje nuevamente."
-        : "❌ No pude procesar tu mensaje en este momento. Intenta de nuevo.",
+        : err instanceof LlmRetriesExhaustedError
+          ? `⚠️ El proveedor LLM no respondió correctamente después de ${err.attempts} intentos. Aborté esta ejecución para evitar un bucle; puedes reintentar la solicitud.`
+          : "❌ No pude procesar tu mensaje en este momento. Intenta de nuevo.",
     );
   } finally {
     await typingSession.stop();
@@ -1964,7 +1969,7 @@ async function handleMediaMessage(
 
   try {
     if (mediaKind === "audio") {
-      await sock.sendMessage(remoteJid, { text: "🎙️ Transcribiendo audio..." });
+      await sendWhatsAppMessage(sock, remoteJid, { text: "🎙️ Transcribiendo audio..." }, { waitForDelivery: false });
       const media = await downloadAudioForTranscription(
         message,
         loadWhisperConfig().maxAudioSeconds,
@@ -1975,7 +1980,7 @@ async function handleMediaMessage(
         media.mimeType,
       );
       if (!result.text.trim()) {
-        await sock.sendMessage(remoteJid, { text: "⚠️ No pude identificar voz o texto en el audio." });
+        await sendWhatsAppMessage(sock, remoteJid, { text: "⚠️ No pude identificar voz o texto en el audio." }, { waitForDelivery: false });
         return;
       }
 
@@ -1984,7 +1989,7 @@ async function handleMediaMessage(
       return;
     }
 
-    await sock.sendMessage(remoteJid, { text: "🖼️ Extrayendo texto de la imagen..." });
+    await sendWhatsAppMessage(sock, remoteJid, { text: "🖼️ Extrayendo texto de la imagen..." }, { waitForDelivery: false });
     const media = await downloadImageForOcr(message);
     const result = await mediaProcessor.process(
       "ocr-image",
@@ -1993,9 +1998,9 @@ async function handleMediaMessage(
     );
     const caption = getMediaCaption(message);
     if (!result.text.trim()) {
-      await sock.sendMessage(remoteJid, {
+      await sendWhatsAppMessage(sock, remoteJid, {
         text: "⚠️ No encontré texto legible en la imagen. No enviaré una respuesta al asistente sin el resultado del OCR.",
-      });
+      }, { waitForDelivery: false });
       return;
     }
 
@@ -2007,9 +2012,9 @@ async function handleMediaMessage(
     );
   } catch (error) {
     console.error(`[media] Error procesando ${mediaKind}:`, error);
-    await sock.sendMessage(remoteJid, {
+    await sendWhatsAppMessage(sock, remoteJid, {
       text: `❌ ${error instanceof Error ? error.message : "No se pudo procesar el archivo."}`,
-    });
+    }, { waitForDelivery: false });
   } finally {
     await typingSession.stop();
   }

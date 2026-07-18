@@ -1,4 +1,5 @@
 import type { LlmConfig } from "./llm-config.ts";
+import { debugError, debugWarn } from "./debug.ts";
 
 /** Mensaje en formato OpenAI. */
 export interface ChatMessage {
@@ -34,13 +35,48 @@ export interface ToolCall {
 
 class HttpStatusError extends Error {
   readonly status: number;
+  readonly responseBody: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, responseBody = "") {
     super(message);
     this.name = "HttpStatusError";
     this.status = status;
+    this.responseBody = responseBody;
   }
 }
+
+export class LlmRetriesExhaustedError extends Error {
+  readonly attempts: number;
+  readonly lastError: Error;
+
+  constructor(attempts: number, lastError: Error) {
+    super(`El proveedor LLM no respondió correctamente después de ${attempts} intento(s): ${lastError.message}`);
+    this.name = "LlmRetriesExhaustedError";
+    this.attempts = attempts;
+    this.lastError = lastError;
+    this.cause = lastError;
+  }
+}
+
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function effectiveRetryAttempts(requested: number): number {
+  return intEnv("LUNA_LLM_RETRY_ATTEMPTS", requested, 1, 8);
+}
+
+function retryBaseDelayMs(): number {
+  return intEnv("LUNA_LLM_RETRY_BASE_MS", 1_500, 10, 30_000);
+}
+
+function transientHttp400(error: HttpStatusError): boolean {
+  const text = `${error.message} ${error.responseBody}`.toLowerCase();
+  return /upstream request failed|upstream.*(?:timeout|unavailable|overload)|provider.*(?:unavailable|failed|timeout)|temporar(?:y|ily)|try again|console.*upstream|connection reset|connection closed|gateway|service unavailable|internal server error/.test(text);
+}
+
 
 async function fetchWithTimeout(
   url: string,
@@ -66,8 +102,11 @@ async function fetchWithTimeout(
 
 function shouldRetry(error: Error): boolean {
   if (error instanceof HttpStatusError) {
-    return error.status === 408 || error.status === 429 || error.status >= 500;
+    return error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 || error.status >= 500 || (error.status === 400 && transientHttp400(error));
   }
+  // Errores de red, AbortError por timeout interno, JSON incompleto, choices
+  // vacíos y conexiones cerradas son recuperables mientras la señal externa
+  // de la tarea no haya sido cancelada.
   return true;
 }
 
@@ -90,6 +129,7 @@ async function rawChatRequest(
 ): Promise<{
   content: string | null;
   tool_calls?: ToolCall[];
+  finish_reason?: string | null;
 }> {
   const url = config.chatCompletionsUrl;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -122,8 +162,9 @@ async function rawChatRequest(
   const bodyStr = JSON.stringify(requestBody);
 
   let lastError: Error | null = null;
+  const attempts = effectiveRetryAttempts(maxRetries);
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const response = await fetchWithTimeout(
         url,
@@ -137,11 +178,13 @@ async function rawChatRequest(
         throw new HttpStatusError(
           response.status,
           `Error (${response.status}): ${text.slice(0, 300)}`,
+          text,
         );
       }
 
       const data = (await response.json()) as {
         choices?: Array<{
+          finish_reason?: string | null;
           message?: {
             content?: string | null;
             tool_calls?: ToolCall[];
@@ -156,29 +199,58 @@ async function rawChatRequest(
 
       const content = choice.message?.content ?? null;
       const toolCalls = choice.message?.tool_calls;
+      if ((!toolCalls || toolCalls.length === 0) && !content?.trim()) {
+        throw new Error("La API devolvió una respuesta vacía sin tool calls");
+      }
 
       return {
         content,
         tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+        finish_reason: choice.finish_reason ?? null,
       };
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (body.signal?.aborted) {
         throw lastError;
       }
-      if (attempt < maxRetries && shouldRetry(lastError)) {
-        const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
-        console.warn(
-          `[ai] Intento ${attempt}/${maxRetries} falló — reintentando en ${backoff}ms...`,
-        );
-        await new Promise((r) => setTimeout(r, backoff));
+      const retryable = shouldRetry(lastError);
+      if (attempt < attempts && retryable) {
+        const backoff = Math.min(retryBaseDelayMs() * Math.pow(2, attempt - 1), 30_000);
+        debugWarn("ai.retry", "will_retry", {
+          attempt,
+          attempts,
+          backoffMs: backoff,
+          status: lastError instanceof HttpStatusError ? lastError.status : undefined,
+          error: lastError.message,
+          model: body.model,
+        });
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            body.signal?.removeEventListener("abort", onAbort);
+            reject(body.signal?.reason ?? new Error("llm-task-cancelled"));
+          };
+          const timer = setTimeout(() => {
+            body.signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, backoff);
+          body.signal?.addEventListener("abort", onAbort, { once: true });
+        });
       } else {
+        debugError("ai.retry", "exhausted", lastError, {
+          attempt,
+          attempts,
+          retryable,
+          status: lastError instanceof HttpStatusError ? lastError.status : undefined,
+          model: body.model,
+        });
         break;
       }
     }
   }
 
-  throw lastError ?? new Error("Error desconocido en chat completion");
+  const finalError = lastError ?? new Error("Error desconocido en chat completion");
+  throw new LlmRetriesExhaustedError(attempts, finalError);
 }
 
 /**
@@ -207,6 +279,10 @@ export async function chatCompletion(
  */
 export interface ToolChatRuntimeOptions {
   maxRounds?: number;
+  /** Presupuesto de salida por respuesta. Útil para subagentes con informes extensos. */
+  maxTokens?: number;
+  /** Veces que se intenta rehacer de forma compacta una respuesta cortada por finish_reason=length. */
+  truncationRecoveryAttempts?: number;
   signal?: AbortSignal;
   onToolRoundComplete?: (toolNames: string[], round: number) => void | Promise<void>;
   /**
@@ -214,6 +290,78 @@ export interface ToolChatRuntimeOptions {
    * ejecución exitosa se solicita el cierre final sin exponer más tools.
    */
   terminalTools?: string[];
+}
+
+
+function buildToolContinuationRecoveryMessages(
+  originalMessages: ChatMessage[],
+  latestToolResult: string,
+  toolsCalled: string[],
+): ChatMessage[] {
+  const systemMessages = originalMessages.filter((message) => message.role === "system");
+  const lastUser = [...originalMessages].reverse().find((message) => message.role === "user");
+  const compactResult = latestToolResult.length > 24_000
+    ? `${latestToolResult.slice(0, 18_000)}\n\n[...contenido intermedio omitido durante recuperación...]\n\n${latestToolResult.slice(-6_000)}`
+    : latestToolResult;
+  return [
+    ...systemMessages,
+    ...(lastUser ? [lastUser] : []),
+    {
+      role: "user",
+      content: [
+        "Una herramienta ejecutada en esta misma tarea terminó correctamente, pero el proveedor LLM falló al continuar después de recibir su resultado.",
+        `Herramientas ya ejecutadas: ${toolsCalled.join(", ") || "ninguna"}.`,
+        "Usa el resultado recuperado de abajo como evidencia ya obtenida. Continúa la tarea desde este punto y NO repitas la herramienta completada salvo que sea estrictamente necesario.",
+        "Resultado recuperado:",
+        compactResult,
+      ].join("\n\n"),
+    },
+  ];
+}
+
+async function recoverTruncatedFinalResponse(
+  partialContent: string,
+  currentMessages: ChatMessage[],
+  model: string,
+  config: LlmConfig,
+  maxRetries: number,
+  runtimeOptions: ToolChatRuntimeOptions,
+): Promise<string | null> {
+  const attempts = Math.min(3, Math.max(1, runtimeOptions.truncationRecoveryAttempts ?? 1));
+  let messages = [
+    ...currentMessages,
+    { role: "assistant" as const, content: partialContent },
+    {
+      role: "user" as const,
+      content: [
+        "Tu respuesta final anterior fue truncada por el límite de salida.",
+        "Reescribe DESDE CERO una versión completa y más compacta de la respuesta final.",
+        "Conserva todos los datos esenciales solicitados, fuentes y advertencias importantes, pero elimina explicación redundante.",
+        "No llames herramientas. No continúes desde la última frase: entrega una respuesta autocontenida que no termine a mitad de una tabla o frase.",
+      ].join(" "),
+    },
+  ];
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const recovered = await rawChatRequest({
+      model,
+      messages,
+      max_tokens: runtimeOptions.maxTokens,
+      signal: runtimeOptions.signal,
+    }, config, maxRetries);
+    const content = recovered.content?.trim() ?? "";
+    if (!content) return null;
+    if (recovered.finish_reason !== "length") return content;
+    messages = [
+      ...messages,
+      { role: "assistant", content },
+      {
+        role: "user",
+        content: "La versión compacta volvió a quedar truncada. Reduce todavía más la longitud y entrega únicamente los hallazgos necesarios para cumplir la solicitud, con una respuesta completa.",
+      },
+    ];
+  }
+  return null;
 }
 
 export async function chatCompletionWithTools(
@@ -232,15 +380,68 @@ export async function chatCompletionWithTools(
   let latestToolResult = "";
 
   for (let round = 0; round < maxRounds; round++) {
-    const result = await rawChatRequest(
-      { model, messages: currentMessages, tools, signal: runtimeOptions.signal },
-      config,
-      maxRetries,
-    );
+    let result: Awaited<ReturnType<typeof rawChatRequest>>;
+    try {
+      result = await rawChatRequest(
+        {
+          model,
+          messages: currentMessages,
+          tools,
+          max_tokens: runtimeOptions.maxTokens,
+          signal: runtimeOptions.signal,
+        },
+        config,
+        maxRetries,
+      );
+    } catch (error) {
+      if (
+        error instanceof LlmRetriesExhaustedError &&
+        latestToolResult &&
+        toolsCalled.length > 0 &&
+        !runtimeOptions.signal?.aborted
+      ) {
+        debugWarn("ai.retry", "continuation_recovery", {
+          toolsCalled,
+          latestToolResultChars: latestToolResult.length,
+          model,
+        });
+        currentMessages = buildToolContinuationRecoveryMessages(messages, latestToolResult, toolsCalled);
+        result = await rawChatRequest(
+          {
+            model,
+            messages: currentMessages,
+            tools,
+            max_tokens: runtimeOptions.maxTokens,
+            signal: runtimeOptions.signal,
+          },
+          config,
+          maxRetries,
+        );
+      } else {
+        throw error;
+      }
+    }
 
     // Sin tool_calls — respuesta final
     if (!result.tool_calls || result.tool_calls.length === 0) {
-      return { content: result.content ?? "", toolsCalled };
+      const content = result.content ?? "";
+      if (result.finish_reason === "length" && content.trim()) {
+        debugWarn("ai.retry", "truncated_final_response", {
+          model,
+          contentChars: content.length,
+          maxTokens: runtimeOptions.maxTokens,
+        });
+        const recovered = await recoverTruncatedFinalResponse(
+          content,
+          currentMessages,
+          model,
+          config,
+          maxRetries,
+          runtimeOptions,
+        );
+        if (recovered) return { content: recovered, toolsCalled };
+      }
+      return { content, toolsCalled };
     }
 
     // Las herramientas terminales se ejecutan primero. Si una completa la
@@ -316,6 +517,7 @@ export async function chatCompletionWithTools(
       {
         model,
         messages: currentMessages,
+        max_tokens: runtimeOptions.maxTokens,
         signal: runtimeOptions.signal,
       },
       config,

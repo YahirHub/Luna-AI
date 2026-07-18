@@ -10,7 +10,8 @@ import { deduplicateSpawnAgentRequests } from "./spawn-deduper.ts";
 import type { AgentEvent, SpawnAgentReport, SpawnAgentRequest } from "./agent-types.ts";
 
 const MAX_AGENTS_PER_CALL = 8;
-const MAX_PARENT_RESULT_CHARS = 20_000;
+const MAX_PARENT_RESULT_CHARS = 8_000;
+const MAX_PARENT_TOTAL_CHARS = 24_000;
 
 export const SPAWN_AGENTS_TOOL: ToolDefinition = {
   type: "function",
@@ -182,9 +183,16 @@ async function emit(handler: SpawnAgentsProgressHandler | undefined, event: Spaw
   }
 }
 
-function compactForParent(value: string): string {
-  if (value.length <= MAX_PARENT_RESULT_CHARS) return value;
-  return `${value.slice(0, MAX_PARENT_RESULT_CHARS)}\n\n[Resultado truncado para el contexto del agente principal; la versión completa quedó guardada en el workdir.]`;
+function compactForParent(value: string, maxChars = MAX_PARENT_RESULT_CHARS): string {
+  if (value.length <= maxChars) return value;
+  const tailChars = Math.min(1_500, Math.floor(maxChars * 0.25));
+  const headChars = Math.max(1, maxChars - tailChars);
+  return `${value.slice(0, headChars)}\n\n[...resumen intermedio omitido para proteger el contexto del agente principal; la versión completa quedó guardada en el workdir...]\n\n${value.slice(-tailChars)}`;
+}
+
+function parentReportBudget(reportCount: number): number {
+  if (reportCount <= 0) return MAX_PARENT_RESULT_CHARS;
+  return Math.max(3_000, Math.min(MAX_PARENT_RESULT_CHARS, Math.floor(MAX_PARENT_TOTAL_CHARS / reportCount)));
 }
 
 export async function executeSpawnAgentsTool(
@@ -333,15 +341,17 @@ export async function executeSpawnAgentsTool(
       failed: failedCount,
     });
 
+    const resultBudget = parentReportBudget(reports.length);
     return JSON.stringify({
       task_id: task.record.id,
       status,
+      note: "Los informes completos de cada subagente están guardados en el workdir. Los textos siguientes son handoffs compactos para que el agente principal continúe sin saturar el proveedor LLM.",
       reports: reports.map((report) => ({
         agent_type: report.agentType,
         agent_name: report.agentName,
-        prompt: report.prompt,
+        prompt: report.prompt.length > 500 ? `${report.prompt.slice(0, 500)}…` : report.prompt,
         status: report.status,
-        result: report.result ? compactForParent(report.result) : undefined,
+        result: report.result ? compactForParent(report.result, resultBudget) : undefined,
         error: report.error,
       })),
     }, null, 2);

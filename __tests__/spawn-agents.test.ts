@@ -142,4 +142,43 @@ describe("spawn_agents", () => {
     expect(disabled).not.toContain("researcher_web");
     expect(disabled).toContain("task_list");
   });
+
+  it("limita el handoff total al agente padre sin truncar los archivos completos del workdir", async () => {
+    const { workspace, tasks } = setup();
+    const longResult = (label: string) => `${label}\n${"dato-".repeat(2500)}\nFUENTES: https://example.com/${label}`;
+    const raw = await executeSpawnAgentsTool({
+      agents: [
+        { agent_type: "researcher-web", prompt: "Proveedor A" },
+        { agent_type: "researcher-web", prompt: "Proveedor B" },
+        { agent_type: "researcher-web", prompt: "Proveedor C" },
+        { agent_type: "researcher-web", prompt: "Proveedor D" },
+      ],
+    }, {
+      jid: "compact-user",
+      model: "model",
+      llmConfig,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      workspace,
+      tasks,
+      agentRunner: async (options) => ({
+        agentType: options.definition.id,
+        agentName: options.definition.displayName,
+        prompt: options.prompt,
+        runId: options.runId,
+        status: "completed" as const,
+        result: longResult(options.prompt),
+        toolsCalled: ["web_search", "read_url"],
+      }),
+    });
+
+    expect(raw.length).toBeLessThan(30_000);
+    const parsed = JSON.parse(raw) as { task_id: string; reports: Array<{ result?: string }> };
+    expect(parsed.reports).toHaveLength(4);
+    expect(parsed.reports.every((report) => report.result?.includes("versión completa quedó guardada en el workdir"))).toBe(true);
+    const task = tasks.get("compact-user", parsed.task_id);
+    const stored = workspace.readText("compact-user", `${task?.taskPath}/agents/01-researcher-web/result.md`);
+    expect(stored.length).toBeGreaterThan(10_000);
+    expect(stored).toContain("FUENTES:");
+  });
+
 });

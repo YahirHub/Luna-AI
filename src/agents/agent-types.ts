@@ -19,6 +19,8 @@ export interface AgentDefinition {
   timeoutMs: number;
   /** Protección contra loops, no objetivo de consumo. */
   maxSteps: number;
+  /** Presupuesto máximo de salida por respuesta del subagente. */
+  maxOutputTokens: number;
 }
 
 export interface SpawnAgentRequest {

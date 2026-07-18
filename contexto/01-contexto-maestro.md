@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/60-runtime-agentico-generico-y-spawn-agents.md
-- Resumen: Sustituir la investigación especializada por un runtime genérico de subagentes inspirado en Codewolf, con `spawn_agents` no terminal, `researcher-web` aislado, deduplicación, ejecución paralela, timeouts independientes y retorno compacto al agente principal.
-- Archivos del cambio: runtime y definiciones de agentes, registro, eventos, deduplicación, herramientas `spawn_agents`/`researcher_web`, bot, configuración, prompts, README, pruebas, script de eliminación y contexto
+- Último registro: contexto/61-fallback-busqueda-reintentos-llm-y-cola-whatsapp.md
+- Resumen: Fallback silencioso entre motores de búsqueda, reintentos configurables para fallos transitorios del proveedor LLM y respuestas vacías, logs debug coloreados y cola resiliente para todos los mensajes salientes de WhatsApp durante desconexiones.
+- Archivos del cambio: AI/reintentos, debug, search runtime, messaging, bot, whatsapp tools, README, pruebas y contexto
 <!-- codewolf:auto-context:end -->

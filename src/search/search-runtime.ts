@@ -1161,9 +1161,11 @@ export async function runWebSearchWithFallback(
         status: 'failed',
         message: error instanceof Error ? error.message : String(error),
       })
-      debugError("search.runtime", "provider_failed", error, {
+      debugWarn("search.runtime", "provider_failed_fallback", {
         provider,
         query: request.query,
+        message: error instanceof Error ? error.message : String(error),
+        nextProvider: order[order.indexOf(provider) + 1],
       })
     }
   }

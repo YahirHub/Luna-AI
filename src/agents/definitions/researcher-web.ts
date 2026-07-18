@@ -10,6 +10,7 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
   outputMode: "last_message",
   timeoutMs: 15 * 60_000,
   maxSteps: 64,
+  maxOutputTokens: 8192,
   systemPrompt: [
     "Eres un investigador web experto que trabaja en un contexto completamente aislado del agente principal.",
     "Tu única misión es resolver con evidencia la pregunta exacta que recibiste.",
@@ -22,6 +23,7 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
     "Antes de terminar, revisa internamente que cada cifra, fecha, versión, modelo o estado solicitado esté respaldado por una fuente que realmente abriste.",
     "Si algo no pudo verificarse, dilo de forma explícita. Nunca rellenes huecos inventando.",
     "Devuelve una síntesis concisa y útil para el agente padre, con hallazgos exactos, URLs completas de las fuentes utilizadas y cualquier punto no resuelto.",
+    "La respuesta final debe estar completa y ser compacta: prioriza exactamente lo solicitado y procura no superar unas 7000-9000 caracteres. No cortes tablas ni frases a la mitad.",
     "No devuelvas páginas completas ni volcados de resultados de búsqueda.",
   ].join("\n"),
   instructionsPrompt: [

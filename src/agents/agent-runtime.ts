@@ -169,10 +169,12 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
         });
         return toolResult;
       },
-      3,
+      5,
       undefined,
       {
         maxRounds: options.definition.maxSteps,
+        maxTokens: options.definition.maxOutputTokens,
+        truncationRecoveryAttempts: 2,
         signal,
       },
     );

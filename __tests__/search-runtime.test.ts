@@ -96,3 +96,46 @@ describe("search runtime", () => {
     )).rejects.toThrow("/setup-search");
   });
 });
+
+describe("search provider failover", () => {
+  it("salta inmediatamente al siguiente proveedor cuando el primero queda rate-limited", async () => {
+    const rateLimitConfig = {
+      settings: normalizeWebSearchSettings({
+        version: 1,
+        defaultProvider: "tavily",
+        fallbackOrder: ["tavily", "exa"],
+        providers: { tavily: { enabled: true }, exa: { enabled: true } },
+      }),
+      auth: normalizeWebSearchAuth({
+        version: 1,
+        apiKeys: { tavily: "tvly-key", exa: "exa-key" },
+      }),
+    };
+    const calls: string[] = [];
+    const fetchMock: FetchLike = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("tavily")) {
+        return new Response(JSON.stringify({ detail: "rate limit" }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "60" },
+        });
+      }
+      return new Response(JSON.stringify({
+        results: [{ title: "Fallback", url: "https://example.com/fallback", text: "ok" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const result = await runWebSearchWithFallback(
+      { query: "fallback por rate limit", numResults: 2 },
+      rateLimitConfig,
+      undefined,
+      fetchMock,
+    );
+
+    expect(result.provider).toBe("exa");
+    expect(result.attempts.map((item) => item.status)).toEqual(["failed", "success"]);
+    expect(calls.filter((url) => url.includes("tavily")).length).toBe(1);
+    expect(calls.some((url) => url.includes("exa.ai"))).toBe(true);
+  });
+});

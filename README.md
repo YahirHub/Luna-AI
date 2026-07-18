@@ -354,22 +354,37 @@ La profundidad estándar solicita hasta 8 resultados por búsqueda. La profunda 
 
 ## Depuración completa en consola
 
-La depuración estructurada está activa de forma predeterminada. Durante una investigación se muestran en consola:
+La depuración estructurada está activa de forma predeterminada y usa colores ANSI para distinguir rápidamente cada subsistema:
+
+- **cian**: búsquedas, cola y fallback entre motores;
+- **magenta**: `read_url` y obtención del contenido de páginas;
+- **azul**: runtime y herramientas de subagentes;
+- **verde**: proveedor LLM y reintentos de IA;
+- **amarillo**: cola y entrega de mensajes de WhatsApp;
+- **rojo/amarillo**: errores definitivos y advertencias recuperables.
+
+Durante una investigación se muestran en consola:
 
 - ID de tarea, trabajador, proveedor y consulta;
 - entrada y salida de la cola global de búsquedas;
-- motor intentado, resultados, fallos, HTTP 429 y reintentos;
+- motor intentado, fallback, HTTP 429 y recuperación con el siguiente motor;
 - URL abierta, duración, caracteres extraídos y errores de fetch;
-- cantidad de precios, fuentes y advertencias obtenidas por cada parser;
-- creación del Markdown/PDF, entrega por WhatsApp y stack completo de excepciones.
+- reintentos del proveedor LLM y abortado después de agotar intentos;
+- mensajes de WhatsApp encolados durante una desconexión y vaciado al reconectar;
+- creación de artefactos, entrega y stack completo de excepciones definitivas.
 
-Los campos con nombres como `apiKey`, `token`, `authorization`, `cookie`, `password`, `secret` o `credential` se sustituyen por `[REDACTED]`. Las cadenas extensas se truncan salvo que se habilite el modo detallado.
+Los fallos intermedios de un motor de búsqueda se registran como `WARN`: no se devuelven al modelo si otro motor configurado completa la misma consulta. `web_search` solo retorna un error cuando todos los motores habilitados fallan.
+
+Los campos con nombres sensibles como `apiKey`, `authorization`, `cookie`, `password`, `secret` o `credential` se sustituyen por `[REDACTED]`. También se reconocen prefijos inequívocos de claves conocidas sin ocultar URLs normales que contengan palabras como `api-pricing`. Las cadenas extensas se truncan salvo que se habilite el modo detallado.
 
 Variables disponibles:
 
 ```bash
 # Desactivar completamente los logs de depuración
 LUNA_DEBUG=false
+
+# Desactivar colores ANSI
+LUNA_DEBUG_COLORS=false
 
 # Mostrar cadenas extensas sin truncarlas
 LUNA_DEBUG_VERBOSE=true
@@ -379,9 +394,34 @@ LUNA_SEARCH_CONCURRENCY=1
 LUNA_SEARCH_MIN_INTERVAL_MS=1250
 LUNA_SEARCH_RETRY_ATTEMPTS=3
 LUNA_SEARCH_RETRY_BASE_MS=1500
+
+# Reintentos del proveedor LLM. Incluye timeouts, 429/5xx,
+# respuestas vacías y 400 transitorios como "Upstream request failed".
+LUNA_LLM_RETRY_ATTEMPTS=3
+LUNA_LLM_RETRY_BASE_MS=1500
+
+# Cadencia de entrega de todos los mensajes salientes por WhatsApp.
+# Si el socket se cierra, el mensaje queda temporalmente en memoria y
+# se reenvía automáticamente al reconectar.
+LUNA_WHATSAPP_MIN_DELAY_MS=1200
+LUNA_WHATSAPP_MAX_DELAY_MS=2800
+LUNA_WHATSAPP_SEND_RETRY_ATTEMPTS=3
 ```
 
-Para Tavily Free se recomienda conservar concurrencia `1` e intervalo mínimo de `1250` ms. Los investigadores continúan en paralelo mientras esperan su turno para buscar y pueden leer y procesar sus fuentes de forma independiente.
+Para Tavily Free se recomienda conservar concurrencia `1` e intervalo mínimo de `1250` ms. Los investigadores continúan en paralelo mientras esperan su turno para buscar y pueden leer y procesar sus fuentes de forma independiente. Si Tavily queda limitado y Brave, Exa u otro motor configurado está disponible, la misma consulta continúa automáticamente con el siguiente proveedor.
+
+## Entrega resiliente por WhatsApp
+
+Todos los mensajes salientes de Luna —respuestas finales, progreso de subagentes, avisos de herramientas, OCR/transcripción, alarmas, recordatorios y artefactos— pasan por una única cola de entrega. Antes de cada envío se simula brevemente el estado `composing`.
+
+Si Baileys devuelve errores de desconexión como `Connection Closed`/HTTP 428 o el socket desaparece durante una tarea:
+
+1. el mensaje no se descarta ni rompe el agente actual;
+2. queda temporalmente pendiente en memoria y se preserva su orden;
+3. los mensajes nuevos también se agregan a la misma cola;
+4. al recibir un nuevo socket válido durante la reconexión, la cola se vacía secuencialmente aplicando nuevamente la simulación de escritura.
+
+Los errores no relacionados con conectividad se reintentan con backoff antes de considerarse definitivos. La cola es temporal y no sustituye la persistencia propia de alarmas y recordatorios.
 
 ## Recordatorios, alarmas y contexto persistente
 
