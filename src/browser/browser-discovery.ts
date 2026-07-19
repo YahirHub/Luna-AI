@@ -9,11 +9,33 @@ function isMuslLinux(): boolean {
     || existsSync("/lib/ld-musl-aarch64.so.1");
 }
 
+export function supportsManagedAgentBrowserChrome(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): boolean {
+  // Chrome for Testing publica Linux únicamente para x64. En ARM64 Linux el
+  // binario nativo de agent-browser sí existe, pero el navegador debe venir del
+  // sistema (Chromium/Chrome compatible). macOS sí dispone de CfT ARM64.
+  if (platform === "linux") return arch === "x64";
+  if (platform === "win32") return arch === "x64";
+  if (platform === "darwin") return arch === "x64" || arch === "arm64";
+  return false;
+}
+
 export function agentBrowserNativeName(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
   musl: boolean = platform === "linux" && isMuslLinux(),
 ): string {
+  const supported = (
+    (platform === "win32" && arch === "x64")
+    || (platform === "darwin" && (arch === "x64" || arch === "arm64"))
+    || (platform === "linux" && (arch === "x64" || arch === "arm64"))
+  );
+  if (!supported) {
+    throw new Error(`agent-browser no publica un binario nativo compatible con ${platform}/${arch}.`);
+  }
+
   const osKey = platform === "linux" && musl ? "linux-musl" : platform;
   const ext = platform === "win32" ? ".exe" : "";
   return `agent-browser-${osKey}-${arch}${ext}`;
@@ -121,6 +143,7 @@ function findExecutableRecursively(root: string, maxDepth: number): string | und
 }
 
 export function resolveManagedAgentBrowserChrome(): string | undefined {
+  if (!supportsManagedAgentBrowserChrome()) return undefined;
   const root = join(homedir(), ".agent-browser", "browsers");
   if (!existsSync(root)) return undefined;
   let directories: string[] = [];

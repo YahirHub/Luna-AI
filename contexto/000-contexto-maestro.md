@@ -43,8 +43,8 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 <!-- codewolf:auto-context:start -->
 # Estado automático más reciente
 
-- Última actualización: 2026-07-19T00:15:15.304Z
-- Último registro: contexto/068-actualizar-informe-md.md
-- Resumen: Actualizar informe.md.
-- Archivos del cambio: informe.md
+- Última actualización: 2026-07-19T00:42:20.138Z
+- Último registro: contexto/069-actualizar-nul.md
+- Resumen: Actualizar nul.
+- Archivos del cambio: nul
 <!-- codewolf:auto-context:end -->

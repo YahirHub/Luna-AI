@@ -1,10 +1,18 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import {
   agentBrowserGenericName,
   agentBrowserNativeName,
   resolveManagedAgentBrowserChrome,
   resolveSystemBrowserExecutable,
+  supportsManagedAgentBrowserChrome,
 } from "../src/browser/browser-discovery.ts";
 
 const root = process.cwd();
@@ -15,6 +23,17 @@ const genericName = agentBrowserGenericName();
 const nodeModulesBinary = join(packageDir, "bin", nativeName);
 const preparedDir = join(root, "assets", "runtime", "agent-browser");
 const preparedBinary = join(preparedDir, genericName);
+const preparedManifestPath = join(preparedDir, "manifest.json");
+
+type PreparedManifest = {
+  schemaVersion: 1;
+  version: string;
+  platform: NodeJS.Platform;
+  arch: string;
+  nativeName: string;
+  genericName: string;
+  preparedAt: string;
+};
 
 function rootAgentBrowserVersion(): string {
   const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
@@ -31,6 +50,39 @@ function installedAgentBrowserVersion(): string {
   if (!existsSync(packageJsonPath)) return rootAgentBrowserVersion();
   const installed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version?: string };
   return installed.version?.trim() || rootAgentBrowserVersion();
+}
+
+function expectedManifest(): PreparedManifest {
+  return {
+    schemaVersion: 1,
+    version: installedAgentBrowserVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    nativeName,
+    genericName,
+    preparedAt: new Date().toISOString(),
+  };
+}
+
+function preparedBinaryMatchesCurrentPlatform(): boolean {
+  if (!existsSync(preparedBinary) || !existsSync(preparedManifestPath)) return false;
+  try {
+    const current = JSON.parse(readFileSync(preparedManifestPath, "utf8")) as Partial<PreparedManifest>;
+    const expected = expectedManifest();
+    return current.schemaVersion === 1
+      && current.version === expected.version
+      && current.platform === expected.platform
+      && current.arch === expected.arch
+      && current.nativeName === expected.nativeName
+      && current.genericName === expected.genericName;
+  } catch {
+    return false;
+  }
+}
+
+function writePreparedManifest(): void {
+  mkdirSync(preparedDir, { recursive: true });
+  writeFileSync(preparedManifestPath, `${JSON.stringify(expectedManifest(), null, 2)}\n`, "utf8");
 }
 
 async function run(command: string[], label: string, stdin?: string): Promise<void> {
@@ -82,31 +134,105 @@ async function ensureNativeBinary(): Promise<string> {
 
   if (existsSync(nodeModulesBinary)) {
     copyFileSync(nodeModulesBinary, preparedBinary);
-    console.log(`[agent-browser] Binario nativo preparado desde node_modules: ${preparedBinary}`);
-  } else if (!existsSync(preparedBinary)) {
+    writePreparedManifest();
+    console.log(`[agent-browser] Binario nativo preparado para ${process.platform}/${process.arch}: ${preparedBinary}`);
+  } else if (!preparedBinaryMatchesCurrentPlatform()) {
     await downloadNativeBinary(preparedBinary);
-    console.log(`[agent-browser] Binario nativo descargado a: ${preparedBinary}`);
+    writePreparedManifest();
+    console.log(`[agent-browser] Binario nativo descargado para ${process.platform}/${process.arch}: ${preparedBinary}`);
   } else {
-    console.log(`[agent-browser] Reutilizando binario nativo preparado: ${preparedBinary}`);
+    console.log(`[agent-browser] Reutilizando binario nativo preparado para ${process.platform}/${process.arch}: ${preparedBinary}`);
   }
 
-  if (process.platform !== "win32") {
-    chmodSync(preparedBinary, 0o755);
-  }
+  if (process.platform !== "win32") chmodSync(preparedBinary, 0o755);
   return preparedBinary;
 }
 
+async function tryInstallSystemChromium(): Promise<string | undefined> {
+  if (process.platform !== "linux") return undefined;
+  const existing = resolveSystemBrowserExecutable();
+  if (existing) return existing;
+
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return undefined;
+
+  const apt = Bun.which("apt-get");
+  if (apt) {
+    console.log("[agent-browser] Instalando Chromium del sistema con APT para Linux...");
+    await run([apt, "update"], "apt-get update");
+    await run([
+      apt,
+      "install",
+      "-y",
+      "--no-install-recommends",
+      "chromium",
+      "fonts-liberation",
+      "xdg-utils",
+    ], "instalación de Chromium");
+    return resolveSystemBrowserExecutable();
+  }
+
+  const apk = Bun.which("apk");
+  if (apk) {
+    console.log("[agent-browser] Instalando Chromium del sistema con APK para Linux...");
+    await run([apk, "add", "--no-cache", "chromium", "font-liberation", "xdg-utils"], "instalación de Chromium");
+    return resolveSystemBrowserExecutable();
+  }
+
+  const dnf = Bun.which("dnf");
+  if (dnf) {
+    console.log("[agent-browser] Instalando Chromium del sistema con DNF para Linux...");
+    await run([dnf, "install", "-y", "chromium"], "instalación de Chromium");
+    return resolveSystemBrowserExecutable();
+  }
+
+  return undefined;
+}
+
 async function ensureBrowser(binary: string): Promise<void> {
-  // agent-browser está probado contra su Chrome for Testing administrado. Lo
-  // preferimos sobre Chrome/Edge/Brave del usuario para que desarrollo y el
-  // binario compilado utilicen el mismo runtime predecible.
+  const explicitBrowser = process.env.AGENT_BROWSER_EXECUTABLE_PATH?.trim();
+  if (explicitBrowser && existsSync(explicitBrowser)) {
+    console.log(`[agent-browser] Navegador explícito reutilizado: ${explicitBrowser}`);
+    return;
+  }
+
+  const managedSupported = supportsManagedAgentBrowserChrome();
+  let systemBrowser = resolveSystemBrowserExecutable();
+
+  // En Linux ARM64 Chrome for Testing no existe. El binario nativo de
+  // agent-browser sí está soportado, por lo que usamos Chromium/Chrome del
+  // sistema en lugar de intentar una descarga imposible.
+  if (!managedSupported) {
+    if (systemBrowser) {
+      console.log(`[agent-browser] ${process.platform}/${process.arch} usa navegador del sistema: ${systemBrowser}`);
+      return;
+    }
+
+    if (process.env.LUNA_AGENT_BROWSER_SKIP_INSTALL === "1") {
+      console.warn(
+        `[agent-browser] ${process.platform}/${process.arch} requiere un navegador del sistema y la instalación automática está desactivada.`,
+      );
+      return;
+    }
+
+    systemBrowser = await tryInstallSystemChromium();
+    if (systemBrowser) {
+      console.log(`[agent-browser] Chromium del sistema listo: ${systemBrowser}`);
+      return;
+    }
+
+    throw new Error(
+      `Chrome for Testing no está disponible para ${process.platform}/${process.arch}. `
+      + "Instala Chromium/Chrome del sistema (por ejemplo: sudo apt install chromium) "
+      + "o define AGENT_BROWSER_EXECUTABLE_PATH.",
+    );
+  }
+
   const managedBrowser = resolveManagedAgentBrowserChrome();
   if (managedBrowser) {
     console.log(`[agent-browser] Chrome for Testing reutilizado: ${managedBrowser}`);
     return;
   }
 
-  const systemBrowser = resolveSystemBrowserExecutable();
   if (process.env.LUNA_AGENT_BROWSER_USE_SYSTEM_BROWSER === "1" && systemBrowser) {
     console.log(`[agent-browser] LUNA_AGENT_BROWSER_USE_SYSTEM_BROWSER=1; usando navegador del sistema: ${systemBrowser}`);
     return;
@@ -114,10 +240,10 @@ async function ensureBrowser(binary: string): Promise<void> {
 
   if (process.env.LUNA_AGENT_BROWSER_SKIP_INSTALL === "1") {
     if (systemBrowser) {
-      console.warn(`[agent-browser] Se omite Chrome for Testing por LUNA_AGENT_BROWSER_SKIP_INSTALL=1. Fallback disponible: ${systemBrowser}`);
+      console.warn(`[agent-browser] Se omite Chrome for Testing. Fallback disponible: ${systemBrowser}`);
       return;
     }
-    console.warn("[agent-browser] No se detectó navegador administrado y LUNA_AGENT_BROWSER_SKIP_INSTALL=1. Se omite la instalación automática.");
+    console.warn("[agent-browser] No se detectó navegador administrado y se omite la instalación automática.");
     return;
   }
 
@@ -141,4 +267,4 @@ async function ensureBrowser(binary: string): Promise<void> {
 
 const binary = await ensureNativeBinary();
 await ensureBrowser(binary);
-console.log("[agent-browser] Runtime de navegación listo.");
+console.log(`[agent-browser] Runtime de navegación listo para ${process.platform}/${process.arch}.`);

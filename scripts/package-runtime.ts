@@ -40,21 +40,25 @@ if (existsSync(twemojiSource)) {
 }
 
 
-const agentBrowserPreparedSource = join(root, "assets", "runtime", "agent-browser", agentBrowserGenericName());
+const agentBrowserPreparedDir = join(root, "assets", "runtime", "agent-browser");
+const agentBrowserPreparedSource = join(agentBrowserPreparedDir, agentBrowserGenericName());
 const agentBrowserNodeModulesSource = join(root, "node_modules", "agent-browser", "bin", agentBrowserNativeName());
-const agentBrowserSource = existsSync(agentBrowserPreparedSource)
-  ? agentBrowserPreparedSource
-  : agentBrowserNodeModulesSource;
 const agentBrowserDestination = join(root, "dist", "runtime", "agent-browser");
-if (!existsSync(agentBrowserSource)) {
+rmSync(agentBrowserDestination, { recursive: true, force: true });
+mkdirSync(agentBrowserDestination, { recursive: true });
+
+const target = join(agentBrowserDestination, agentBrowserGenericName());
+if (existsSync(agentBrowserPreparedSource)) {
+  // Copia también manifest.json para conservar la arquitectura/versión del
+  // runtime preparado y facilitar diagnósticos de builds multi-arquitectura.
+  cpSync(agentBrowserPreparedDir, agentBrowserDestination, { recursive: true });
+} else if (existsSync(agentBrowserNodeModulesSource)) {
+  cpSync(agentBrowserNodeModulesSource, target);
+} else {
   throw new Error(
-    `Falta el runtime nativo de agent-browser (${agentBrowserSource}). `
+    `Falta el runtime nativo de agent-browser para ${process.platform}/${process.arch}. `
     + "Ejecuta bun run prepare:browser o bun install antes del build.",
   );
 }
-rmSync(agentBrowserDestination, { recursive: true, force: true });
-mkdirSync(agentBrowserDestination, { recursive: true });
-const target = join(agentBrowserDestination, agentBrowserGenericName());
-cpSync(agentBrowserSource, target);
 if (process.platform !== "win32") chmodSync(target, 0o755);
 console.log(`[package-runtime] agent-browser nativo copiado a ${target}`);

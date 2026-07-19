@@ -6,8 +6,10 @@ import {
   mkdtempSync,
   readdirSync,
   realpathSync,
+  readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -140,6 +142,7 @@ type LinuxRuntimeDependencyOptions = {
   searchSystem?: boolean;
   packageDownloader?: LinuxPackageDownloader;
   allowPackageDownload?: boolean;
+  preferPortableBaseline?: boolean;
 };
 
 type DebianPackageDefinition = {
@@ -324,68 +327,23 @@ async function downloadPinnedDebianPackage(
 }
 
 /**
- * Obtiene libgomp1 sin instalarla globalmente:
- * 1. intenta `apt-get download`, que respeta los repositorios configurados;
- * 2. si APT no tiene índices utilizables, descarga un paquete Debian Bookworm
- *    fijado por arquitectura y SHA-256 desde deb.debian.org;
- * 3. extrae únicamente libgomp.so.1 dentro del runtime de Luna.
+ * Descarga exclusivamente la versión portable fijada de Debian Bookworm para
+ * la arquitectura actual. Se usa como runtime distribuible para no copiar
+ * accidentalmente una libgomp del host/build que requiera una glibc más nueva.
  */
-export async function downloadDebianRuntimeDependency(
+async function downloadPortableBaselineRuntimeDependency(
   filename: RuntimeDependencyName,
   destinationDirectory: string,
-  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
   if (filename !== "libgomp.so.1") return null;
-
+  const definition = DEBIAN_LIBGOMP_PACKAGES[process.arch];
   const dpkgDeb = Bun.which("dpkg-deb");
-  if (!dpkgDeb) return null;
+  if (!definition || !dpkgDeb) return null;
 
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), "luna-libgomp-"));
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "luna-libgomp-baseline-"));
   try {
-    const apt = Bun.which("apt-get") ?? Bun.which("apt");
-    if (apt) {
-      const aptArguments = [apt];
-      if (typeof process.getuid === "function" && process.getuid() === 0) {
-        aptArguments.push("-o", "APT::Sandbox::User=root");
-      }
-      aptArguments.push("download", "libgomp1");
-
-      const download = Bun.spawnSync(aptArguments, {
-        cwd: temporaryDirectory,
-        env: { ...environment, DEBIAN_FRONTEND: "noninteractive" },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (download.exitCode === 0) {
-        const aptPackagePath = walkRuntimeFiles(temporaryDirectory)
-          .find((path) => path.endsWith(".deb"));
-        if (aptPackagePath) {
-          const destination = extractDebianLibrary(
-            aptPackagePath,
-            filename,
-            destinationDirectory,
-            temporaryDirectory,
-          );
-          if (destination) {
-            console.log(
-              `[media-assets] ${filename} obtenido con APT para ${process.arch}.`,
-            );
-            return destination;
-          }
-        }
-      } else {
-        console.warn(
-          `[media-assets] APT no pudo descargar libgomp1; usando paquete fijado: ` +
-            commandFailureDetail(download),
-        );
-      }
-    }
-
-    const definition = DEBIAN_LIBGOMP_PACKAGES[process.arch];
-    if (!definition) return null;
     const packagePath = join(temporaryDirectory, definition.filename);
     if (!(await downloadPinnedDebianPackage(definition, packagePath))) return null;
-
     const destination = extractDebianLibrary(
       packagePath,
       filename,
@@ -394,13 +352,138 @@ export async function downloadDebianRuntimeDependency(
     );
     if (destination) {
       console.log(
-        `[media-assets] ${filename} obtenido desde Debian Bookworm para ${process.arch}.`,
+        `[media-assets] ${filename} portable obtenido desde Debian Bookworm para ${process.arch}.`,
       );
     }
     return destination;
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+/**
+ * Obtiene libgomp1 sin instalarla globalmente. Se intenta primero el paquete
+ * Bookworm fijado por arquitectura para mantener una línea base de glibc
+ * estable. APT queda únicamente como fallback para entornos no soportados por
+ * la tabla fijada o cuando el mirror portable no está disponible.
+ */
+export async function downloadDebianRuntimeDependency(
+  filename: RuntimeDependencyName,
+  destinationDirectory: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  if (filename !== "libgomp.so.1") return null;
+
+  const pinned = await downloadPortableBaselineRuntimeDependency(filename, destinationDirectory);
+  if (pinned) return pinned;
+
+  const dpkgDeb = Bun.which("dpkg-deb");
+  if (!dpkgDeb) return null;
+
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "luna-libgomp-"));
+  try {
+    const apt = Bun.which("apt-get") ?? Bun.which("apt");
+    if (!apt) return null;
+
+    const aptArguments = [apt];
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      aptArguments.push("-o", "APT::Sandbox::User=root");
+    }
+    aptArguments.push("download", "libgomp1");
+
+    const download = Bun.spawnSync(aptArguments, {
+      cwd: temporaryDirectory,
+      env: { ...environment, DEBIAN_FRONTEND: "noninteractive" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (download.exitCode !== 0) {
+      console.warn(
+        `[media-assets] APT no pudo descargar libgomp1: ${commandFailureDetail(download)}`,
+      );
+      return null;
+    }
+
+    const aptPackagePath = walkRuntimeFiles(temporaryDirectory)
+      .find((path) => path.endsWith(".deb"));
+    if (!aptPackagePath) return null;
+    const destination = extractDebianLibrary(
+      aptPackagePath,
+      filename,
+      destinationDirectory,
+      temporaryDirectory,
+    );
+    if (destination) {
+      console.warn(
+        `[media-assets] ${filename} obtenido con APT para ${process.arch}; `
+        + "la portabilidad dependerá de la glibc del sistema de build.",
+      );
+    }
+    return destination;
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+const PORTABLE_DEPENDENCY_MANIFEST = "portable-runtime-dependencies.json";
+
+type PortableDependencyManifest = {
+  schemaVersion: 1;
+  arch: string;
+  dependencies: Partial<Record<RuntimeDependencyName, {
+    source: "debian-bookworm-pinned";
+    packageFilename: string;
+    packageSha256: string;
+  }>>;
+};
+
+function portableManifestPath(root: string): string {
+  return join(root, "system-libs", PORTABLE_DEPENDENCY_MANIFEST);
+}
+
+function readPortableDependencyManifest(root: string): PortableDependencyManifest | null {
+  const path = portableManifestPath(root);
+  if (!existsSync(path)) return null;
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as PortableDependencyManifest;
+    return value.schemaVersion === 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function portableDependencyIsCurrent(
+  root: string,
+  filename: RuntimeDependencyName,
+): boolean {
+  const definition = DEBIAN_LIBGOMP_PACKAGES[process.arch];
+  if (!definition) return false;
+  const manifest = readPortableDependencyManifest(root);
+  const dependency = manifest?.dependencies?.[filename];
+  return manifest?.arch === process.arch
+    && dependency?.source === "debian-bookworm-pinned"
+    && dependency.packageFilename === definition.filename
+    && dependency.packageSha256 === definition.sha256
+    && existsSync(join(root, "system-libs", filename));
+}
+
+function writePortableDependencyManifest(root: string, filename: RuntimeDependencyName): void {
+  const definition = DEBIAN_LIBGOMP_PACKAGES[process.arch];
+  if (!definition) return;
+  const path = portableManifestPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  const previous = readPortableDependencyManifest(root);
+  const manifest: PortableDependencyManifest = {
+    schemaVersion: 1,
+    arch: process.arch,
+    dependencies: previous?.arch === process.arch ? { ...previous.dependencies } : {},
+  };
+  manifest.dependencies[filename] = {
+    source: "debian-bookworm-pinned",
+    packageFilename: definition.filename,
+    packageSha256: definition.sha256,
+  };
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
 /**
@@ -418,8 +501,35 @@ export async function ensureLinuxRuntimeDependencies(
   const existing = new Set(walkRuntimeFiles(root).map((path) => basename(path)));
   const destinationDirectory = join(root, "system-libs");
   const copied: string[] = [];
+  const usePortableBaseline = options.preferPortableBaseline !== false
+    && options.candidates === undefined
+    && options.packageDownloader === undefined
+    && options.searchSystem !== false
+    && options.allowPackageDownload !== false;
 
   for (const filename of REQUIRED_LINUX_RUNTIME_LIBRARIES) {
+    // El camino normal de producción no copia libgomp desde el host de build.
+    // En su lugar usa una versión Bookworm fijada por arquitectura y la marca
+    // con un manifiesto. Esto también reemplaza automáticamente runtimes viejos
+    // conservados en assets/ que pudieron haberse generado en Trixie u otra
+    // distribución con una glibc más nueva.
+    if (usePortableBaseline && DEBIAN_LIBGOMP_PACKAGES[process.arch]) {
+      if (portableDependencyIsCurrent(root, filename)) continue;
+      const downloaded = await downloadPortableBaselineRuntimeDependency(
+        filename,
+        destinationDirectory,
+      );
+      if (!downloaded) {
+        throw new Error(
+          `No se pudo preparar la versión portable de ${filename} para ${process.arch}. `
+          + "Comprueba el acceso a deb.debian.org o define LUNA_LIBGOMP_PATH para una biblioteca compatible.",
+        );
+      }
+      writePortableDependencyManifest(root, filename);
+      copied.push(downloaded);
+      continue;
+    }
+
     if (existing.has(filename)) continue;
 
     const source = resolveRuntimeDependency(filename, options);
@@ -442,9 +552,9 @@ export async function ensureLinuxRuntimeDependencies(
     }
 
     throw new Error(
-      `No se encontró ${filename} para empaquetar whisper.cpp. ` +
-        "Luna intentó APT y un paquete Debian fijado por arquitectura. " +
-        "Instala libgomp1, comprueba el acceso a deb.debian.org o define LUNA_LIBGOMP_PATH.",
+      `No se encontró ${filename} para empaquetar whisper.cpp. `
+        + "Luna intentó una biblioteca portable por arquitectura y los fallbacks disponibles. "
+        + "Instala libgomp1, comprueba el acceso a deb.debian.org o define LUNA_LIBGOMP_PATH.",
     );
   }
 

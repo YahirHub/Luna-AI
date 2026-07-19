@@ -7,6 +7,7 @@ import {
   agentBrowserNativeName,
   resolveManagedAgentBrowserChrome,
   resolveSystemBrowserExecutable,
+  supportsManagedAgentBrowserChrome,
 } from "./browser-discovery.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import type { BrowserCredentialStore } from "./browser-credentials.ts";
@@ -102,6 +103,7 @@ export class BrowserAgentExecution {
   private session: string;
   private readonly restoreName: string;
   private readonly binary: string;
+  private readonly runtimeCwd: string;
   private recoveryCounter = 0;
   private screenshotCounter = 0;
   private downloadCounter = 0;
@@ -115,6 +117,8 @@ export class BrowserAgentExecution {
     this.session = this.sessionBase;
     this.restoreName = `luna-${userState}`;
     this.binary = resolveAgentBrowserBinary();
+    this.runtimeCwd = join(getAppDir(), "persistent", "browser", "runtime");
+    mkdirSync(this.runtimeCwd, { recursive: true });
   }
 
   private env(): Record<string, string> {
@@ -122,9 +126,12 @@ export class BrowserAgentExecution {
     // por agent-browser > navegador del sistema. Esto evita forzar Chrome/Edge
     // del usuario cuando ya existe el runtime probado que instala `agent-browser install`.
     const explicitBrowser = process.env.AGENT_BROWSER_EXECUTABLE_PATH?.trim();
+    const managedBrowser = supportsManagedAgentBrowserChrome()
+      ? resolveManagedAgentBrowserChrome()
+      : undefined;
     const browserExecutable = explicitBrowser && existsSync(explicitBrowser)
       ? explicitBrowser
-      : resolveManagedAgentBrowserChrome() ?? resolveSystemBrowserExecutable();
+      : managedBrowser ?? resolveSystemBrowserExecutable();
     return {
       ...process.env,
       AGENT_BROWSER_SESSION: this.session,
@@ -169,6 +176,7 @@ export class BrowserAgentExecution {
       stdout: "pipe",
       stderr: "pipe",
       stdin: stdinText === undefined ? "ignore" : "pipe",
+      cwd: this.runtimeCwd,
       env,
     });
 

@@ -16,6 +16,11 @@ describe("empaquetado del runtime multimedia", () => {
     const browserRuntimeSource = await Bun.file(
       new URL("../src/browser/browser-runtime.ts", import.meta.url),
     ).text();
+    const browserDiscoverySource = await Bun.file(
+      new URL("../src/browser/browser-discovery.ts", import.meta.url),
+    ).text();
+    const dockerfileSource = await Bun.file(new URL("../Dockerfile", import.meta.url)).text();
+    const entrypointSource = await Bun.file(new URL("../entrypoint.sh", import.meta.url)).text();
 
     expect(packageJson.scripts.build).toContain("prepare:browser");
     expect(packageJson.scripts.build).toContain("package:runtime");
@@ -34,6 +39,14 @@ describe("empaquetado del runtime multimedia", () => {
     expect(browserPrepareSource).toContain("releases/download");
     expect(browserPrepareSource).toContain("Chrome for Testing reutilizado");
     expect(browserPrepareSource).toContain("LUNA_AGENT_BROWSER_USE_SYSTEM_BROWSER");
+    expect(browserPrepareSource).toContain("Chrome for Testing no está disponible");
+    expect(browserPrepareSource).toContain("manifest.json");
+    expect(browserDiscoverySource).toContain("supportsManagedAgentBrowserChrome");
+    expect(dockerfileSource).toContain("--ignore-scripts");
+    expect(dockerfileSource).toContain("chromium");
+    expect(dockerfileSource).toContain("LUNA_AGENT_BROWSER_SKIP_INSTALL=1");
+    expect(entrypointSource).toContain("XDG_RUNTIME_DIR");
+    expect(entrypointSource).toContain("runtime-home");
     expect(browserRuntimeSource).toContain('"assets", "runtime", "agent-browser"');
     expect(browserRuntimeSource).toContain("AGENT_BROWSER_EXECUTABLE_PATH");
     expect(browserRuntimeSource).toContain("resolveManagedAgentBrowserChrome");
@@ -41,11 +54,14 @@ describe("empaquetado del runtime multimedia", () => {
     expect(browserRuntimeSource).toContain("command_timeout");
     expect(browserRuntimeSource).toContain("openWithRecovery");
     expect(browserRuntimeSource).toContain("session_rotated");
+    expect(browserRuntimeSource).toContain("cwd: this.runtimeCwd");
     expect(source).toContain("manifest.json");
     expect(source).toContain("ensureLinuxSharedLibraryAliases");
     expect(source).toContain("ensureLinuxRuntimeDependencies");
     expect(linuxRuntimeSource).toContain("libgomp.so.1");
     expect(linuxRuntimeSource).toContain("deb.debian.org");
     expect(linuxRuntimeSource).toContain("DEBIAN_LIBGOMP_PACKAGES");
+    expect(linuxRuntimeSource).toContain("portable-runtime-dependencies.json");
+    expect(linuxRuntimeSource).toContain("downloadPortableBaselineRuntimeDependency");
   });
 });

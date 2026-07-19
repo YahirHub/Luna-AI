@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/65-agente-de-navegador-agent-browser.md
-- Resumen: Luna incorpora un subagente browser-web basado en agent-browser para navegación interactiva sin visión, login mediante referencias de credenciales fuera del LLM, sesiones cifradas, extracción de paneles, capturas y descargas físicas en el workdir.
-- Archivos del cambio: runtime de navegador, credenciales seguras, herramientas browser, registro/orquestación de agentes, bot, contexto del sistema, empaquetado, dependencias, README y pruebas
+- Último registro: contexto/66-runtime-multiarch-browser-whisper-docker.md
+- Resumen: Los runtimes de agent-browser, Chromium Docker y whisper.cpp se preparan ahora por plataforma/arquitectura. Linux ARM64 usa Chromium del sistema, agent-browser conserva un manifest anti-reutilización cruzada y Whisper empaqueta libgomp portable Bookworm por x64/ARM64 para evitar incompatibilidades de glibc.
+- Archivos del cambio: Dockerfile, entrypoint, descubrimiento/preparación/empaquetado de agent-browser, runtime de Whisper/libgomp, contexto y pruebas multi-arquitectura
 <!-- codewolf:auto-context:end -->
