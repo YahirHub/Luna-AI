@@ -191,6 +191,11 @@ let currentSock: WASocket | null = null;
 /** JIDs actualmente en proceso de compactación (para ignorar mensajes entrantes). */
 const compactingJids = new Set<string>();
 
+/** Ejecución principal activa por usuario. !cancelar aborta también al orquestador,
+ * no solo al subagente, para impedir que el modelo lance tareas de seguimiento
+ * después de que el usuario ya canceló la solicitud. */
+const activeAiRuns = new Map<string, AbortController>();
+
 /** Tools base y herramientas opcionales según /config. */
 const BASE_TOOLS = [
   ...MEMORY_TOOLS,
@@ -593,27 +598,50 @@ function formatCommandName(name: string): string {
   return `${SLASH_COMMANDS.has(name) ? "/" : "!"}${name}`;
 }
 
-function compactProgressText(value: string, maxLength = 120): string {
-  const clean = value.replace(/\s+/g, " ").trim();
-  return clean.length <= maxLength
-    ? clean
-    : `${clean.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+const WHATSAPP_PROGRESS_CHUNK_LENGTH = 3500;
+
+function splitProgressText(value: string, maxLength = WHATSAPP_PROGRESS_CHUNK_LENGTH): string[] {
+  const text = value.trim();
+  if (!text) return [];
+  if (text.length <= maxLength) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLength) {
+    let splitAt = remaining.lastIndexOf("\n", maxLength);
+    if (splitAt < Math.floor(maxLength * 0.5)) splitAt = remaining.lastIndexOf(" ", maxLength);
+    if (splitAt < Math.floor(maxLength * 0.5)) splitAt = maxLength;
+    const chunk = remaining.slice(0, splitAt).trimEnd();
+    if (chunk) chunks.push(chunk);
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
 }
 
-function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string | null {
+function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
   switch (event.type) {
     case "task_started":
-      return `🤖 Inicié ${event.total} subagente${event.total === 1 ? "" : "s"}.\nTarea: ${event.taskId}`;
-    case "agent_started":
-      return `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}):\n${compactProgressText(event.prompt, 220)}`;
+      return [`🤖 Inicié ${event.total} subagente${event.total === 1 ? "" : "s"}.\nTarea: ${event.taskId}`];
+    case "agent_started": {
+      const prefix = `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}):`;
+      const promptChunks = splitProgressText(event.prompt);
+      if (promptChunks.length === 0) return [prefix];
+      return promptChunks.map((chunk, chunkIndex) =>
+        chunkIndex === 0
+          ? `${prefix}\n${chunk}`
+          : `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}) — instrucción ${chunkIndex + 1}/${promptChunks.length}:\n${chunk}`
+      );
+    }
     case "agent_completed": {
       const icon = event.status === "completed" ? "✅" : event.status === "cancelled" ? "⛔" : "❌";
       const label = event.status === "completed" ? "terminado" : event.status === "cancelled" ? "cancelado" : "falló";
-      return `${icon} Subagente ${event.index + 1}/${event.total} (${event.agentType}): ${label}.`;
+      return [`${icon} Subagente ${event.index + 1}/${event.total} (${event.agentType}): ${label}.`];
     }
     case "task_completed":
-      if (event.status === "failed") return `❌ Tarea de subagentes ${event.taskId} fallida.`;
-      return `✅ Tarea de subagentes ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`;
+      if (event.status === "cancelled") return [`⛔ Tarea de subagentes ${event.taskId} cancelada.`];
+      if (event.status === "failed") return [`❌ Tarea de subagentes ${event.taskId} fallida.`];
+      return [`✅ Tarea de subagentes ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`];
   }
 }
 
@@ -679,32 +707,48 @@ function buildHelpText(jid: string): string {
 }
 
 function cancelCurrentOperation(jid: string): string {
+  let cancelledSomething = false;
+  let cancelledTasks = 0;
+
   if (browserCredentialStore.getPendingInput(jid)) {
-    browserCredentialStore.clearPendingInput(jid);
-    return "✅ Solicitud de datos del navegador cancelada.";
+    browserCredentialStore.cancelPendingInput(jid, new Error("Solicitud cancelada por el usuario."));
+    cancelledSomething = true;
   }
-  if (taskRuntime.cancel(jid)) return "✅ Tarea activa de subagentes cancelada.";
+
+  cancelledTasks = taskRuntime.cancelAll(jid);
+  if (cancelledTasks > 0) cancelledSomething = true;
+
+  const activeRun = activeAiRuns.get(jid);
+  if (activeRun && !activeRun.signal.aborted) {
+    activeRun.abort(new Error("user-cancelled-current-operation"));
+    cancelledSomething = true;
+  }
+
   if (providerSetupManager.has(jid)) {
     providerSetupManager.cancel(jid);
-    return "✅ Configuración del proveedor cancelada.";
+    cancelledSomething = true;
   }
   if (searchSetupManager.has(jid)) {
     searchSetupManager.cancel(jid);
-    return "✅ Configuración de búsqueda cancelada.";
+    cancelledSomething = true;
   }
   if (agentConfigFlowManager.has(jid)) {
     agentConfigFlowManager.cancel(jid);
-    return "✅ Configuración del agente cancelada.";
+    cancelledSomething = true;
   }
   if (whisperSetupManager.has(jid)) {
     whisperSetupManager.cancel(jid);
-    return "✅ Configuración de Whisper cancelada.";
+    cancelledSomething = true;
   }
   if (contextManager?.isAwaitingModelSelection(jid)) {
     contextManager.clearAwaitingModelSelection(jid);
-    return "✅ Selección de modelo cancelada.";
+    cancelledSomething = true;
   }
-  return "No hay una operación interactiva o tarea activa que cancelar.";
+
+  if (!cancelledSomething) return "No hay una operación interactiva o tarea activa que cancelar.";
+  if (cancelledTasks > 1) return `✅ Operación actual cancelada. Se detuvieron ${cancelledTasks} tareas de subagentes y el orquestador no las reanudará.`;
+  if (cancelledTasks === 1) return "✅ Operación actual cancelada. Se detuvo la tarea de subagentes y el orquestador no lanzará tareas de seguimiento.";
+  return "✅ Operación actual cancelada.";
 }
 
 async function formatModelsForUser(jid: string): Promise<string> {
@@ -1016,33 +1060,8 @@ registerCommand(
 
 registerCommand(
   "cancelar",
-  "Cancela la operación actual (selección de modelo, etc.)",
-  (_cmd, senderJid) => {
-    if (taskRuntime.cancel(senderJid)) {
-      return { text: "❌ Tarea activa de subagentes cancelada." };
-    }
-    if (providerSetupManager.has(senderJid)) {
-      providerSetupManager.cancel(senderJid);
-      return { text: "❌ Configuración del proveedor cancelada." };
-    }
-    if (searchSetupManager.has(senderJid)) {
-      searchSetupManager.cancel(senderJid);
-      return { text: "❌ Configuración de búsqueda cancelada." };
-    }
-    if (agentConfigFlowManager.has(senderJid)) {
-      agentConfigFlowManager.cancel(senderJid);
-      return { text: "❌ Configuración del agente cancelada." };
-    }
-    if (whisperSetupManager.has(senderJid)) {
-      whisperSetupManager.cancel(senderJid);
-      return { text: "❌ Configuración de Whisper cancelada." };
-    }
-    if (contextManager?.isAwaitingModelSelection(senderJid)) {
-      contextManager.clearAwaitingModelSelection(senderJid);
-      return { text: "❌ Selección de modelo cancelada." };
-    }
-    return { text: "❌ Operación cancelada." };
-  },
+  "Cancela completamente la operación actual y evita reintentos o tareas de seguimiento",
+  (_cmd, senderJid) => ({ text: cancelCurrentOperation(senderJid) }),
 );
 
 registerCommand(
@@ -2047,8 +2066,7 @@ export async function handleMessage(
   const pendingBrowserInput = browserCredentialStore.getPendingInput(remoteJid);
   if (pendingBrowserInput) {
     if (command && command.name === "cancelar") {
-      browserCredentialStore.cancelPendingInput(remoteJid, new Error("Solicitud cancelada por el usuario."));
-      await sendWithTyping(sock, remoteJid, "❌ Solicitud de datos del navegador cancelada.");
+      await sendWithTyping(sock, remoteJid, cancelCurrentOperation(remoteJid));
       return;
     }
 
@@ -2472,6 +2490,8 @@ async function handleAiChat(
 
   // Mantener el estado escribiendo durante toda la operación real.
   const typingSession = await startContinuousTyping(sock, remoteJid);
+  const runController = new AbortController();
+  activeAiRuns.set(remoteJid, runController);
 
   try {
     // Ejecutar chat con function calling. Las acciones mutables se registran
@@ -2510,6 +2530,9 @@ async function handleAiChat(
       name: string,
       args: Record<string, unknown>,
     ): Promise<string> => {
+      if (runController.signal.aborted) {
+        throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
+      }
       if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
         shownNotifs.add(name);
         const notification = TOOL_NOTIFICATION_TEXTS.get(name) ?? "";
@@ -2608,10 +2631,11 @@ async function handleAiChat(
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
-            const progressText = formatSpawnAgentsProgress(event);
-            if (!progressText) return;
-            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
-            await typingSession.refresh();
+            const progressMessages = formatSpawnAgentsProgress(event);
+            for (const progressText of progressMessages) {
+              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+            }
+            if (progressMessages.length > 0) await typingSession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2634,10 +2658,11 @@ async function handleAiChat(
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
-            const progressText = formatSpawnAgentsProgress(event);
-            if (!progressText) return;
-            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
-            await typingSession.refresh();
+            const progressMessages = formatSpawnAgentsProgress(event);
+            for (const progressText of progressMessages) {
+              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+            }
+            if (progressMessages.length > 0) await typingSession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2693,10 +2718,11 @@ async function handleAiChat(
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
-            const progressText = formatSpawnAgentsProgress(event);
-            if (!progressText) return;
-            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
-            await typingSession.refresh();
+            const progressMessages = formatSpawnAgentsProgress(event);
+            for (const progressText of progressMessages) {
+              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+            }
+            if (progressMessages.length > 0) await typingSession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2706,6 +2732,9 @@ async function handleAiChat(
       if (["task_list", "task_status", "task_cancel"].includes(name)) {
         result = executeAgentTaskTool(name, args, { jid: remoteJid, tasks: taskRuntime });
         toolResults.push({ name, result });
+        if (name === "task_cancel" && result.startsWith("✅")) {
+          runController.abort(new Error("user-cancelled-current-operation"));
+        }
         return result;
       }
 
@@ -2761,6 +2790,7 @@ async function handleAiChat(
         maxRounds: 64,
         maxTokens: 4096,
         truncationRecoveryAttempts: 1,
+        signal: runController.signal,
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
@@ -2768,6 +2798,10 @@ async function handleAiChat(
         },
       },
     );
+
+    if (runController.signal.aborted) {
+      throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
+    }
 
     const latestUsefulToolResult = [...toolResults]
       .reverse()
@@ -2805,6 +2839,17 @@ async function handleAiChat(
       cm.clearConversation(remoteJid);
     }
   } catch (err: unknown) {
+    if (runController.signal.aborted) {
+      // La confirmación de !cancelar ya fue enviada por el manejador del comando.
+      // Cerramos la solicitud original dentro del historial para que un mensaje
+      // posterior no haga que el modelo retome la misión cancelada.
+      cm.addMessage(remoteJid, {
+        role: "assistant",
+        content: "[Operación cancelada explícitamente por el usuario. No reanudar, reintentar ni lanzar tareas de seguimiento para esta solicitud salvo que el usuario la pida nuevamente.]",
+      });
+      return;
+    }
+
     const errorMsg =
       err instanceof Error ? err.message : "Error desconocido";
     if (err instanceof LlmRetriesExhaustedError) {
@@ -2873,6 +2918,7 @@ async function handleAiChat(
           : "❌ No pude procesar tu mensaje en este momento. Intenta de nuevo.",
     );
   } finally {
+    if (activeAiRuns.get(remoteJid) === runController) activeAiRuns.delete(remoteJid);
     await typingSession.stop();
   }
 

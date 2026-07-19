@@ -76,3 +76,15 @@ describe("TaskRuntime", () => {
     expect(runtime.get("user", created.record.id)?.status).toBe("cancelled");
   });
 });
+
+it("TaskRuntime.cancelAll cancela todas las tareas activas del usuario", () => {
+  const { workspace } = createWorkspace();
+  const runtime = new TaskRuntime(workspace);
+  const one = runtime.create("cancel-user", "tarea uno", 1);
+  const two = runtime.create("cancel-user", "tarea dos", 1);
+  runtime.update("cancel-user", two.record.id, { status: "synthesizing" });
+
+  expect(runtime.cancelAll("cancel-user")).toBe(2);
+  expect(runtime.get("cancel-user", one.record.id)?.status).toBe("cancelled");
+  expect(runtime.get("cancel-user", two.record.id)?.status).toBe("cancelled");
+});

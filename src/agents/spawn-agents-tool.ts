@@ -222,7 +222,7 @@ export type SpawnAgentsProgress =
   | { type: "task_started"; taskId: string; total: number }
   | { type: "agent_started"; taskId: string; index: number; total: number; agentType: string; prompt: string }
   | { type: "agent_completed"; taskId: string; index: number; total: number; agentType: string; status: SpawnAgentReport["status"] }
-  | { type: "task_completed"; taskId: string; status: "completed" | "partial" | "failed" };
+  | { type: "task_completed"; taskId: string; status: "completed" | "partial" | "failed" | "cancelled" };
 
 export type SpawnAgentsProgressHandler = (event: SpawnAgentsProgress) => void | Promise<void>;
 
@@ -354,58 +354,67 @@ export async function executeSpawnAgentsTool(
         index,
         total: uniqueAgents.length,
         agentType: definition.id,
-        prompt: agentPrompt,
+        // El progreso de WhatsApp muestra la instrucción completa solicitada al
+        // subagente, pero no los bloques internos que contienen credential_ref.
+        prompt: request.prompt ?? "",
       });
 
-      const report = await (dependencies.agentRunner ?? runAgent)({
-        definition,
-        prompt: agentPrompt,
-        model: dependencies.model,
-        llmConfig: dependencies.llmConfig,
-        agentConfig: dependencies.agentConfig,
-        runId,
-        parentRunId: task.record.id,
-        parentSignal: task.signal,
-        browserExecution: definition.id === "browser-web" && dependencies.browserCredentials
-          ? new BrowserAgentExecution({
-              jid: dependencies.jid,
-              runId,
-              taskId: task.record.id,
-              agentDir,
-              workspace: dependencies.workspace,
-              credentials: dependencies.browserCredentials,
-              resumePrompt: dependencies.resumePrompt ?? request.prompt ?? "",
-              onUserInputRequest: async (input) => {
-                const secret = input.kind === "password" || input.kind === "otp";
-                const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
-                const lines = [
-                  heading,
-                  "",
-                  secret
-                    ? `Este es el mensaje seguro del sistema: envía ahora ${input.fieldName} para continuar.`
-                    : (input.message || `La tarea necesita ${input.fieldName} para continuar.`),
-                ];
-                if (input.url) lines.push(`Sitio: ${input.url}`);
-                if (input.username) lines.push(`Cuenta: ${input.username}`);
-                lines.push(
-                  "",
-                  secret
-                    ? "El agente de navegador está pausado y mantiene la misma sesión abierta. El agente no verá el valor: tu respuesta se capturará fuera del modelo y se inyectará únicamente en esta misma tarea. Al responder, continuará desde la página actual sin crear otro subagente."
-                    : "El agente de navegador está pausado y mantiene la misma sesión abierta. Responde con el dato solicitado y esta misma tarea continuará desde la página actual.",
-                );
-                await dependencies.onSystemMessage?.(lines.join("\n"));
-              },
-            })
-          : undefined,
-        onEvent: async (event) => {
-          events.push(event);
-          dependencies.workspace.writeText(
-            dependencies.jid,
-            `${agentDir}/events.jsonl`,
-            `${events.map((item) => JSON.stringify(item)).join("\n")}\n`,
-          );
-        },
-      });
+      const browserExecution = definition.id === "browser-web" && dependencies.browserCredentials
+        ? new BrowserAgentExecution({
+            jid: dependencies.jid,
+            runId,
+            taskId: task.record.id,
+            agentDir,
+            workspace: dependencies.workspace,
+            credentials: dependencies.browserCredentials,
+            resumePrompt: dependencies.resumePrompt ?? request.prompt ?? "",
+            onUserInputRequest: async (input) => {
+              const secret = input.kind === "password" || input.kind === "otp";
+              const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
+              const lines = [
+                heading,
+                "",
+                secret
+                  ? `Este es el mensaje seguro del sistema: envía ahora ${input.fieldName} para continuar.`
+                  : (input.message || `La tarea necesita ${input.fieldName} para continuar.`),
+              ];
+              if (input.url) lines.push(`Sitio: ${input.url}`);
+              if (input.username) lines.push(`Cuenta: ${input.username}`);
+              lines.push(
+                "",
+                secret
+                  ? "El agente de navegador está pausado y mantiene la misma sesión abierta. El agente no verá el valor: tu respuesta se capturará fuera del modelo y se inyectará únicamente en esta misma tarea. Al responder, continuará desde la página actual sin crear otro subagente."
+                  : "El agente de navegador está pausado y mantiene la misma sesión abierta. Responde con el dato solicitado y esta misma tarea continuará desde la página actual.",
+              );
+              await dependencies.onSystemMessage?.(lines.join("\n"));
+            },
+          })
+        : undefined;
+
+      let report: SpawnAgentReport;
+      try {
+        report = await (dependencies.agentRunner ?? runAgent)({
+          definition,
+          prompt: agentPrompt,
+          model: dependencies.model,
+          llmConfig: dependencies.llmConfig,
+          agentConfig: dependencies.agentConfig,
+          runId,
+          parentRunId: task.record.id,
+          parentSignal: task.signal,
+          browserExecution,
+          onEvent: async (event) => {
+            events.push(event);
+            dependencies.workspace.writeText(
+              dependencies.jid,
+              `${agentDir}/events.jsonl`,
+              `${events.map((item) => JSON.stringify(item)).join("\n")}\n`,
+            );
+          },
+        });
+      } finally {
+        if (browserExecution) await browserExecution.finalize();
+      }
 
       const fullResult = report.result ?? "";
       dependencies.workspace.writeText(
@@ -451,12 +460,15 @@ export async function executeSpawnAgentsTool(
 
     const reports = originalToUniqueIndex.map((uniqueIndex) => uniqueReports[uniqueIndex]).filter((item): item is SpawnAgentReport => Boolean(item));
     const completedCount = uniqueReports.filter((report) => report.status === "completed").length;
-    const failedCount = uniqueReports.length - completedCount;
-    const status = completedCount === uniqueReports.length
-      ? "completed"
-      : completedCount > 0
-        ? "partial"
-        : "failed";
+    const cancelledCount = uniqueReports.filter((report) => report.status === "cancelled").length;
+    const failedCount = uniqueReports.filter((report) => report.status === "failed").length;
+    const status: "completed" | "partial" | "failed" | "cancelled" = task.signal.aborted
+      ? "cancelled"
+      : completedCount === uniqueReports.length
+        ? "completed"
+        : completedCount > 0
+          ? "partial"
+          : "failed";
 
     dependencies.workspace.writeText(dependencies.jid, `${taskBase}/result.json`, `${JSON.stringify({
       taskId: task.record.id,
@@ -466,15 +478,24 @@ export async function executeSpawnAgentsTool(
     dependencies.tasks.update(dependencies.jid, task.record.id, {
       status,
       completedWorkers: uniqueReports.length,
-      error: failedCount > 0 ? `${failedCount} subagente(s) no completaron la tarea.` : undefined,
+      error: status === "cancelled"
+        ? "Cancelada por el usuario."
+        : failedCount > 0
+          ? `${failedCount} subagente(s) no completaron la tarea.`
+          : undefined,
     });
     await emit(dependencies.onProgress, { type: "task_completed", taskId: task.record.id, status });
-    debugInfo("agents.spawn", "task_completed", {
+    debugInfo("agents.spawn", status === "cancelled" ? "task_cancelled" : "task_completed", {
       taskId: task.record.id,
       status,
       completed: completedCount,
       failed: failedCount,
+      cancelled: cancelledCount,
     });
+
+    if (status === "cancelled") {
+      return `Error: la tarea ${task.record.id} fue cancelada por el usuario. No continúes, no reintentes y no lances otra tarea para completar la solicitud cancelada.`;
+    }
 
     const resultBudget = parentReportBudget(reports.length);
     return JSON.stringify({
@@ -532,11 +553,8 @@ export async function executeBrowserWebTool(
   const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return "Error: prompt es obligatorio.";
   const credentialRef = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
-  const safePrompt = credentialRef
-    ? `${prompt}\n\n[SISTEMA: Usa credential_ref=${credentialRef} únicamente con browser_auth_login. La contraseña no está disponible para el LLM y nunca debes pedirla ni repetirla.]`
-    : prompt;
   const raw = await executeSpawnAgentsTool(
-    { title: `Navegación web: ${prompt.slice(0, 70)}`, agents: [{ agent_type: "browser-web", prompt: safePrompt, params: credentialRef ? { credential_ref: credentialRef } : undefined }] },
+    { title: `Navegación web: ${prompt.slice(0, 70)}`, agents: [{ agent_type: "browser-web", prompt, params: credentialRef ? { credential_ref: credentialRef } : undefined }] },
     dependencies,
   );
   if (raw.startsWith("Error:")) return raw;

@@ -89,6 +89,18 @@ export class TaskRuntime {
     return this.load(jid).tasks.find((item) => item.id === taskId);
   }
 
+
+  cancelAll(jid: string): number {
+    const records = this.load(jid).tasks.filter((item) => item.status === "running" || item.status === "synthesizing");
+    let cancelled = 0;
+    for (const target of records) {
+      const controller = this.active.get(`${jid}:${target.id}`);
+      controller?.abort(new Error("task-cancelled"));
+      this.update(jid, target.id, { status: "cancelled", error: "Cancelada por el usuario." });
+      cancelled += 1;
+    }
+    return cancelled;
+  }
   cancel(jid: string, taskId?: string): boolean {
     const records = this.list(jid);
     const target = taskId ? records.find((item) => item.id === taskId) : records.find((item) => item.status === "running" || item.status === "synthesizing");

@@ -108,12 +108,35 @@ function extractCurrentUrl(output: string): string | undefined {
   return output.match(/https?:\/\/[^\s"}]+/i)?.[0];
 }
 
+const browserProfileQueues = new Map<string, Promise<void>>();
+
+async function acquireBrowserProfileLease(key: string): Promise<() => void> {
+  const previous = browserProfileQueues.get(key) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => { releaseCurrent = resolve; });
+  const tail = previous.then(() => current);
+  browserProfileQueues.set(key, tail);
+  await previous;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseCurrent();
+    if (browserProfileQueues.get(key) === tail) browserProfileQueues.delete(key);
+  };
+}
+
 export class BrowserAgentExecution {
   private readonly sessionBase: string;
   private session: string;
   private readonly restoreName: string;
   private readonly binary: string;
   private readonly runtimeCwd: string;
+  private readonly persistentHome: string;
+  private readonly profileDir: string;
+  private readonly stateFile: string;
+  private readonly profileLease: Promise<() => void>;
+  private releaseProfileLease?: () => void;
   private recoveryCounter = 0;
   private screenshotCounter = 0;
   private downloadCounter = 0;
@@ -128,7 +151,14 @@ export class BrowserAgentExecution {
     this.restoreName = `luna-${userState}`;
     this.binary = resolveAgentBrowserBinary();
     this.runtimeCwd = join(getAppDir(), "persistent", "browser", "runtime");
+    this.persistentHome = join(getAppDir(), "persistent", "browser", "users", userState, "home");
+    this.profileDir = join(getAppDir(), "persistent", "browser", "users", userState, "profile");
+    this.stateFile = join(getAppDir(), "persistent", "browser", "users", userState, "session-state.json");
     mkdirSync(this.runtimeCwd, { recursive: true });
+    mkdirSync(this.persistentHome, { recursive: true });
+    mkdirSync(this.profileDir, { recursive: true });
+    mkdirSync(dirname(this.stateFile), { recursive: true });
+    this.profileLease = acquireBrowserProfileLease(userState);
   }
 
   private env(): Record<string, string> {
@@ -145,13 +175,27 @@ export class BrowserAgentExecution {
     return {
       ...process.env,
       AGENT_BROWSER_SESSION: this.session,
+      // `session-name` mantiene cookies/localStorage entre reinicios del daemon.
+      // Además usamos un state file explícito dentro de persistent/ para que la
+      // sesión autenticada sobreviva a reinicios de Luna, Docker y cambios de cwd.
       AGENT_BROWSER_SESSION_NAME: this.restoreName,
+      AGENT_BROWSER_NAMESPACE: `luna-${stableHash(this.options.jid)}`,
+      AGENT_BROWSER_PROFILE: this.profileDir,
+      ...(existsSync(this.stateFile) ? { AGENT_BROWSER_STATE: this.stateFile } : {}),
       AGENT_BROWSER_CONTENT_BOUNDARIES: "true",
       AGENT_BROWSER_MAX_OUTPUT: "50000",
       // Debe quedar por debajo del timeout IPC del CLI (30 s). Así el daemon
       // devuelve un error controlado antes de que el cliente quede esperando.
       AGENT_BROWSER_DEFAULT_TIMEOUT: process.env.AGENT_BROWSER_DEFAULT_TIMEOUT?.trim() || "20000",
       AGENT_BROWSER_ENCRYPTION_KEY: encryptionKey(),
+      // agent-browser guarda por defecto sus sesiones bajo el home del proceso.
+      // Lo redirigimos al árbol persistente de Luna para no depender del usuario
+      // del host ni perder cookies al recrear un contenedor.
+      HOME: this.persistentHome,
+      USERPROFILE: this.persistentHome,
+      XDG_CACHE_HOME: join(this.persistentHome, ".cache"),
+      XDG_CONFIG_HOME: join(this.persistentHome, ".config"),
+      XDG_STATE_HOME: join(this.persistentHome, ".local", "state"),
       ...(browserExecutable ? { AGENT_BROWSER_EXECUTABLE_PATH: browserExecutable } : {}),
     } as Record<string, string>;
   }
@@ -162,6 +206,7 @@ export class BrowserAgentExecution {
     stdinText?: string,
     timeoutMs: number = BROWSER_COMMAND_TIMEOUT_MS.action,
   ): Promise<string> {
+    if (!this.releaseProfileLease) this.releaseProfileLease = await this.profileLease;
     if (signal.aborted) throw signal.reason ?? new Error("browser-cancelled");
 
     const command = args.slice(0, 2).join(" ") || "unknown";
@@ -343,6 +388,44 @@ export class BrowserAgentExecution {
     const absolute = this.options.workspace.resolvePath(this.options.jid, rel);
     mkdirSync(dirname(absolute), { recursive: true });
     return { absolute, relative: rel };
+  }
+
+  /**
+   * Persiste el estado autenticado y cierra únicamente la instancia de esta
+   * ejecución. Se llama desde el runtime del subagente incluso si la misión
+   * falla o es cancelada. El state file queda cifrado por agent-browser usando
+   * AGENT_BROWSER_ENCRYPTION_KEY y se vuelve a cargar en la siguiente tarea.
+   */
+  async finalize(): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("browser-finalize-timeout")), 20_000);
+    try {
+      try {
+        await this.run(["state", "save", this.stateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+        debugInfo("browser.runtime", "persistent_state_saved", {
+          runId: this.options.runId,
+          session: this.session,
+          stateFile: this.stateFile,
+        });
+      } catch (error) {
+        debugWarn("browser.runtime", "persistent_state_save_failed", {
+          runId: this.options.runId,
+          session: this.session,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        await this.run(["close"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+      } catch {
+        // Best effort: una sesión ya cerrada no debe convertir una tarea exitosa
+        // en fallida. El state save anterior es lo importante.
+      }
+    } finally {
+      clearTimeout(timer);
+      this.releaseProfileLease?.();
+      this.releaseProfileLease = undefined;
+    }
   }
 
   async executeTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
