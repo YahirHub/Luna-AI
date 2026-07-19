@@ -1,4 +1,4 @@
-﻿# 58 — Extracción determinista de precios y bloqueo de PDF vacío
+# 58 — Extracción determinista de precios y bloqueo de PDF vacío
 
 # Fecha
 

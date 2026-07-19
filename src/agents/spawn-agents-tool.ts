@@ -114,7 +114,7 @@ export const BROWSER_CREDENTIAL_REQUEST_TOOL: ToolDefinition = {
   type: "function",
   function: {
     name: "browser_request_credential",
-    description: "Solicita al sistema capturar una contraseña de navegador fuera del LLM. Úsala en vez de pedir la contraseña directamente al usuario. El sistema enviará un mensaje claramente marcado como MENSAJE DEL SISTEMA y luego reanudará prompt con una credential_ref segura.",
+    description: "Solicita al sistema capturar una contraseña de navegador fuera del LLM antes de iniciar una navegación. Úsala principalmente cuando el usuario quiera configurar una credencial por adelantado. Para una tarea browser_agent ya iniciada, deja que browser-web use browser_request_user_input para pausar y reanudar la misma sesión sin crear otra tarea.",
     parameters: {
       type: "object",
       properties: {
@@ -127,6 +127,53 @@ export const BROWSER_CREDENTIAL_REQUEST_TOOL: ToolDefinition = {
     },
   },
 };
+
+export const BROWSER_CREDENTIAL_CONTROL_TOOLS: ToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "browser_credentials_list",
+      description: "Lista las cuentas de navegador guardadas por el sistema para el usuario actual. Devuelve URL, correo/usuario y una referencia opaca, nunca contraseñas. Soporta varias cuentas por sitio.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          username: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_credentials_save",
+      description: "Guarda o reemplaza de forma cifrada una credencial temporal browser-cred-* que el sistema ya capturó fuera del LLM. Úsala cuando el usuario pida configurar/guardar credenciales sin necesidad de navegar.",
+      parameters: {
+        type: "object",
+        properties: {
+          credential_ref: { type: "string" },
+          label: { type: "string" },
+        },
+        required: ["credential_ref"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_credentials_delete",
+      description: "Elimina un perfil de credenciales de navegador guardado para el usuario actual.",
+      parameters: {
+        type: "object",
+        properties: { credential_ref: { type: "string" } },
+        required: ["credential_ref"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
 
 export const AGENT_TASK_TOOLS: ToolDefinition[] = [
   {
@@ -166,7 +213,7 @@ export const AGENT_TASK_TOOLS: ToolDefinition[] = [
 ];
 
 export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
-  const tools: ToolDefinition[] = [SPAWN_AGENTS_TOOL, BROWSER_WEB_DIRECT_TOOL, BROWSER_CREDENTIAL_REQUEST_TOOL];
+  const tools: ToolDefinition[] = [SPAWN_AGENTS_TOOL, BROWSER_WEB_DIRECT_TOOL, BROWSER_CREDENTIAL_REQUEST_TOOL, ...BROWSER_CREDENTIAL_CONTROL_TOOLS];
   if (config.webSearchEnabled && config.researchSubagentEnabled) tools.push(RESEARCHER_WEB_DIRECT_TOOL);
   return [...tools, ...AGENT_TASK_TOOLS];
 }
@@ -191,6 +238,10 @@ export interface SpawnAgentsDependencies {
   /** Permite deduplicar llamadas equivalentes emitidas por el mismo mensaje del modelo. */
   filterRequests?: (agents: SpawnAgentRequest[]) => SpawnAgentRequest[];
   browserCredentials?: BrowserCredentialStore;
+  /** Texto original del usuario, usado para reanudar una tarea después de pedir un dato humano. */
+  resumePrompt?: string;
+  /** Permite al subagente pedir datos al usuario mediante un mensaje de sistema. */
+  onSystemMessage?: (text: string) => void | Promise<void>;
 }
 
 function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
@@ -323,6 +374,27 @@ export async function executeSpawnAgentsTool(
               agentDir,
               workspace: dependencies.workspace,
               credentials: dependencies.browserCredentials,
+              resumePrompt: dependencies.resumePrompt ?? request.prompt ?? "",
+              onUserInputRequest: async (input) => {
+                const secret = input.kind === "password" || input.kind === "otp";
+                const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
+                const lines = [
+                  heading,
+                  "",
+                  secret
+                    ? `Este es el mensaje seguro del sistema: envía ahora ${input.fieldName} para continuar.`
+                    : (input.message || `La tarea necesita ${input.fieldName} para continuar.`),
+                ];
+                if (input.url) lines.push(`Sitio: ${input.url}`);
+                if (input.username) lines.push(`Cuenta: ${input.username}`);
+                lines.push(
+                  "",
+                  secret
+                    ? "El agente de navegador está pausado y mantiene la misma sesión abierta. El agente no verá el valor: tu respuesta se capturará fuera del modelo y se inyectará únicamente en esta misma tarea. Al responder, continuará desde la página actual sin crear otro subagente."
+                    : "El agente de navegador está pausado y mantiene la misma sesión abierta. Responde con el dato solicitado y esta misma tarea continuará desde la página actual.",
+                );
+                await dependencies.onSystemMessage?.(lines.join("\n"));
+              },
             })
           : undefined,
         onEvent: async (event) => {
@@ -476,6 +548,55 @@ export async function executeBrowserWebTool(
   } catch {
     return raw;
   }
+}
+
+export function executeBrowserCredentialControlTool(
+  name: string,
+  args: Record<string, unknown>,
+  dependencies: Pick<SpawnAgentsDependencies, "jid" | "browserCredentials">,
+): string {
+  const store = dependencies.browserCredentials;
+  if (!store) return "Error: el almacén de credenciales del navegador no está disponible.";
+
+  if (name === "browser_credentials_list") {
+    const url = typeof args.url === "string" ? args.url.trim() : "";
+    const username = typeof args.username === "string" ? args.username.trim() : "";
+    const profiles = store.listProfiles(dependencies.jid, url || undefined, username || undefined);
+    if (profiles.length === 0) return "No hay credenciales de navegador guardadas que coincidan.";
+    return JSON.stringify(profiles.map((profile) => ({
+      credential_ref: profile.ref,
+      url: profile.url,
+      username: profile.username,
+      label: profile.label,
+      last_used_at: profile.lastUsedAt,
+    })), null, 2);
+  }
+
+  const ref = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
+  if (!ref) return "Error: credential_ref es obligatorio.";
+
+  if (name === "browser_credentials_save") {
+    const label = typeof args.label === "string" ? args.label.trim() : "";
+    const profile = store.saveProfileFromTemporary(ref, dependencies.jid, label || undefined);
+    if (!profile) return "Error: la credencial temporal no existe, expiró o pertenece a otro usuario.";
+    store.delete(ref);
+    return JSON.stringify({
+      ok: true,
+      credential_ref: profile.ref,
+      url: profile.url,
+      username: profile.username,
+      label: profile.label,
+      message: "Credencial guardada de forma cifrada. Podrá reutilizarse cuando expire la sesión web.",
+    }, null, 2);
+  }
+
+  if (name === "browser_credentials_delete") {
+    return store.deleteProfile(ref, dependencies.jid)
+      ? "✅ Credencial de navegador eliminada."
+      : "Error: no existe esa credencial o pertenece a otro usuario.";
+  }
+
+  return `Error: herramienta de credenciales desconocida "${name}".`;
 }
 
 export function executeAgentTaskTool(

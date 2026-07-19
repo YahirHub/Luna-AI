@@ -4,6 +4,7 @@ import {
   extractBrowserLoginIntent,
   sanitizeBrowserCredentialText,
 } from "../src/browser/browser-credentials.ts";
+import { executeBrowserCredentialControlTool } from "../src/agents/spawn-agents-tool.ts";
 
 describe("credenciales seguras del navegador", () => {
   it("extrae login natural con dominio, usuario y contraseña", () => {
@@ -58,4 +59,151 @@ describe("credenciales seguras del navegador", () => {
     store.clearPending("a@lid");
     expect(store.getPending("a@lid")).toBeUndefined();
   });
+});
+
+it("guarda perfiles cifrados persistentes y soporta varias cuentas por sitio", async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const baseDir = mkdtempSync(join(tmpdir(), "luna-browser-credentials-"));
+  try {
+    const store = new BrowserCredentialStore({ persistent: true, baseDir });
+    const first = store.saveProfile({
+      jid: "owner@lid",
+      url: "https://novalink.us.kg/login",
+      username: "meme@gmail.com",
+      password: "secreto-uno",
+    });
+    const second = store.saveProfile({
+      jid: "owner@lid",
+      url: "https://novalink.us.kg/login",
+      username: "otro@gmail.com",
+      password: "secreto-dos",
+    });
+    expect(store.listProfiles("owner@lid", "https://novalink.us.kg").length).toBe(2);
+    expect(store.resolve(first.ref, "owner@lid")?.password).toBe("secreto-uno");
+    expect(store.resolve(second.ref, "owner@lid")?.password).toBe("secreto-dos");
+    expect(store.resolve(first.ref, "intruso@lid")).toBeUndefined();
+
+    const persisted = readFileSync(join(baseDir, "credential-profiles.json"), "utf8");
+    expect(persisted).not.toContain("secreto-uno");
+    expect(persisted).not.toContain("secreto-dos");
+    expect(persisted).toContain("encryptedPassword");
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+it("reemplaza la contraseña cifrada de la misma cuenta sin duplicar el perfil", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const baseDir = mkdtempSync(join(tmpdir(), "luna-browser-update-"));
+  try {
+    const store = new BrowserCredentialStore({ persistent: true, baseDir });
+    const original = store.saveProfile({ jid: "a@lid", url: "https://site.test", username: "a@test.com", password: "old" });
+    const updated = store.saveProfile({ jid: "a@lid", url: "https://site.test/login", username: "a@test.com", password: "new" });
+    expect(updated.ref).toBe(original.ref);
+    expect(store.listProfiles("a@lid", "https://site.test").length).toBe(1);
+    expect(store.resolve(original.ref, "a@lid")?.password).toBe("new");
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+it("maneja solicitudes genéricas de datos y secretos temporales fuera del LLM", () => {
+  const store = new BrowserCredentialStore();
+  store.setPendingInput({
+    jid: "a@lid",
+    kind: "otp",
+    fieldName: "código de verificación",
+    originalText: "entra al panel",
+    url: "https://site.test",
+  });
+  expect(store.getPendingInput("a@lid")?.kind).toBe("otp");
+  const secret = store.createSecret({ jid: "a@lid", kind: "otp", value: "123456" });
+  expect(store.getSecret(secret.ref, "a@lid")?.value).toBe("123456");
+  expect(store.getSecret(secret.ref, "otro@lid")).toBeUndefined();
+  expect(store.getSecret(secret.ref, "a@lid", true)?.value).toBe("123456");
+  expect(store.getSecret(secret.ref, "a@lid")).toBeUndefined();
+});
+
+
+it("permite guardar, listar y eliminar credenciales desde las tools del agente principal", () => {
+  const store = new BrowserCredentialStore();
+  const temp = store.create({
+    jid: "owner@lid",
+    url: "https://novalink.us.kg",
+    username: "meme@gmail.com",
+    password: "patito123",
+  });
+  const savedRaw = executeBrowserCredentialControlTool("browser_credentials_save", { credential_ref: temp.ref }, {
+    jid: "owner@lid",
+    browserCredentials: store,
+  });
+  const saved = JSON.parse(savedRaw) as { credential_ref: string };
+  expect(saved.credential_ref).toStartWith("browser-profile-");
+  expect(store.get(temp.ref, "owner@lid")).toBeUndefined();
+
+  const listed = executeBrowserCredentialControlTool("browser_credentials_list", { url: "https://novalink.us.kg" }, {
+    jid: "owner@lid",
+    browserCredentials: store,
+  });
+  expect(listed).toContain("meme@gmail.com");
+  expect(listed).not.toContain("patito123");
+
+  const removed = executeBrowserCredentialControlTool("browser_credentials_delete", { credential_ref: saved.credential_ref }, {
+    jid: "owner@lid",
+    browserCredentials: store,
+  });
+  expect(removed).toContain("eliminada");
+});
+
+it("pausa y reanuda una espera viva del navegador sin crear otra tarea", async () => {
+  const store = new BrowserCredentialStore();
+  const controller = new AbortController();
+  const waiting = store.waitForInput({
+    jid: "owner@lid",
+    kind: "password",
+    fieldName: "contraseña",
+    originalText: "entra al dashboard",
+    url: "https://novalink.us.kg",
+    username: "meme@gmail.com",
+  }, controller.signal);
+
+  const pending = store.getPendingInput("owner@lid");
+  expect(pending?.requestId).toStartWith("browser-input-");
+
+  const credential = store.create({
+    jid: "owner@lid",
+    url: "https://novalink.us.kg",
+    username: "meme@gmail.com",
+    password: "Pepe_123!",
+  });
+  expect(store.resolvePendingInput("owner@lid", {
+    kind: "password",
+    credentialRef: credential.ref,
+    url: credential.url,
+    username: credential.username,
+  })).toBe(true);
+
+  const resolution = await waiting;
+  expect(resolution.kind).toBe("password");
+  if (resolution.kind === "password") {
+    expect(resolution.credentialRef).toBe(credential.ref);
+  }
+  expect(store.getPendingInput("owner@lid")).toBeUndefined();
+});
+
+it("permite cancelar una espera viva del navegador", async () => {
+  const store = new BrowserCredentialStore();
+  const waiting = store.waitForInput({
+    jid: "owner@lid",
+    kind: "username",
+    fieldName: "correo",
+    originalText: "entra al dashboard",
+  });
+  expect(store.cancelPendingInput("owner@lid", new Error("cancelado"))).toBe(true);
+  await expect(waiting).rejects.toThrow("cancelado");
+  expect(store.getPendingInput("owner@lid")).toBeUndefined();
 });

@@ -1,4 +1,4 @@
-﻿# 56 — Workdir, subagentes paralelos y artefactos
+# 56 — Workdir, subagentes paralelos y artefactos
 
 # Fecha
 

@@ -128,6 +128,7 @@ import {
 import {
   executeAgentTaskTool,
   executeBrowserWebTool,
+  executeBrowserCredentialControlTool,
   executeResearcherWebTool,
   executeSpawnAgentsTool,
   getMainAgentTools,
@@ -678,9 +679,9 @@ function buildHelpText(jid: string): string {
 }
 
 function cancelCurrentOperation(jid: string): string {
-  if (browserCredentialStore.getPending(jid)) {
-    browserCredentialStore.clearPending(jid);
-    return "✅ Captura segura de contraseña del navegador cancelada.";
+  if (browserCredentialStore.getPendingInput(jid)) {
+    browserCredentialStore.clearPendingInput(jid);
+    return "✅ Solicitud de datos del navegador cancelada.";
   }
   if (taskRuntime.cancel(jid)) return "✅ Tarea activa de subagentes cancelada.";
   if (providerSetupManager.has(jid)) {
@@ -1755,6 +1756,34 @@ function normalizeNaturalText(text: string): string {
     .trim();
 }
 
+/**
+ * Durante una espera segura del navegador, el mensaje completo no llega al LLM.
+ * Esta extracción conserva símbolos de contraseña como !@#$ y solo elimina una
+ * aclaración humana entre paréntesis escrita después del secreto.
+ */
+function extractPendingBrowserSecret(text: string): string {
+  let value = text.trim();
+  if (!value) return "";
+  const fenced = /^```(?:\w+)?\s*([\s\S]*?)\s*```$/u.exec(value);
+  if (fenced?.[1]) value = fenced[1].trim();
+  value = value.replace(/^[`"']+|[`"']+$/g, "").trim();
+
+  const labeled = /(?:contrase(?:ñ|n)a|password|codigo|código|otp)\s*(?:es|:|=)?\s*(.+)$/iu.exec(value);
+  if (labeled?.[1]) value = labeled[1].trim();
+
+  // Ejemplo: "Pepe_123! (la cambié por seguridad)" -> "Pepe_123!".
+  value = value.replace(/\s+\([^)]*\)\s*$/u, "").trim();
+  return value;
+}
+
+function extractPendingBrowserUsername(text: string): string {
+  const trimmed = text.trim();
+  const email = trimmed.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu)?.[0];
+  if (email) return email;
+  const labeled = /(?:correo|email|usuario|username|user)\s*(?:es|:|=)?\s*[`"']?([^\s,;`"']+)/iu.exec(trimmed)?.[1];
+  return (labeled ?? trimmed).trim();
+}
+
 function detectSearchProviderMention(text: string): SearchProviderId | null {
   const normalized = normalizeNaturalText(text);
   const aliases: Array<[RegExp, SearchProviderId]> = [
@@ -2015,39 +2044,171 @@ export async function handleMessage(
   // Una contraseña de un sitio web nunca se envía al LLM. Si viene en el
   // mismo mensaje se reemplaza por una referencia opaca; si falta, el sistema
   // la solicita directamente y reanuda la instrucción original al recibirla.
-  const pendingBrowserCredential = browserCredentialStore.getPending(remoteJid);
-  if (pendingBrowserCredential) {
+  const pendingBrowserInput = browserCredentialStore.getPendingInput(remoteJid);
+  if (pendingBrowserInput) {
     if (command && command.name === "cancelar") {
-      browserCredentialStore.clearPending(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Captura segura de contraseña cancelada.");
+      browserCredentialStore.cancelPendingInput(remoteJid, new Error("Solicitud cancelada por el usuario."));
+      await sendWithTyping(sock, remoteJid, "❌ Solicitud de datos del navegador cancelada.");
       return;
     }
+
     const normalizedPendingText = normalizeNaturalText(text);
     if (["continua", "continuar", "sigue", "seguir"].includes(normalizedPendingText)) {
-      await sendWithTyping(
+      const secret = pendingBrowserInput.kind === "password" || pendingBrowserInput.kind === "otp";
+      const targetLines = [
+        secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA",
+        "",
+        secret
+          ? `Este es el mensaje seguro del sistema: envía ahora ${pendingBrowserInput.fieldName}.`
+          : `La misma tarea del navegador está pausada esperando ${pendingBrowserInput.fieldName}.`,
+      ];
+      if (pendingBrowserInput.url) targetLines.push(`Sitio: ${pendingBrowserInput.url}`);
+      if (pendingBrowserInput.username) targetLines.push(`Cuenta: ${pendingBrowserInput.username}`);
+      targetLines.push(
+        "",
+        secret
+          ? "El agente no verá el valor. Tu respuesta se capturará fuera del modelo y se inyectará únicamente en la misma tarea del navegador, que continuará sin reiniciar la sesión."
+          : "Responde con el dato solicitado y la misma tarea continuará desde la página actual.",
+      );
+      await sendWithTyping(sock, remoteJid, targetLines.join("\n"));
+      return;
+    }
+
+    // Una espera creada por browser-web tiene requestId. En este caso NO se
+    // vuelve a invocar handleAiChat: resolvemos la Promise de la ejecución viva
+    // y el mismo subagente continúa con la misma sesión del navegador.
+    if (pendingBrowserInput.requestId) {
+      if (pendingBrowserInput.kind === "password") {
+        const password = extractPendingBrowserSecret(text);
+        if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
+          await sendWithTyping(sock, remoteJid, [
+            "🔐 MENSAJE DEL SISTEMA",
+            "",
+            "No pude asociar la contraseña con una cuenta concreta.",
+            "La tarea sigue pausada; primero debe conocerse el sitio y el correo/usuario.",
+          ].join("\n"));
+          return;
+        }
+        const credential = browserCredentialStore.create({
+          jid: remoteJid,
+          url: pendingBrowserInput.url,
+          username: pendingBrowserInput.username,
+          password,
+        });
+        await deleteSensitiveIncomingMessage(sock, message);
+        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
+          kind: "password",
+          credentialRef: credential.ref,
+          url: credential.url,
+          username: credential.username,
+        });
+        if (!resumed) {
+          browserCredentialStore.delete(credential.ref);
+          await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa. Vuelve a solicitar la navegación.");
+          return;
+        }
+        await sendWhatsAppMessage(sock, remoteJid, {
+          text: "🔐 MENSAJE DEL SISTEMA\n\nContraseña recibida de forma segura. La misma tarea del navegador continúa ahora desde la sesión que estaba abierta.",
+        }, { waitForDelivery: false });
+        return;
+      }
+
+      if (pendingBrowserInput.kind === "otp") {
+        const value = extractPendingBrowserSecret(text);
+        if (!value) {
+          await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el código solicitado. La misma tarea permanece pausada.");
+          return;
+        }
+        const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
+        await deleteSensitiveIncomingMessage(sock, message);
+        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: "otp", secretRef: secret.ref });
+        if (!resumed) {
+          browserCredentialStore.delete(secret.ref);
+          await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+          return;
+        }
+        await sendWhatsAppMessage(sock, remoteJid, {
+          text: "🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido de forma segura. La misma tarea del navegador continúa ahora.",
+        }, { waitForDelivery: false });
+        return;
+      }
+
+      const value = pendingBrowserInput.kind === "username"
+        ? extractPendingBrowserUsername(text)
+        : text.trim();
+      if (!value) {
+        await sendWithTyping(sock, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName}. La misma tarea permanece pausada.`);
+        return;
+      }
+      const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
+        kind: pendingBrowserInput.kind,
+        value,
+      });
+      if (!resumed) {
+        await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+        return;
+      }
+      await sendWhatsAppMessage(sock, remoteJid, {
+        text: `🧩 MENSAJE DEL SISTEMA\n\nDato recibido. La misma tarea del navegador continúa ahora desde la página actual.`,
+      }, { waitForDelivery: false });
+      return;
+    }
+
+    // Compatibilidad con el flujo del agente principal browser_request_credential:
+    // ese flujo todavía reinyecta la misión al orquestador porque aún no existe
+    // una ejecución browser-web viva que pueda reanudarse.
+    if (pendingBrowserInput.kind === "password") {
+      const password = extractPendingBrowserSecret(text);
+      if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
+        await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nNo pude asociar la contraseña con una cuenta concreta. Indica primero el sitio y el correo/usuario.");
+        return;
+      }
+      const credential = browserCredentialStore.create({
+        jid: remoteJid,
+        url: pendingBrowserInput.url,
+        username: pendingBrowserInput.username,
+        password,
+      });
+      browserCredentialStore.clearPendingInput(remoteJid);
+      await deleteSensitiveIncomingMessage(sock, message);
+      const resumedText = sanitizeBrowserCredentialText(pendingBrowserInput.originalText, credential);
+      await handleAiChat(sock, remoteJid, resumedText);
+      return;
+    }
+
+    if (pendingBrowserInput.kind === "otp") {
+      const value = extractPendingBrowserSecret(text);
+      if (!value) {
+        await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía el código o secreto solicitado para continuar.");
+        return;
+      }
+      const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
+      browserCredentialStore.clearPendingInput(remoteJid);
+      await deleteSensitiveIncomingMessage(sock, message);
+      await handleAiChat(
         sock,
         remoteJid,
-        "🔐 MENSAJE DEL SISTEMA\n\nLa tarea está esperando la contraseña. Por seguridad, el agente no debe saberla ni verla. Envía la contraseña en este mensaje de sistema; será capturada fuera del modelo y el mensaje se intentará borrar después.",
+        `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario respondió al dato secreto ${pendingBrowserInput.fieldName}. El valor fue retirado antes del LLM. Usa secret_ref=${secret.ref} únicamente con browser_fill_secret. Nunca pidas, repitas ni muestres el valor.]`,
       );
       return;
     }
-    const password = extractSecretTokenFromMessage(text).trim();
-    if (password.length < 1) {
-      await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía la contraseña para continuar. El agente no tendrá acceso a ella.");
+
+    const value = pendingBrowserInput.kind === "username"
+      ? extractPendingBrowserUsername(text)
+      : text.trim();
+    if (!value) {
+      await sendWithTyping(sock, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName} para continuar.`);
       return;
     }
-    const credential = browserCredentialStore.create({
-      jid: remoteJid,
-      url: pendingBrowserCredential.url,
-      username: pendingBrowserCredential.username,
-      password,
-    });
-    browserCredentialStore.clearPending(remoteJid);
-    await deleteSensitiveIncomingMessage(sock, message);
-    const resumedText = sanitizeBrowserCredentialText(pendingBrowserCredential.originalText, credential);
-    await handleAiChat(sock, remoteJid, resumedText);
+    browserCredentialStore.clearPendingInput(remoteJid);
+    await handleAiChat(
+      sock,
+      remoteJid,
+      `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario proporcionó ${pendingBrowserInput.fieldName}: ${value}. Usa este dato únicamente para continuar la tarea solicitada.]`,
+    );
     return;
   }
+
 
   if (authManager.isLoggedIn(remoteJid)) {
     // Preprocesamiento EXCLUSIVAMENTE de seguridad. Detectar una URL, localhost,
@@ -2440,6 +2601,11 @@ async function handleAiChat(
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
+          resumePrompt: userText,
+          onSystemMessage: async (text) => {
+            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
+            await typingSession.refresh();
+          },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);
@@ -2461,6 +2627,11 @@ async function handleAiChat(
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
+          resumePrompt: userText,
+          onSystemMessage: async (text) => {
+            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
+            await typingSession.refresh();
+          },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);
@@ -2468,6 +2639,15 @@ async function handleAiChat(
             await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             await typingSession.refresh();
           },
+        });
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (["browser_credentials_list", "browser_credentials_save", "browser_credentials_delete"].includes(name)) {
+        result = executeBrowserCredentialControlTool(name, args, {
+          jid: remoteJid,
+          browserCredentials: browserCredentialStore,
         });
         toolResults.push({ name, result });
         return result;
@@ -2482,7 +2662,7 @@ async function handleAiChat(
           toolResults.push({ name, result });
           return result;
         }
-        browserCredentialStore.setPending({ jid: remoteJid, originalText: prompt, url, username });
+        browserCredentialStore.setPendingInput({ jid: remoteJid, kind: "password", fieldName: "contraseña", originalText: userText || prompt, url, username });
         await sendWhatsAppMessage(sock, remoteJid, {
           text: [
             "🔐 MENSAJE DEL SISTEMA",
@@ -2506,6 +2686,11 @@ async function handleAiChat(
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
+          resumePrompt: userText,
+          onSystemMessage: async (text) => {
+            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
+            await typingSession.refresh();
+          },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);

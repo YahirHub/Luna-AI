@@ -10,7 +10,7 @@ import {
   supportsManagedAgentBrowserChrome,
 } from "./browser-discovery.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
-import type { BrowserCredentialStore } from "./browser-credentials.ts";
+import type { BrowserCredentialStore, BrowserInputKind } from "./browser-credentials.ts";
 import { debugInfo, debugLog, debugWarn } from "../debug.ts";
 import { createProcessOutputCollector } from "./process-output.ts";
 
@@ -62,6 +62,16 @@ export interface BrowserExecutionOptions {
   agentDir: string;
   workspace: WorkspaceManager;
   credentials: BrowserCredentialStore;
+  /** Texto original del usuario que debe reanudarse si el subagente necesita un dato humano. */
+  resumePrompt?: string;
+  /** Canal de sistema para pedir datos sin hacer que el LLM formule o reciba secretos. */
+  onUserInputRequest?: (request: {
+    kind: BrowserInputKind;
+    fieldName: string;
+    url?: string;
+    username?: string;
+    message?: string;
+  }) => void | Promise<void>;
 }
 
 class BrowserCommandTimeoutError extends Error {
@@ -404,11 +414,180 @@ export class BrowserAgentExecution {
         this.options.workspace.registerArtifact(this.options.jid, file.relative, "browser-web", { taskId: this.options.taskId, temporary: false });
         return JSON.stringify({ ok: true, path: file.relative, kind: "download" });
       }
-      case "browser_auth_login": {
+      case "browser_auth_profiles": {
+        const url = typeof args.url === "string" ? args.url.trim() : "";
+        const username = typeof args.username === "string" ? args.username.trim() : "";
+        const profiles = this.options.credentials.listProfiles(this.options.jid, url || undefined, username || undefined);
+        return JSON.stringify({
+          profiles: profiles.map((profile) => ({
+            credential_ref: profile.ref,
+            url: profile.url,
+            origin: profile.origin,
+            username: profile.username,
+            label: profile.label,
+            last_used_at: profile.lastUsedAt,
+          })),
+          note: profiles.length === 0
+            ? "No hay credenciales guardadas que coincidan. Solicita el dato faltante con browser_request_user_input."
+            : "Estas referencias son seguras y no contienen contraseñas.",
+        }, null, 2);
+      }
+      case "browser_request_user_input": {
+        const kindRaw = typeof args.kind === "string" ? args.kind : "text";
+        const kind: BrowserInputKind = ["username", "password", "otp", "text"].includes(kindRaw)
+          ? kindRaw as BrowserInputKind
+          : "text";
+        const fieldName = typeof args.field_name === "string" ? args.field_name.trim() : "";
+        const url = typeof args.url === "string" ? args.url.trim() : "";
+        const username = typeof args.username === "string" ? args.username.trim() : "";
+        const message = typeof args.message === "string" ? args.message.trim() : "";
+        if (!fieldName) return "Error: field_name es obligatorio.";
+        if (kind === "password" && (!url || !username)) {
+          return "Error: para solicitar una contraseña debes indicar url y username. Si falta o quieres confirmar el usuario, solicítalo primero con kind=username.";
+        }
+
+        // Registrar la espera ANTES de emitir el mensaje evita una carrera si el
+        // usuario responde inmediatamente. La Promise mantiene viva esta misma
+        // ejecución de browser-web y, por tanto, la misma sesión de agent-browser.
+        const pending = this.options.credentials.waitForInput({
+          jid: this.options.jid,
+          kind,
+          fieldName,
+          originalText: this.options.resumePrompt || `Continúa la misión de navegador: ${message || fieldName}`,
+          url: url || undefined,
+          username: username || undefined,
+          message: message || undefined,
+        }, signal);
+
+        try {
+          await this.options.onUserInputRequest?.({
+            kind,
+            fieldName,
+            url: url || undefined,
+            username: username || undefined,
+            message: message || undefined,
+          });
+        } catch (error) {
+          this.options.credentials.cancelPendingInput(this.options.jid, error);
+          throw error;
+        }
+
+        debugInfo("browser.runtime", "waiting_for_user_input", {
+          runId: this.options.runId,
+          session: this.session,
+          kind,
+          fieldName,
+          url: url || undefined,
+          username: username || undefined,
+        });
+
+        const resolution = await pending;
+        debugInfo("browser.runtime", "user_input_resumed", {
+          runId: this.options.runId,
+          session: this.session,
+          kind: resolution.kind,
+        });
+
+        if (resolution.kind === "password") {
+          return JSON.stringify({
+            status: "received",
+            kind: "password",
+            credential_ref: resolution.credentialRef,
+            url: resolution.url,
+            username: resolution.username,
+            instruction: "La misma tarea y sesión del navegador continúan activas. Usa credential_ref con browser_auth_login y sigue desde la página actual.",
+          });
+        }
+        if (resolution.kind === "otp") {
+          return JSON.stringify({
+            status: "received",
+            kind: "otp",
+            secret_ref: resolution.secretRef,
+            instruction: "La misma tarea y sesión del navegador continúan activas. Usa secret_ref con browser_fill_secret en el campo correspondiente.",
+          });
+        }
+        return JSON.stringify({
+          status: "received",
+          kind: resolution.kind,
+          value: resolution.value,
+          instruction: "La misma tarea y sesión del navegador continúan activas. Usa el dato y sigue desde la página actual; no abras una nueva tarea.",
+        });
+      }
+      case "browser_fill_secret": {
+        const selector = typeof args.selector === "string" ? args.selector.trim() : "";
+        const secretRef = typeof args.secret_ref === "string" ? args.secret_ref.trim() : "";
+        const credentialRef = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
+        if (!selector || (!secretRef && !credentialRef)) {
+          return "Error: selector y una referencia secret_ref o credential_ref son obligatorios.";
+        }
+        if (secretRef && credentialRef) return "Error: usa solo secret_ref o credential_ref, no ambos.";
+
+        if (credentialRef) {
+          const credential = this.options.credentials.resolve(credentialRef, this.options.jid);
+          if (!credential) return "Error: la referencia de credencial no existe, expiró o pertenece a otro usuario.";
+          // Contraseña inyectada directamente al proceso del navegador. El valor no
+          // aparece en argumentos de tool, resultados, logs ni contexto del LLM.
+          return await this.run(["fill", selector, credential.password], signal);
+        }
+
+        const secret = this.options.credentials.getSecret(secretRef, this.options.jid, true);
+        if (!secret) return "Error: la referencia secreta no existe, expiró o pertenece a otro usuario.";
+        return await this.run(["fill", selector, secret.value], signal);
+      }
+      case "browser_auth_confirm": {
         const ref = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
-        const credential = this.options.credentials.get(ref, this.options.jid);
+        if (!ref) return "Error: credential_ref es obligatorio.";
+        const credential = this.options.credentials.resolve(ref, this.options.jid);
+        if (!credential) return "Error: la referencia de credencial no existe, expiró o pertenece a otro usuario.";
+
+        if (credential.source === "temporary") {
+          const saved = this.options.credentials.saveProfile({
+            jid: this.options.jid,
+            url: credential.url,
+            username: credential.username,
+            password: credential.password,
+          });
+          this.options.credentials.delete(credential.ref);
+          return JSON.stringify({
+            ok: true,
+            credential_profile_ref: saved.ref,
+            username: saved.username,
+            url: saved.url,
+            note: "Login manual confirmado. La contraseña quedó cifrada para futuras reautenticaciones.",
+          });
+        }
+
+        if (credential.profileRef) this.options.credentials.markProfileUsed(credential.profileRef, this.options.jid);
+        return JSON.stringify({
+          ok: true,
+          credential_profile_ref: credential.profileRef ?? credential.ref,
+          username: credential.username,
+          url: credential.url,
+          note: "Login manual confirmado con una credencial persistente existente.",
+        });
+      }
+      case "browser_auth_login": {
+        let ref = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
+        const requestedUrl = typeof args.url === "string" ? args.url.trim() : "";
+        const requestedUsername = typeof args.username === "string" ? args.username.trim() : "";
+
+        if (!ref && requestedUrl) {
+          const profiles = this.options.credentials.listProfiles(
+            this.options.jid,
+            requestedUrl,
+            requestedUsername || undefined,
+          );
+          if (profiles.length === 1) ref = profiles[0]!.ref;
+          else if (profiles.length > 1) {
+            return `Error: hay ${profiles.length} cuentas guardadas para ese sitio. Usa browser_auth_profiles y selecciona credential_ref según el usuario correcto.`;
+          } else {
+            return "Error: no hay una credencial guardada para esa cuenta. Usa browser_request_user_input para solicitar primero el usuario o la contraseña que falte.";
+          }
+        }
+
+        const credential = this.options.credentials.resolve(ref, this.options.jid);
         if (!credential) return "Error: la referencia de credencial segura no existe, expiró o pertenece a otro usuario.";
-        const profile = `luna-${stableHash(`${this.options.jid}:${credential.url}:${credential.username}`)}`;
+        const profile = `luna-temp-${stableHash(`${this.options.jid}:${credential.url}:${credential.username}:${this.options.runId}`)}`;
         await this.run([
           "auth", "save", profile,
           "--url", credential.url,
@@ -417,11 +596,31 @@ export class BrowserAgentExecution {
         ], signal, credential.password, BROWSER_COMMAND_TIMEOUT_MS.auth);
         try {
           const result = await this.run(["auth", "login", profile, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.auth);
-          this.options.credentials.delete(ref);
-          return result;
+          let savedProfileRef = credential.profileRef;
+          if (credential.source === "temporary") {
+            const saved = this.options.credentials.saveProfile({
+              jid: this.options.jid,
+              url: credential.url,
+              username: credential.username,
+              password: credential.password,
+            });
+            savedProfileRef = saved.ref;
+            this.options.credentials.delete(credential.ref);
+          } else if (credential.profileRef) {
+            this.options.credentials.markProfileUsed(credential.profileRef, this.options.jid);
+          }
+          return JSON.stringify({
+            ok: true,
+            login_result: result,
+            credential_profile_ref: savedProfileRef,
+            username: credential.username,
+            url: credential.url,
+            note: "La contraseña permaneció fuera del LLM. El perfil cifrado puede reutilizarse si la sesión web expira.",
+          });
         } finally {
-          // La contraseña solo vive el tiempo necesario para autenticar. La sesión
-          // cifrada conserva cookies/localStorage; el perfil con password se elimina.
+          // agent-browser recibe la contraseña solo mediante stdin para completar el
+          // login actual. La copia persistente queda cifrada en el almacén de Luna;
+          // eliminamos el perfil temporal del vault interno del CLI al terminar.
           const cleanupController = new AbortController();
           const cleanupTimer = setTimeout(() => cleanupController.abort(new Error("browser-auth-cleanup-timeout")), 5_000);
           try {

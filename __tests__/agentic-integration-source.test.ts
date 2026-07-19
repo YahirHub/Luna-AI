@@ -54,13 +54,16 @@ describe("integración agéntica", () => {
   it("deja la selección de browser_agent al orquestador y usa detección local solo para proteger secretos", () => {
     const bot = source("src/bot.ts");
     const context = source("src/context.ts");
-    const pendingCalls = bot.match(/browserCredentialStore\.setPending\(/g) ?? [];
-    expect(pendingCalls.length).toBe(1); // únicamente dentro de browser_request_credential
+    const pendingCalls = bot.match(/browserCredentialStore\.setPendingInput\(/g) ?? [];
+    expect(pendingCalls.length).toBe(1); // únicamente el agente/sistema inicia una espera explícita; detectar una URL no lo hace
     expect(bot).toContain("const activeTools = getAvailableTools(remoteJid)");
     expect(bot).not.toContain("secureBrowserTask");
     expect(bot).toContain("inlineBrowserCredential.password");
     expect(context).toContain("NO implica usar browser_agent automáticamente");
-    expect(context).toContain("Solo esa tool inicia el mensaje seguro de captura");
+    expect(context).toContain("No pidas una contraseña por adelantado");
+    expect(context).toContain("pausa la misma ejecución");
+    expect(context).toContain("browser_auth_profiles");
+    expect(context).toContain("browser_request_user_input");
   });
 
   it("mantiene validaciones autoritativas para controles de cuenta sin usarlas como router del navegador", () => {

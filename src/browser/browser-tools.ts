@@ -13,6 +13,10 @@ export const BROWSER_AGENT_TOOL_NAMES = [
   "browser_get_url",
   "browser_screenshot",
   "browser_download",
+  "browser_auth_profiles",
+  "browser_request_user_input",
+  "browser_fill_secret",
+  "browser_auth_confirm",
   "browser_auth_login",
   "browser_close",
 ] as const;
@@ -148,9 +152,81 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "browser_auth_profiles",
+      description: "Lista perfiles de credenciales guardados por el sistema para este usuario de Luna. Devuelve solo referencias opacas, URL y nombre de usuario; nunca contraseñas. Úsala cuando una sesión haya expirado o necesites elegir entre varias cuentas del mismo sitio.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL o dominio opcional para filtrar cuentas." },
+          username: { type: "string", description: "Correo/usuario opcional para filtrar una cuenta concreta." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_request_user_input",
+      description: "Pausa esta misma ejecución de navegador para pedir al sistema un dato que falta. La sesión de agent-browser permanece abierta y la tool no retorna hasta que el usuario responda o cancele. Para password u otp el valor se captura fuera del LLM y solo se devuelve una referencia segura.",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["username", "password", "otp", "text"] },
+          field_name: { type: "string", description: "Nombre humano del dato solicitado, por ejemplo correo, contraseña o código de verificación." },
+          url: { type: "string", description: "Sitio al que pertenece el dato, cuando aplique." },
+          username: { type: "string", description: "Usuario/correo conocido. Es obligatorio cuando kind=password para asociar la contraseña a la cuenta correcta." },
+          message: { type: "string", description: "Explicación breve de por qué se necesita el dato." },
+        },
+        required: ["kind", "field_name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_fill_secret",
+      description: "Rellena un campo sin exponer el valor al LLM. Usa secret_ref para OTP/secretos de un solo uso o credential_ref para inyectar la contraseña de una credencial temporal/persistente en un formulario que browser_auth_login no pueda manejar automáticamente.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string" },
+          secret_ref: { type: "string", description: "Referencia browser-secret-* para OTP u otro secreto temporal." },
+          credential_ref: { type: "string", description: "Referencia browser-cred-* o browser-profile-* cuya contraseña debe inyectarse sin revelarla al agente." },
+        },
+        required: ["selector"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_auth_confirm",
+      description: "Confirma que un login manual realizado con credential_ref tuvo éxito y guarda/reemplaza la credencial de forma cifrada para futuras reautenticaciones. Llámala solo después de verificar que ya se accedió a la cuenta.",
+      parameters: {
+        type: "object",
+        properties: { credential_ref: { type: "string" } },
+        required: ["credential_ref"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "browser_auth_login",
-      description: "Inicia sesión usando una credential_ref segura capturada por el sistema. La contraseña nunca se entrega al LLM ni debe solicitarse en argumentos de esta herramienta.",
-      parameters: { type: "object", properties: { credential_ref: { type: "string" } }, required: ["credential_ref"], additionalProperties: false },
+      description: "Inicia sesión con una credencial temporal o un perfil cifrado guardado por el sistema. Puedes pasar credential_ref directamente, o url+username para que el sistema resuelva una cuenta persistente. La contraseña nunca se entrega al LLM.",
+      parameters: {
+        type: "object",
+        properties: {
+          credential_ref: { type: "string", description: "Referencia browser-cred-* temporal o browser-profile-* persistente." },
+          url: { type: "string", description: "URL/dominio para buscar una credencial persistente cuando no hay referencia." },
+          username: { type: "string", description: "Correo/usuario para seleccionar una cuenta persistente concreta." },
+        },
+        additionalProperties: false,
+      },
     },
   },
   {

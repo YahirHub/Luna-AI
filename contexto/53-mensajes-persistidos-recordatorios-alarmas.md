@@ -1,4 +1,4 @@
-﻿# 53 — Mensajes persistidos para recordatorios y alarmas
+# 53 — Mensajes persistidos para recordatorios y alarmas
 
 ## Fecha
 

@@ -1,4 +1,4 @@
-﻿# 64 — Emojis Twemoji vectoriales en PDF
+# 64 — Emojis Twemoji vectoriales en PDF
 
 # Fecha
 

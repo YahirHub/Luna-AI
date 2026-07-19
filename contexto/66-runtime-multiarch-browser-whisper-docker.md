@@ -1,4 +1,4 @@
-﻿# 66 — Runtime multi-arquitectura para navegador, Whisper y Docker
+# 66 — Runtime multi-arquitectura para navegador, Whisper y Docker
 
 # Fecha
 

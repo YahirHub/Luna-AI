@@ -1,4 +1,4 @@
-﻿# 65 — Agente de navegador con agent-browser
+# 65 — Agente de navegador con agent-browser
 
 # Fecha
 

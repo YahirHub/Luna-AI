@@ -1,4 +1,4 @@
-﻿# 01 — Contexto maestro del proyecto
+# 01 — Contexto maestro del proyecto
 
 # Fecha
 
@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/66-runtime-multiarch-browser-whisper-docker.md
-- Resumen: Los runtimes de agent-browser, Chromium Docker y whisper.cpp se preparan ahora por plataforma/arquitectura. Linux ARM64 usa Chromium del sistema, agent-browser conserva un manifest anti-reutilización cruzada y Whisper empaqueta libgomp portable Bookworm por x64/ARM64 para evitar incompatibilidades de glibc.
-- Archivos del cambio: Dockerfile, entrypoint, descubrimiento/preparación/empaquetado de agent-browser, runtime de Whisper/libgomp, contexto y pruebas multi-arquitectura
+- Último registro: contexto/67-credenciales-persistentes-y-solicitud-de-datos-browser.md
+- Resumen: browser-web puede reutilizar perfiles cifrados por URL/usuario cuando una sesión caduca, soporta varias cuentas por dominio y puede solicitar correo, contraseña, OTP u otros datos mediante mensajes de sistema. Los secretos permanecen fuera del LLM y la solicitud original se reanuda automáticamente.
+- Archivos del cambio: almacén cifrado de credenciales, herramientas del navegador y del agente principal, flujo de entrada humana, contexto, README y pruebas
 <!-- codewolf:auto-context:end -->

@@ -1,4 +1,4 @@
-﻿# 60 — Runtime agéntico genérico y `spawn_agents`
+# 60 — Runtime agéntico genérico y `spawn_agents`
 
 ## Fecha
 
