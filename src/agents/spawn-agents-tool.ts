@@ -8,6 +8,8 @@ import { MAIN_SPAWNABLE_AGENTS, normalizeAgentType, validateSpawnableAgent } fro
 import { runAgent } from "./agent-runtime.ts";
 import { deduplicateSpawnAgentRequests } from "./spawn-deduper.ts";
 import type { AgentEvent, SpawnAgentReport, SpawnAgentRequest } from "./agent-types.ts";
+import { BrowserAgentExecution } from "../browser/browser-runtime.ts";
+import type { BrowserCredentialStore } from "../browser/browser-credentials.ts";
 
 const MAX_AGENTS_PER_CALL = 8;
 const MAX_PARENT_RESULT_CHARS = 8_000;
@@ -22,7 +24,7 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
       "Úsala para delegar dos o más investigaciones independientes en paralelo; por ejemplo un researcher-web por proveedor, producto o tema.",
       "Cada subagente puede usar sus propias herramientas y devuelve únicamente su respuesta final compacta.",
       "La herramienta NO crea PDFs ni entrega archivos: cuando termine, tú recuperas el control, revisas los resultados, puedes lanzar investigaciones adicionales si algo falta y después debes crear/sintetizar los archivos solicitados con las herramientas normales.",
-      "Para investigación web usa agent_type=researcher-web.",
+      "Para investigación web usa agent_type=researcher-web. Para navegación interactiva, login, extracción desde paneles, capturas o descargas usa agent_type=browser-web.",
     ].join(" "),
     parameters: {
       type: "object",
@@ -40,7 +42,7 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
             properties: {
               agent_type: {
                 type: "string",
-                enum: ["researcher-web"],
+                enum: ["researcher-web", "browser-web"],
                 description: "Tipo de subagente permitido.",
               },
               prompt: {
@@ -87,6 +89,45 @@ export const RESEARCHER_WEB_DIRECT_TOOL: ToolDefinition = {
   },
 };
 
+export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "browser_agent",
+    description: [
+      "Lanza un agente de navegador aislado para navegar sitios interactivos, iniciar sesión mediante credential_ref segura, extraer datos, tomar capturas o descargar archivos.",
+      "El agente trabaja sin visión usando snapshots de accesibilidad y texto renderizado. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por WhatsApp.",
+      "Nunca incluyas una contraseña en prompt ni en argumentos: usa únicamente la credential_ref segura que el sistema haya colocado en el mensaje.",
+    ].join(" "),
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Misión exacta y autocontenida de navegación." },
+        credential_ref: { type: "string", description: "Referencia segura opcional capturada fuera del LLM. Nunca contiene la contraseña." },
+      },
+      required: ["prompt"],
+      additionalProperties: false,
+    },
+  },
+};
+
+export const BROWSER_CREDENTIAL_REQUEST_TOOL: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "browser_request_credential",
+    description: "Solicita al sistema capturar una contraseña de navegador fuera del LLM. Úsala en vez de pedir la contraseña directamente al usuario. El sistema enviará un mensaje claramente marcado como MENSAJE DEL SISTEMA y luego reanudará prompt con una credential_ref segura.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        username: { type: "string" },
+        prompt: { type: "string", description: "Misión original que debe reanudarse después de capturar la contraseña." },
+      },
+      required: ["url", "username", "prompt"],
+      additionalProperties: false,
+    },
+  },
+};
+
 export const AGENT_TASK_TOOLS: ToolDefinition[] = [
   {
     type: "function",
@@ -125,8 +166,9 @@ export const AGENT_TASK_TOOLS: ToolDefinition[] = [
 ];
 
 export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
-  if (!config.webSearchEnabled || !config.researchSubagentEnabled) return [...AGENT_TASK_TOOLS];
-  return [SPAWN_AGENTS_TOOL, RESEARCHER_WEB_DIRECT_TOOL, ...AGENT_TASK_TOOLS];
+  const tools: ToolDefinition[] = [SPAWN_AGENTS_TOOL, BROWSER_WEB_DIRECT_TOOL, BROWSER_CREDENTIAL_REQUEST_TOOL];
+  if (config.webSearchEnabled && config.researchSubagentEnabled) tools.push(RESEARCHER_WEB_DIRECT_TOOL);
+  return [...tools, ...AGENT_TASK_TOOLS];
 }
 
 export type SpawnAgentsProgress =
@@ -148,6 +190,7 @@ export interface SpawnAgentsDependencies {
   agentRunner?: typeof runAgent;
   /** Permite deduplicar llamadas equivalentes emitidas por el mismo mensaje del modelo. */
   filterRequests?: (agents: SpawnAgentRequest[]) => SpawnAgentRequest[];
+  browserCredentials?: BrowserCredentialStore;
 }
 
 function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
@@ -208,7 +251,12 @@ export async function executeSpawnAgentsTool(
     return JSON.stringify({ status: "deduplicated", reports: [], message: "Las solicitudes equivalentes de subagentes ya se ejecutaron en esta ronda." });
   }
 
-  for (const request of requested) validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
+  for (const request of requested) {
+    const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
+    if (definition.id === "researcher-web" && (!dependencies.agentConfig.webSearchEnabled || !dependencies.agentConfig.researchSubagentEnabled)) {
+      return "Error: el investigador web está desactivado en la configuración actual.";
+    }
+  }
 
   const { uniqueAgents, originalToUniqueIndex } = deduplicateSpawnAgentRequests(requested);
   const title = typeof args.title === "string" && args.title.trim()
@@ -234,11 +282,17 @@ export async function executeSpawnAgentsTool(
       const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
       const runId = `${task.record.id}-${safeSegment(definition.id)}-${index + 1}`;
       const agentDir = `${taskBase}/agents/${String(index + 1).padStart(2, "0")}-${safeSegment(definition.id)}`;
+      const credentialRef = definition.id === "browser-web" && typeof request.params?.credential_ref === "string"
+        ? request.params.credential_ref.trim()
+        : "";
+      const agentPrompt = credentialRef && !request.prompt?.includes(credentialRef)
+        ? `${request.prompt}\n\n[SISTEMA: Usa credential_ref=${credentialRef} únicamente con browser_auth_login. La contraseña está fuera del LLM.]`
+        : request.prompt ?? "";
       const events: AgentEvent[] = [];
       dependencies.workspace.writeText(dependencies.jid, `${agentDir}/request.json`, `${JSON.stringify({
         agentType: definition.id,
         displayName: definition.displayName,
-        prompt: request.prompt,
+        prompt: agentPrompt,
         params: request.params ?? null,
         runId,
       }, null, 2)}\n`);
@@ -249,19 +303,28 @@ export async function executeSpawnAgentsTool(
         index,
         total: uniqueAgents.length,
         agentType: definition.id,
-        prompt: request.prompt ?? "",
+        prompt: agentPrompt,
       });
 
       const report = await (dependencies.agentRunner ?? runAgent)({
         definition,
-        prompt: request.prompt ?? "",
+        prompt: agentPrompt,
         model: dependencies.model,
         llmConfig: dependencies.llmConfig,
         agentConfig: dependencies.agentConfig,
         runId,
         parentRunId: task.record.id,
         parentSignal: task.signal,
-        timeoutMs: dependencies.agentConfig.researcherTimeoutMs,
+        browserExecution: definition.id === "browser-web" && dependencies.browserCredentials
+          ? new BrowserAgentExecution({
+              jid: dependencies.jid,
+              runId,
+              taskId: task.record.id,
+              agentDir,
+              workspace: dependencies.workspace,
+              credentials: dependencies.browserCredentials,
+            })
+          : undefined,
         onEvent: async (event) => {
           events.push(event);
           dependencies.workspace.writeText(
@@ -384,6 +447,31 @@ export async function executeResearcherWebTool(
     const parsed = JSON.parse(raw) as { reports?: Array<{ result?: string; error?: string; status?: string }>; task_id?: string };
     const report = parsed.reports?.[0];
     if (report?.result) return report.result;
+    return report?.error ? `Error: ${report.error}` : raw;
+  } catch {
+    return raw;
+  }
+}
+
+export async function executeBrowserWebTool(
+  args: Record<string, unknown>,
+  dependencies: SpawnAgentsDependencies,
+): Promise<string> {
+  const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+  if (!prompt) return "Error: prompt es obligatorio.";
+  const credentialRef = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
+  const safePrompt = credentialRef
+    ? `${prompt}\n\n[SISTEMA: Usa credential_ref=${credentialRef} únicamente con browser_auth_login. La contraseña no está disponible para el LLM y nunca debes pedirla ni repetirla.]`
+    : prompt;
+  const raw = await executeSpawnAgentsTool(
+    { title: `Navegación web: ${prompt.slice(0, 70)}`, agents: [{ agent_type: "browser-web", prompt: safePrompt, params: credentialRef ? { credential_ref: credentialRef } : undefined }] },
+    dependencies,
+  );
+  if (raw.startsWith("Error:")) return raw;
+  try {
+    const parsed = JSON.parse(raw) as { reports?: Array<{ result?: string; error?: string }>; task_id?: string };
+    const report = parsed.reports?.[0];
+    if (report?.result) return JSON.stringify({ task_id: parsed.task_id, result: report.result }, null, 2);
     return report?.error ? `Error: ${report.error}` : raw;
   } catch {
     return raw;

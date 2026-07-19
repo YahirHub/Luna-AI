@@ -9,11 +9,12 @@ RUN apt-get update \
 
 COPY package.json bun.lock ./
 COPY patches ./patches
-RUN bun install --production --frozen-lockfile
+RUN bun install --production --frozen-lockfile --ignore-scripts
 
 COPY scripts ./scripts
 COPY assets ./assets
 COPY src ./src
+ENV LUNA_AGENT_BROWSER_SKIP_INSTALL=1
 RUN bun run build
 
 # ─── Runtime glibc: compatible con los binarios oficiales Ubuntu ─────

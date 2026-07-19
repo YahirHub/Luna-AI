@@ -37,6 +37,41 @@ describe("integración agéntica", () => {
     expect(source("src/artifacts/artifact-tools.ts")).toContain('name: "gitzip"');
   });
 
+  it("integra un browser-web aislado sin exponer contraseñas al LLM", () => {
+    const definition = source("src/agents/definitions/browser-web.ts");
+    const runtime = source("src/browser/browser-runtime.ts");
+    const bot = source("src/bot.ts");
+    expect(definition).toContain('id: "browser-web"');
+    expect(definition).toContain('"browser_auth_login"');
+    expect(definition).toContain("Trabajas sin visión");
+    expect(runtime).toContain('"--password-stdin"');
+    expect(runtime).toContain("AGENT_BROWSER_ENCRYPTION_KEY");
+    expect(bot).toContain("🔐 MENSAJE DEL SISTEMA");
+    expect(bot).toContain("browser_request_credential");
+    expect(bot).toContain("browserCredentialStore");
+  });
+
+  it("deja la selección de browser_agent al orquestador y usa detección local solo para proteger secretos", () => {
+    const bot = source("src/bot.ts");
+    const context = source("src/context.ts");
+    const pendingCalls = bot.match(/browserCredentialStore\.setPending\(/g) ?? [];
+    expect(pendingCalls.length).toBe(1); // únicamente dentro de browser_request_credential
+    expect(bot).toContain("const activeTools = getAvailableTools(remoteJid)");
+    expect(bot).not.toContain("secureBrowserTask");
+    expect(bot).toContain("inlineBrowserCredential.password");
+    expect(context).toContain("NO implica usar browser_agent automáticamente");
+    expect(context).toContain("Solo esa tool inicia el mensaje seguro de captura");
+  });
+
+  it("mantiene validaciones autoritativas para controles de cuenta sin usarlas como router del navegador", () => {
+    const bot = source("src/bot.ts");
+    expect(bot).toContain("containsProtectedBrowserCredential");
+    expect(bot).toContain("userExplicitlyRequestsOwnPasswordChange");
+    expect(bot).toContain("userExplicitlyRequestsConversationClear");
+    expect(bot).toContain("conversation_clear requiere que el usuario pida explícitamente");
+    expect(bot).toContain("account_password_change_start solo puede usarse cuando el usuario pide explícitamente");
+  });
+
   it("incluye cancelación jerárquica y persistencia de resultados de subagentes", () => {
     const bot = source("src/bot.ts");
     const spawn = source("src/agents/spawn-agents-tool.ts");

@@ -1,5 +1,6 @@
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
+import { agentBrowserGenericName, agentBrowserNativeName } from "../src/browser/browser-discovery.ts";
 import {
   ensureLinuxRuntimeDependencies,
   ensureLinuxSharedLibraryAliases,
@@ -38,3 +39,22 @@ if (existsSync(twemojiSource)) {
   console.log(`[package-runtime] Assets Twemoji copiados a ${twemojiDestination}`);
 }
 
+
+const agentBrowserPreparedSource = join(root, "assets", "runtime", "agent-browser", agentBrowserGenericName());
+const agentBrowserNodeModulesSource = join(root, "node_modules", "agent-browser", "bin", agentBrowserNativeName());
+const agentBrowserSource = existsSync(agentBrowserPreparedSource)
+  ? agentBrowserPreparedSource
+  : agentBrowserNodeModulesSource;
+const agentBrowserDestination = join(root, "dist", "runtime", "agent-browser");
+if (!existsSync(agentBrowserSource)) {
+  throw new Error(
+    `Falta el runtime nativo de agent-browser (${agentBrowserSource}). `
+    + "Ejecuta bun run prepare:browser o bun install antes del build.",
+  );
+}
+rmSync(agentBrowserDestination, { recursive: true, force: true });
+mkdirSync(agentBrowserDestination, { recursive: true });
+const target = join(agentBrowserDestination, agentBrowserGenericName());
+cpSync(agentBrowserSource, target);
+if (process.platform !== "win32") chmodSync(target, 0o755);
+console.log(`[package-runtime] agent-browser nativo copiado a ${target}`);

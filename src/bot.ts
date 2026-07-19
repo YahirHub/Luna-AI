@@ -127,6 +127,7 @@ import {
 } from "./tools/whatsapp-tools.ts";
 import {
   executeAgentTaskTool,
+  executeBrowserWebTool,
   executeResearcherWebTool,
   executeSpawnAgentsTool,
   getMainAgentTools,
@@ -138,6 +139,11 @@ import {
   ADMIN_CONTROL_TOOLS,
 } from "./control-tools.ts";
 import { extractSecretTokenFromMessage } from "./utils.ts";
+import {
+  browserCredentialStore,
+  extractBrowserLoginIntent,
+  sanitizeBrowserCredentialText,
+} from "./browser/browser-credentials.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -223,6 +229,7 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["admin_unban_user", "✅ Desbloqueando usuario..."],
   ["spawn_agents", "🤖 Preparando subagentes paralelos..."],
   ["researcher_web", "🕵️ Preparando investigador web..."],
+  ["browser_agent", "🌐 Preparando agente de navegador..."],
   ["create_pdf_from_markdown", "📄 Generando PDF..."],
   ["archive_folder", "🗜️ Comprimiendo carpeta..."],
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
@@ -671,6 +678,10 @@ function buildHelpText(jid: string): string {
 }
 
 function cancelCurrentOperation(jid: string): string {
+  if (browserCredentialStore.getPending(jid)) {
+    browserCredentialStore.clearPending(jid);
+    return "✅ Captura segura de contraseña del navegador cancelada.";
+  }
   if (taskRuntime.cancel(jid)) return "✅ Tarea activa de subagentes cancelada.";
   if (providerSetupManager.has(jid)) {
     providerSetupManager.cancel(jid);
@@ -1791,10 +1802,39 @@ async function tryHandleInlineSearchCredential(
   return true;
 }
 
-function extractInlinePasswordChange(text: string): string | null {
+function containsProtectedBrowserCredential(text: string): boolean {
+  // Guardia de seguridad únicamente: no enruta herramientas ni decide usar navegador.
+  // Evita que una nota interna con credential_ref se confunda con una petición para
+  // cambiar la contraseña de la propia cuenta de Luna.
+  return /credential_ref=browser-cred-/i.test(text)
+    || /referencia segura browser-cred-/i.test(normalizeNaturalText(text));
+}
+
+function userExplicitlyRequestsConversationClear(text: string): boolean {
   const normalized = normalizeNaturalText(text);
-  if (!/(contrasena|password)/i.test(normalized)) return null;
-  if (!/(cambi|actualiz|reemplaz|pon|poner)/i.test(normalized)) return null;
+  const hasConversationTarget = /\b(conversacion|chat|historial)\b/i.test(normalized);
+  const hasClearVerb = /\b(limpi|borr|elimin|reinici|resete|restablec)\w*/i.test(normalized);
+  const explicitFreshStart = /\b(empezar|comenzar|iniciar) de cero\b/i.test(normalized);
+  return (hasConversationTarget && hasClearVerb) || explicitFreshStart;
+}
+
+function userExplicitlyRequestsOwnPasswordChange(text: string): boolean {
+  if (containsProtectedBrowserCredential(text)) return false;
+  const normalized = normalizeNaturalText(text);
+  if (!/\b(contrasena|password)\b/i.test(normalized)) return false;
+  if (!/\b(cambi|actualiz|reemplaz|pon|poner)\w*/i.test(normalized)) return false;
+
+  // Solo aceptamos una intención explícita sobre la propia contraseña de Luna.
+  // No usamos detección de URLs, dominios ni intención de navegador para decidir
+  // esta acción: el orquestador conserva la responsabilidad de elegir herramientas.
+  const explicitOwn = /\bmi (?:contrasena|password)\b/i.test(normalized)
+    || /\b(?:contrasena|password) de (?:mi )?(?:cuenta de )?luna\b/i.test(normalized);
+  const genericWithoutExternalTarget = /^(?:quiero )?(?:cambiar|actualizar|reemplazar) (?:la )?(?:contrasena|password)$/i.test(normalized);
+  return explicitOwn || genericWithoutExternalTarget;
+}
+
+function extractInlinePasswordChange(text: string): string | null {
+  if (!userExplicitlyRequestsOwnPasswordChange(text)) return null;
 
   // Se trabaja sobre el texto original para preservar mayúsculas y símbolos.
   const patterns = [
@@ -1895,7 +1935,7 @@ export async function handleMessage(
   void sock.readMessages([key]).catch(() => {});
 
   const mediaKind = getMediaKind(message);
-  const text =
+  let text =
     message.message?.conversation ??
     message.message?.extendedTextMessage?.text ??
     message.message?.imageMessage?.caption ??
@@ -1971,6 +2011,68 @@ export async function handleMessage(
   // ── Credenciales y contraseña incluidas directamente en lenguaje natural ──
   // Se procesan antes del LLM y antes de cualquier menú pendiente para evitar
   // pedir de nuevo secretos que el usuario ya proporcionó en el mismo mensaje.
+  // ── Credenciales seguras para navegación web ───────────────────
+  // Una contraseña de un sitio web nunca se envía al LLM. Si viene en el
+  // mismo mensaje se reemplaza por una referencia opaca; si falta, el sistema
+  // la solicita directamente y reanuda la instrucción original al recibirla.
+  const pendingBrowserCredential = browserCredentialStore.getPending(remoteJid);
+  if (pendingBrowserCredential) {
+    if (command && command.name === "cancelar") {
+      browserCredentialStore.clearPending(remoteJid);
+      await sendWithTyping(sock, remoteJid, "❌ Captura segura de contraseña cancelada.");
+      return;
+    }
+    const normalizedPendingText = normalizeNaturalText(text);
+    if (["continua", "continuar", "sigue", "seguir"].includes(normalizedPendingText)) {
+      await sendWithTyping(
+        sock,
+        remoteJid,
+        "🔐 MENSAJE DEL SISTEMA\n\nLa tarea está esperando la contraseña. Por seguridad, el agente no debe saberla ni verla. Envía la contraseña en este mensaje de sistema; será capturada fuera del modelo y el mensaje se intentará borrar después.",
+      );
+      return;
+    }
+    const password = extractSecretTokenFromMessage(text).trim();
+    if (password.length < 1) {
+      await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía la contraseña para continuar. El agente no tendrá acceso a ella.");
+      return;
+    }
+    const credential = browserCredentialStore.create({
+      jid: remoteJid,
+      url: pendingBrowserCredential.url,
+      username: pendingBrowserCredential.username,
+      password,
+    });
+    browserCredentialStore.clearPending(remoteJid);
+    await deleteSensitiveIncomingMessage(sock, message);
+    const resumedText = sanitizeBrowserCredentialText(pendingBrowserCredential.originalText, credential);
+    await handleAiChat(sock, remoteJid, resumedText);
+    return;
+  }
+
+  if (authManager.isLoggedIn(remoteJid)) {
+    // Preprocesamiento EXCLUSIVAMENTE de seguridad. Detectar una URL, localhost,
+    // un login o un usuario NO lanza browser_agent ni inicia una captura pendiente.
+    // Solo si la contraseña YA viene escrita en el mensaje la retiramos antes de
+    // enviarlo al LLM y adjuntamos una referencia opaca. Después, el orquestador
+    // decide libremente si usa browser_agent, researcher_web, spawn_agents o nada.
+    const inlineBrowserCredential = extractBrowserLoginIntent(text);
+    if (
+      inlineBrowserCredential.loginRequested
+      && inlineBrowserCredential.url
+      && inlineBrowserCredential.username
+      && inlineBrowserCredential.password
+    ) {
+      const credential = browserCredentialStore.create({
+        jid: remoteJid,
+        url: inlineBrowserCredential.url,
+        username: inlineBrowserCredential.username,
+        password: inlineBrowserCredential.password,
+      });
+      text = sanitizeBrowserCredentialText(text, credential);
+      await deleteSensitiveIncomingMessage(sock, message);
+    }
+  }
+
   if (await tryHandleInlineSearchCredential(sock, message, remoteJid, text)) {
     return;
   }
@@ -2183,6 +2285,10 @@ async function handleAiChat(
   const cm = contextManager;
   const cfg = llmConfig;
   const agentConfigSnapshot = { ...agentConfig };
+  // Todas las herramientas permitidas por rol permanecen disponibles. La presencia
+  // de una URL o credential_ref no enruta ni oculta herramientas automáticamente;
+  // el agente principal decide qué capacidad usar. Las acciones sensibles mantienen
+  // sus validaciones autoritativas en el ejecutor.
   const activeTools = getAvailableTools(remoteJid);
   await cm.withLock(remoteJid, async () => {
 
@@ -2281,6 +2387,16 @@ async function handleAiChat(
       }
 
       if (USER_CONTROL_TOOLS.some((tool) => tool.function.name === name)) {
+        if (name === "conversation_clear" && !userExplicitlyRequestsConversationClear(userText)) {
+          result = "Error: conversation_clear requiere que el usuario pida explícitamente limpiar, borrar o reiniciar su conversación.";
+          toolResults.push({ name, result });
+          return result;
+        }
+        if (name === "account_password_change_start" && !userExplicitlyRequestsOwnPasswordChange(userText)) {
+          result = "Error: account_password_change_start solo puede usarse cuando el usuario pide explícitamente cambiar la contraseña de su propia cuenta de Luna. Las credenciales de sitios web pertenecen al agente de navegador.";
+          toolResults.push({ name, result });
+          return result;
+        }
         if (name === "conversation_clear") clearConversationAfterResponse = true;
         result = await executeUserControlTool(name, args, remoteJid);
         await recordToolResult(name, result);
@@ -2323,6 +2439,7 @@ async function handleAiChat(
           agentConfig: agentConfigSnapshot,
           workspace: workspaceManager,
           tasks: taskRuntime,
+          browserCredentials: browserCredentialStore,
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);
@@ -2343,6 +2460,52 @@ async function handleAiChat(
           agentConfig: agentConfigSnapshot,
           workspace: workspaceManager,
           tasks: taskRuntime,
+          browserCredentials: browserCredentialStore,
+          filterRequests: spawnDeduper.filter,
+          onProgress: async (event) => {
+            const progressText = formatSpawnAgentsProgress(event);
+            if (!progressText) return;
+            await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+            await typingSession.refresh();
+          },
+        });
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (name === "browser_request_credential") {
+        const url = typeof args.url === "string" ? args.url.trim() : "";
+        const username = typeof args.username === "string" ? args.username.trim() : "";
+        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+        if (!url || !username || !prompt) {
+          result = "Error: url, username y prompt son obligatorios para solicitar la credencial segura.";
+          toolResults.push({ name, result });
+          return result;
+        }
+        browserCredentialStore.setPending({ jid: remoteJid, originalText: prompt, url, username });
+        await sendWhatsAppMessage(sock, remoteJid, {
+          text: [
+            "🔐 MENSAJE DEL SISTEMA",
+            "",
+            `Se necesita la contraseña para ${url} (usuario: ${username}).`,
+            "Por seguridad, el agente no debe saber tu contraseña ni recibirla en su contexto.",
+            "Envía la contraseña en tu siguiente mensaje. El sistema la capturará fuera del modelo, intentará borrar ese mensaje y después reanudará la tarea con una referencia segura.",
+          ].join("\n"),
+        }, { waitForDelivery: false });
+        result = "El sistema quedó esperando la contraseña fuera del LLM. No vuelvas a pedirla ni la menciones; espera el siguiente mensaje del usuario.";
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (name === "browser_agent") {
+        result = await executeBrowserWebTool(args, {
+          jid: remoteJid,
+          model,
+          llmConfig: cfg,
+          agentConfig: agentConfigSnapshot,
+          workspace: workspaceManager,
+          tasks: taskRuntime,
+          browserCredentials: browserCredentialStore,
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressText = formatSpawnAgentsProgress(event);

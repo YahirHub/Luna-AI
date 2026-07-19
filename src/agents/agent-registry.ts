@@ -1,11 +1,13 @@
 import type { AgentDefinition } from "./agent-types.ts";
 import { RESEARCHER_WEB_AGENT } from "./definitions/researcher-web.ts";
+import { BROWSER_WEB_AGENT } from "./definitions/browser-web.ts";
 
 const DEFINITIONS = new Map<string, AgentDefinition>([
   [RESEARCHER_WEB_AGENT.id, RESEARCHER_WEB_AGENT],
+  [BROWSER_WEB_AGENT.id, BROWSER_WEB_AGENT],
 ]);
 
-export const MAIN_SPAWNABLE_AGENTS = ["researcher-web"] as const;
+export const MAIN_SPAWNABLE_AGENTS = ["researcher-web", "browser-web"] as const;
 
 export function normalizeAgentType(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";

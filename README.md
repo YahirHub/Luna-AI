@@ -4,7 +4,7 @@
 
 # Luna AI
 
-Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, transcripción y OCR locales, búsqueda web multiproveedor, subagente investigador, selección de modelos y control de acceso.
+Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, transcripción y OCR locales, búsqueda web multiproveedor, subagentes de investigación y navegación interactiva, selección de modelos y control de acceso.
 
 ## Funciones principales
 
@@ -20,6 +20,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Fallback automático entre motores configurados.
 - Lectura segura de fuentes públicas mediante una herramienta interna.
 - Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
+- Subagente `browser-web` basado en `agent-browser` para navegación interactiva, sesiones autenticadas, extracción de paneles, capturas y descargas sin requerir modelos con visión.
 - Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
 - Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
@@ -35,7 +36,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Una cuenta de WhatsApp para vincular el bot.
 - Opcional: claves de uno o más motores de búsqueda.
 - Opcional: un proveedor LLM compatible con la API de chat completions de OpenAI.
-- Conexión a internet durante `bun run dev` o `bun run build` para consultar la release `latest` de whisper.cpp, descargar el binario correcto para el sistema y verificar su SHA-256. Después funciona offline.
+- Conexión a internet durante la primera preparación cuando falten runtimes. `bun install`, `bun run dev`, `bun run start` y `bun run build` preparan automáticamente `agent-browser`; `bun run dev` y `bun run build` también preparan los assets multimedia cuando corresponde. Después, los componentes ya descargados se reutilizan.
 
 ## Instalación local
 
@@ -46,7 +47,7 @@ bun install
 bun run start --qr
 ```
 
-`bun install` debe generar `bun.lock`. Versiona el lockfile para que desarrollo, CI y Docker resuelvan las mismas dependencias.
+`bun install` debe generar `bun.lock`. Versiona el lockfile para que desarrollo, CI y Docker resuelvan las mismas dependencias. El `postinstall` del proyecto ejecuta automáticamente `prepare:browser`: habilita el `postinstall` oficial de `agent-browser`, prepara el binario nativo de la plataforma y, si no detecta Chrome/Brave/Edge/Chromium ni un Chrome for Testing ya instalado, descarga Chrome for Testing. No es necesario ejecutar manualmente `bunx agent-browser install`.
 
 ## Primera configuración
 
@@ -244,6 +245,37 @@ El agente disponible inicialmente es `researcher-web`. Tiene:
 - Salida `last_message`: el agente principal recibe únicamente la síntesis final, no las páginas completas ni todo el historial intermedio.
 
 El modelo principal no recibe `web_search` ni `read_url` directamente. Para una investigación individual usa `researcher_web`; para dos o más investigaciones independientes usa `spawn_agents`.
+
+También existe `browser-web`, especializado en navegación interactiva mediante `agent-browser`. El agente trabaja sin visión: interpreta snapshots del árbol de accesibilidad y texto renderizado, navega con referencias `@eN`, puede iniciar sesión mediante una referencia de credencial segura, extraer métricas, tomar capturas y descargar archivos. El agente principal usa `browser_agent` para una tarea de navegador individual o `spawn_agents` con `agent_type=browser-web` cuando conviene combinar navegación con otros trabajos paralelos.
+
+Ejemplo:
+
+```text
+Inicia sesión en domain.tld con el usuario user123 y la contraseña patito123, navega al panel, extrae las métricas y dame un PDF.
+```
+
+La contraseña incluida explícitamente en el mensaje se intercepta antes de llegar al LLM y se sustituye por una `credential_ref` opaca, pero este preprocesamiento de seguridad no decide ni ejecuta herramientas. La presencia de una URL, `localhost`, un correo o una credencial segura nunca abre el navegador automáticamente: el agente principal conserva la responsabilidad de decidir entre `browser_agent`, `researcher_web`, `spawn_agents` o ninguna herramienta. Si el orquestador decide usar el navegador y necesita una contraseña que todavía no existe, llama `browser_request_credential`; solo entonces Luna envía un mensaje marcado como `MENSAJE DEL SISTEMA`, indicando que por seguridad el agente no debe conocer la contraseña. El siguiente mensaje se captura fuera del modelo y la tarea se reanuda con la referencia segura. `browser_auth_login` entrega la contraseña a `agent-browser` mediante `stdin`, nunca como argumento de proceso ni como texto visible para el modelo. Después del login se elimina el perfil temporal de credenciales; solo se conserva el estado de sesión cifrado para reutilizar cookies y almacenamiento.
+
+`browser-web` conserva archivos físicos por tarea:
+
+```text
+persistent/contexts/<jid>/workdir/tasks/<task-id>/agents/01-browser-web/
+├── request.json
+├── events.jsonl
+├── result.json
+├── result.md
+└── browser/
+    ├── snapshots/
+    ├── extracted/
+    ├── screenshots/
+    └── downloads/
+```
+
+Las capturas y descargas se registran como artefactos del workdir. Si el usuario pide una captura, el agente de navegador crea el PNG y el agente principal lo envía con `whatsapp_send`. Si pide un informe, el agente principal recibe la síntesis y las rutas de artefactos, crea el Markdown/PDF y después lo envía. El contenido de páginas se trata como no confiable y `agent-browser` se ejecuta con content boundaries y límite de salida.
+
+La preparación de `agent-browser` es automática. `bun install` ejecuta `prepare:browser` mediante `postinstall`, y `bun run start`, `bun run dev` y `bun run build` vuelven a ejecutar esa preparación de forma idempotente. El script usa primero el binario nativo instalado en `node_modules`; si Bun no ejecutó el lifecycle del paquete, intenta el `postinstall` oficial y, como último fallback, descarga el binario exacto de la release configurada. El binario preparado queda en `assets/runtime/agent-browser/` y `scripts/package-runtime.ts` lo copia a `dist/runtime/agent-browser/` durante el build.
+
+Para el navegador, se reutiliza automáticamente Chrome, Brave, Edge o Chromium del sistema. Si no existe ninguno, la preparación instala Chrome for Testing en el caché oficial de `agent-browser`. El runtime también pasa `AGENT_BROWSER_EXECUTABLE_PATH` cuando detecta un navegador del sistema. Por tanto, el flujo normal es simplemente `bun install` y después `bun run dev` o `bun run build`; no es necesario ejecutar manualmente `bunx agent-browser install`.
 
 Ejemplo natural:
 
@@ -561,6 +593,7 @@ persistent/
 ├── llm.config.json          # Solo si existe proveedor LLM personalizado
 ├── whisper.json             # Modelo y parámetros globales de transcripción
 ├── whisper/models/          # Modelos adicionales descargados por el administrador
+├── browser/                 # Clave local para cifrar el estado persistente de sesiones del navegador
 └── users.json               # Usuarios y sesiones del bot
 ```
 

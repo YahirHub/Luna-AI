@@ -130,7 +130,7 @@ describe("spawn_agents", () => {
     expect(parsed.reports.map((item) => item.status)).toEqual(["completed", "failed"]);
   });
 
-  it("solo expone agentes de investigación cuando la función está habilitada", () => {
+  it("mantiene el agente de navegador aunque la investigación pública esté deshabilitada", () => {
     const enabled = getMainAgentTools(DEFAULT_AGENT_CONFIG).map((tool) => tool.function.name);
     expect(enabled).toContain("spawn_agents");
     expect(enabled).toContain("researcher_web");
@@ -138,7 +138,9 @@ describe("spawn_agents", () => {
       ...DEFAULT_AGENT_CONFIG,
       researchSubagentEnabled: false,
     }).map((tool) => tool.function.name);
-    expect(disabled).not.toContain("spawn_agents");
+    expect(disabled).toContain("spawn_agents");
+    expect(disabled).toContain("browser_agent");
+    expect(disabled).toContain("browser_request_credential");
     expect(disabled).not.toContain("researcher_web");
     expect(disabled).toContain("task_list");
   });

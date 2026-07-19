@@ -5,6 +5,8 @@ import { debugError, debugInfo, debugLog } from "../debug.ts";
 import { WEB_SEARCH_TOOL, executeWebSearchToolDetailed } from "../search/search-tools.ts";
 import { READ_URL_TOOL, executeReadUrlTool } from "../search/read-url.ts";
 import { runSearchWithRetry } from "../search/search-coordinator.ts";
+import { BROWSER_AGENT_TOOLS } from "../browser/browser-tools.ts";
+import type { BrowserAgentExecution } from "../browser/browser-runtime.ts";
 import { getMexicoCityNow } from "../utils.ts";
 import type {
   AgentDefinition,
@@ -16,6 +18,7 @@ import type {
 const TOOL_BINDINGS = new Map<string, Omit<AgentToolBinding, "execute">>([
   ["web_search", { definition: WEB_SEARCH_TOOL }],
   ["read_url", { definition: READ_URL_TOOL }],
+  ...BROWSER_AGENT_TOOLS.map((definition) => [definition.function.name, { definition }] as const),
 ]);
 
 function childAbortController(parentSignal: AbortSignal | undefined, timeoutMs: number): {
@@ -84,10 +87,13 @@ export interface RunAgentOptions {
   onEvent?: AgentEventHandler;
   webSearchExecutor?: typeof executeWebSearchToolDetailed;
   readUrlExecutor?: typeof executeReadUrlTool;
+  browserExecution?: BrowserAgentExecution;
 }
 
 export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentReport> {
-  const timeoutMs = options.timeoutMs ?? options.agentConfig.researcherTimeoutMs ?? options.definition.timeoutMs;
+  const timeoutMs = options.timeoutMs ?? (options.definition.id === "researcher-web"
+    ? options.agentConfig.researcherTimeoutMs
+    : options.definition.timeoutMs);
   const { controller, cleanup } = childAbortController(options.parentSignal, timeoutMs);
   const signal = controller.signal;
   const toolsCalled: string[] = [];
@@ -142,6 +148,8 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
             )).text;
           } else if (name === "read_url") {
             toolResult = await (options.readUrlExecutor ?? executeReadUrlTool)(args, signal);
+          } else if (name.startsWith("browser_") && options.browserExecution) {
+            toolResult = await options.browserExecution.executeTool(name, args, signal);
           } else {
             toolResult = `Error: la herramienta "${name}" no está permitida para ${options.definition.id}.`;
           }

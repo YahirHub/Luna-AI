@@ -87,6 +87,7 @@ function scopeColor(scope: string, event: string): string {
   const normalized = `${scope}.${event}`.toLowerCase();
   if (normalized.includes("search")) return ANSI.brightCyan;
   if (normalized.includes("read_url") || normalized.includes("fetch")) return ANSI.brightMagenta;
+  if (normalized.includes("browser")) return ANSI.brightMagenta;
   if (normalized.includes("agent")) return ANSI.brightBlue;
   if (normalized.includes("whatsapp") || normalized.includes("messaging")) return ANSI.brightYellow;
   if (normalized.includes("ai") || normalized.includes("llm")) return ANSI.brightGreen;

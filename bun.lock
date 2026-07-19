@@ -8,6 +8,7 @@
         "@tesseract.js-data/spa": "1.0.0",
         "@twemoji/parser": "15.0.0",
         "@whiskeysockets/baileys": "7.0.0-rc13",
+        "agent-browser": "0.27.0",
         "jpeg-js": "0.4.4",
         "ogg-opus-decoder": "1.7.3",
         "pino": "10.3.1",
@@ -27,6 +28,8 @@
     "ogg-opus-decoder@1.7.3": "patches/ogg-opus-decoder@1.7.3.patch",
   },
   "packages": {
+    "agent-browser": ["agent-browser@0.27.0", "https://registry.npmjs.org/agent-browser/-/agent-browser-0.27.0.tgz", { "bin": { "agent-browser": "./bin/agent-browser.js" } }, "sha512-mmHzVsYFVA6nshNNGJzg83aVMgKpf4h98ytY3pvtJB1Cot0ZyA2bfnkbSngGD56Azkj+GlhVH6qx9DfKOVE0yg=="],
+
     "@twemoji/parser": ["@twemoji/parser@15.0.0", "https://registry.npmjs.org/@twemoji/parser/-/parser-15.0.0.tgz", {}, "sha512-lh9515BNsvKSNvyUqbj5yFu83iIDQ77SwVcsN/SnEGawczhsKU6qWuogewN1GweTi5Imo5ToQ9s+nNTf97IXvg=="],
 
     "@borewit/text-codec": ["@borewit/text-codec@0.2.2", "https://registry.npmjs.org/@borewit/text-codec/-/text-codec-0.2.2.tgz", {}, "sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ=="],

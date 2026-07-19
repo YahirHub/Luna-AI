@@ -44,7 +44,7 @@ Conservar el estado técnico, las reglas y los pendientes necesarios para retoma
 # Estado automático más reciente
 
 - Última actualización: 2026-07-18
-- Último registro: contexto/64-emojis-twemoji-en-pdf.md
-- Resumen: Los PDF detectan emojis Unicode con @twemoji/parser y los renderizan como vectores Twemoji locales, conservando el Markdown original y funcionando offline de forma consistente en Windows y Linux.
-- Archivos del cambio: renderer PDF, módulo Twemoji, assets runtime, empaquetado, dependencias, README, contexto y pruebas
+- Último registro: contexto/65-agente-de-navegador-agent-browser.md
+- Resumen: Luna incorpora un subagente browser-web basado en agent-browser para navegación interactiva sin visión, login mediante referencias de credenciales fuera del LLM, sesiones cifradas, extracción de paneles, capturas y descargas físicas en el workdir.
+- Archivos del cambio: runtime de navegador, credenciales seguras, herramientas browser, registro/orquestación de agentes, bot, contexto del sistema, empaquetado, dependencias, README y pruebas
 <!-- codewolf:auto-context:end -->
