@@ -302,7 +302,7 @@ export function loadLlmConfig(configPath = DEFAULT_LLM_CONFIG_FILE): LlmConfig {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
       `No se pudo leer la configuración LLM en "${absolutePath}": ${reason}. ` +
-      "Un administrador puede generarla desde WhatsApp con /setup-provider.",
+      "Un administrador puede generarla desde el chat con /setup-provider.",
     );
   }
 
@@ -488,7 +488,7 @@ export class ProviderSetupManager {
           throw new Error("Selecciona el modelo escribiendo únicamente su número.");
         }
 
-        const index = Number.parseInt(match[1], 10) - 1;
+        const index = Number.parseInt(match[1] ?? "", 10) - 1;
         if (!Number.isInteger(index) || index < 0 || index >= session.availableModels.length) {
           throw new Error(`Número inválido. Elige entre 1 y ${session.availableModels.length}.`);
         }

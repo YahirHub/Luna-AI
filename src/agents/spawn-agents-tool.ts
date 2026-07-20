@@ -95,7 +95,7 @@ export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
     name: "browser_agent",
     description: [
       "Lanza un agente de navegador aislado para navegar sitios interactivos, iniciar sesión mediante credential_ref segura, extraer datos, tomar capturas o descargar archivos.",
-      "El agente trabaja sin visión usando snapshots de accesibilidad y texto renderizado. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por WhatsApp.",
+      "El agente trabaja sin visión usando snapshots de accesibilidad y texto renderizado. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por el chat activo.",
       "Nunca incluyas una contraseña en prompt ni en argumentos: usa únicamente la credential_ref segura que el sistema haya colocado en el mensaje.",
     ].join(" "),
     parameters: {
@@ -354,7 +354,7 @@ export async function executeSpawnAgentsTool(
         index,
         total: uniqueAgents.length,
         agentType: definition.id,
-        // El progreso de WhatsApp muestra la instrucción completa solicitada al
+        // El progreso del chat activo muestra la instrucción completa solicitada al
         // subagente, pero no los bloques internos que contienen credential_ref.
         prompt: request.prompt ?? "",
       });

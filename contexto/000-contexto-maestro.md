@@ -14,21 +14,21 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - Verificar siempre el código fuente actual antes de asumir que un registro histórico sigue vigente.
 - `contexto/` es la memoria persistente técnica del proyecto; evitar registros genéricos, duplicados o de tipo `actualizar nul`.
 - No eliminar ni reemplazar innecesariamente `node_modules`, `assets`, `persistent` ni `dist`.
-- Las eliminaciones intencionales deben quedar reproducibles mediante un script Python seguro desde la raíz del proyecto.
+- Las eliminaciones intencionales deben quedar reproducibles mediante un script Python seguro desde la raíz del proyecto, salvo que el usuario indique explícitamente que la entrega será un reemplazo completo y que no desea scripts de eliminación.
 - Mantener aislados los datos por JID. Ninguna herramienta debe poder leer o escribir fuera del `workdir` privado del usuario.
 - Mientras no exista un modelo seguro de identidad multiusuario, ignorar por completo los mensajes de grupos de WhatsApp (`@g.us`); nunca autenticar ni restaurar sesiones de grupo.
 - Contraseñas, OTP y otras credenciales sensibles no deben exponerse al LLM.
 
 # Arquitectura actual
 
-- Runtime principal en TypeScript/Bun con WhatsApp mediante Baileys.
+- Runtime principal en TypeScript/Bun con núcleo de mensajería independiente del cliente; actualmente se incluye el transporte WhatsApp mediante Baileys.
 - OpenCode Free es el proveedor LLM integrado predeterminado; se admite proveedor OpenAI-compatible personalizado.
 - La configuración de proveedores LLM personalizados solicita una sola URL base OpenAI-compatible y la API key; Luna deriva automáticamente `/models` y `/chat/completions`, consulta el catálogo y obliga a elegir por número el modelo global antes de guardar.
 - El agente principal es el orquestador y delega investigación a `researcher-web` y navegación interactiva a `browser-web`.
 - `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales.
 - Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
 - Workdir privado por usuario con tareas, inbox, exports y registro de artefactos.
-- Generación local de PDF/ZIP, envío por WhatsApp y registro de artefactos.
+- Generación local de PDF/ZIP, envío por el transporte activo mediante `message_send` y registro de artefactos.
 - Procesamiento multimedia local con FFmpeg administrado para decodificación/normalización, whisper.cpp para transcripción y OCR WASM.
 - Alarmas, recordatorios, memoria y contexto persistentes por usuario.
 - Credenciales web persistentes cifradas con AES-256-GCM y clave local compartida con el runtime de `agent-browser`.
@@ -46,10 +46,12 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - Los mensajes de grupos de WhatsApp se descartan antes del procesamiento y `AuthManager` rechaza/purga JIDs `@g.us`, evitando que un login grupal reemplace la sesión privada.
 - Las notas OGG/Opus se decodifican con un runtime FFmpeg estático preparado por plataforma/arquitectura; se verifica su SHA-256, se empaqueta junto al binario y se compara la duración estimada del OGG con el PCM para detectar truncamientos. Whisper ya no usa `--no-timestamps` en audios largos.
 - El modelo LLM es global: los campos `model` heredados de contextos por JID se ignoran y eliminan al cargarse. Cambiar de proveedor o seleccionar un modelo con `!modelos` actualiza inmediatamente todos los chats, tareas y subagentes; la selección global se persiste en `persistent/llm.model.json` ligada al catálogo del provider para impedir cruces entre proveedores.
+- La mensajería está desacoplada mediante `MessagingTransport`, `TransportIncomingMessage` y `TransportRunner`. Baileys queda aislado en `src/transports/baileys/`; el núcleo no importa tipos del SDK. Presencia/escritura y cola son responsabilidad del adaptador. `message_send` es genérica y delega el formato de archivo al transporte.
+- Actualmente se ejecuta un transporte activo por proceso, seleccionado por `--transport` o `LUNA_TRANSPORT`; la factoría solo incluye Baileys por ahora, pero permite registrar otro cliente de WhatsApp o Telegram sin modificar `bot.ts`.
 
 # Archivos y módulos clave
 
-- `src/bot.ts`: orquestación principal, mensajes, comandos y herramientas.
+- `src/bot.ts`: orquestación principal, mensajes normalizados, comandos y herramientas; no depende de Baileys.
 - `src/context.ts`: prompt de sistema, historial y compactación.
 - `src/agents/`: runtime, registro y subagentes.
 - `src/browser/`: navegación, sesiones y credenciales.
@@ -57,6 +59,9 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - `src/workspace/`: aislamiento de archivos por usuario.
 - `src/artifacts/`: PDF y ZIP.
 - `src/media-processing/`: audio, Whisper y OCR.
+- `src/transports/`: contratos, factoría y adaptadores de clientes; `src/transports/baileys/` contiene toda la integración actual de WhatsApp.
+- `src/messaging.ts`: fachada genérica de salida y actividad; no implementa presencia de ninguna plataforma.
+- `src/tools/messaging-tools.ts`: herramienta genérica `message_send` para texto, rutas, archivos y carpetas del workdir.
 - `scripts/`: preparación/empaquetado de runtimes y limpiezas reproducibles.
 
 # Limpieza de contexto
@@ -73,4 +78,4 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Último registro
 
-- `contexto/72-modelo-llm-global.md`
+- `contexto/73-arquitectura-multitransporte-y-adaptador-baileys.md`

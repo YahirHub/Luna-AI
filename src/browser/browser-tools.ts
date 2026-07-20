@@ -124,7 +124,7 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_screenshot",
-      description: "Guarda una captura PNG en el workdir del agente y devuelve su ruta relativa para que el agente principal pueda enviarla por WhatsApp.",
+      description: "Guarda una captura PNG en el workdir del agente y devuelve su ruta relativa para que el agente principal pueda enviarla por el chat activo.",
       parameters: {
         type: "object",
         properties: {

@@ -13,7 +13,7 @@ const config: LlmConfig = {
 const tools: ToolDefinition[] = [{
   type: "function",
   function: {
-    name: "whatsapp_send",
+    name: "message_send",
     description: "Envía un artefacto.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -31,7 +31,7 @@ describe("límite de rondas de herramientas", () => {
       bodies.push(body);
       if (bodies.length === 1) {
         return new Response(JSON.stringify({
-          choices: [{ message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "whatsapp_send", arguments: "{}" } }] } }],
+          choices: [{ message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "message_send", arguments: "{}" } }] } }],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return new Response(JSON.stringify({
@@ -51,7 +51,7 @@ describe("límite de rondas de herramientas", () => {
     );
 
     expect(result.content).toBe("✅ El PDF se envió correctamente.");
-    expect(result.toolsCalled).toEqual(["whatsapp_send"]);
+    expect(result.toolsCalled).toEqual(["message_send"]);
     expect(bodies).toHaveLength(2);
     expect(bodies[0]?.tools).toBeDefined();
     expect(bodies[1]?.tools).toBeUndefined();
@@ -63,7 +63,7 @@ describe("límite de rondas de herramientas", () => {
       calls += 1;
       if (calls === 1) {
         return new Response(JSON.stringify({
-          choices: [{ message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "whatsapp_send", arguments: "{}" } }] } }],
+          choices: [{ message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "message_send", arguments: "{}" } }] } }],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       throw new Error("gateway offline");

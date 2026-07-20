@@ -148,7 +148,7 @@ function isMediaRequest(value: unknown): value is MediaWorkerRequest {
 
 /**
  * Ejecuta el procesador multimedia como un subproceso persistente del mismo
- * binario. El aislamiento conserva WhatsApp responsivo y evita depender de
+ * binario. El aislamiento conserva el transporte principal responsivo y evita depender de
  * rutas de Worker que Bun 1.3.14 resuelve contra src/ en Windows standalone.
  */
 export async function runMediaProcessorChild(): Promise<void> {

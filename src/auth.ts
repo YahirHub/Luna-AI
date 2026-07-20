@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
 import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
-import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -27,6 +26,14 @@ interface UsersFile {
   users: UserRecord[];
   /** Sesiones activas: JID -> nombre de usuario. */
   sessions?: Record<string, string>;
+}
+
+
+/** Migración defensiva de sesiones antiguas creadas desde grupos de WhatsApp.
+ * El núcleo de autenticación no depende del adaptador activo; solo reconoce
+ * este sufijo histórico al sanear users.json. */
+function isLegacyGroupSessionId(value: string): boolean {
+  return value.toLowerCase().endsWith("@g.us");
 }
 
 function normalizeUsername(username: string): string {
@@ -77,7 +84,7 @@ export class AuthManager {
       const validUsers = new Map(this.users.map((user) => [user.username, user]));
       const rawSessions = Object.entries(data.sessions ?? {});
       const restoredSessions = rawSessions.filter(([jid, username]) => {
-        if (typeof username !== "string" || isWhatsAppGroupJid(jid)) return false;
+        if (typeof username !== "string" || isLegacyGroupSessionId(jid)) return false;
         const user = validUsers.get(normalizeUsername(username));
         return Boolean(jid && user && !user.banned);
       });
@@ -88,7 +95,7 @@ export class AuthManager {
       // Elimina también del archivo las sesiones de grupo creadas por versiones
       // anteriores. Si el archivo no se puede escribir, la sesión sigue descartada
       // en memoria y se volverá a intentar sanear en un inicio posterior.
-      if (rawSessions.some(([jid]) => isWhatsAppGroupJid(jid))) {
+      if (rawSessions.some(([jid]) => isLegacyGroupSessionId(jid))) {
         try {
           this.save();
         } catch (err) {
@@ -195,7 +202,7 @@ export class AuthManager {
   // ── Sesiones ─────────────────────────────────────────────────
 
   async login(jid: string, username: string, password: string): Promise<boolean> {
-    if (isWhatsAppGroupJid(jid)) return false;
+    if (isLegacyGroupSessionId(jid)) return false;
 
     const user = this.findUser(username);
     if (!user || user.banned) return false;

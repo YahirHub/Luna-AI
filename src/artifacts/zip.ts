@@ -223,7 +223,7 @@ const SECRET_PATTERNS = [
   /(?:^|\/)(?:id_rsa|id_ed25519)(?:\.pub)?$/i,
   /\.(?:pem|key|p12|pfx)$/i,
   /(?:credentials|secrets?|auth)[^/]*\.json$/i,
-  /(?:^|\/)auth_info_baileys(?:\/|$)/i,
+  /(?:^|\/)auth_info_[^/]+(?:\/|$)/i,
   /(?:^|\/)persistent(?:\/|$)/i,
 ];
 

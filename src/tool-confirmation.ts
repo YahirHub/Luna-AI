@@ -17,7 +17,7 @@ const MUTATING_TOOLS = new Set([
   "create_pdf_from_markdown",
   "archive_folder",
   "gitzip",
-  "whatsapp_send",
+  "message_send",
   "conversation_clear",
   "model_set",
   "workspace_clear",

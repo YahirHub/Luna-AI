@@ -1,4 +1,4 @@
-import type { WASocket } from "@whiskeysockets/baileys";
+import type { MessagingTransport } from "./transports/types.ts";
 
 /** Comando interpretado a partir de un mensaje de texto. */
 export interface ParsedCommand {
@@ -50,11 +50,11 @@ export interface CommandResult {
   text: string;
 }
 
-/** Firma de un manejador de comandos. Incluye sock para acciones avanzadas. */
+/** Firma de un manejador de comandos. Incluye el transporte para acciones avanzadas. */
 export type CommandHandler = (
   command: ParsedCommand,
   senderJid: string,
-  sock: WASocket,
+  transport: MessagingTransport,
 ) => CommandResult | Promise<CommandResult>;
 
 /** Manejadores registrados: nombre del comando -> handler. */
@@ -103,13 +103,13 @@ export function getCommands(
 export async function dispatchCommand(
   command: ParsedCommand,
   senderJid: string,
-  sock: WASocket,
+  transport: MessagingTransport,
 ): Promise<CommandResult | null> {
   const handler = handlers.get(command.name.toLowerCase());
   if (!handler) {
     return null;
   }
-  return handler(command, senderJid, sock);
+  return handler(command, senderJid, transport);
 }
 
 /** Verifica si un texto parece un número entero positivo. */

@@ -1,23 +1,35 @@
 import { describe, expect, it } from "bun:test";
-import type { WASocket } from "@whiskeysockets/baileys";
-import { startContinuousTyping } from "../src/messaging.ts";
+import type { MessagingTransport, TransportActivitySession } from "../src/transports/types.ts";
+import { startActivity } from "../src/messaging.ts";
 
-describe("continuous typing", () => {
-  it("activa composing y termina en paused sin añadir retrasos", async () => {
+function mockTransport(states: string[]): MessagingTransport {
+  return {
+    id: "test",
+    label: "Test",
+    send: async () => "sent",
+    startActivity: async (): Promise<TransportActivitySession> => {
+      states.push("start");
+      return {
+        refresh: async () => { states.push("refresh"); },
+        stop: async () => { states.push("stop"); },
+      };
+    },
+    markRead: async () => undefined,
+    deleteMessage: async () => undefined,
+  };
+}
+
+describe("actividad de transporte", () => {
+  it("delega la actividad larga al adaptador activo", async () => {
     const states: string[] = [];
-    const sock = {
-      sendPresenceUpdate: async (state: string) => {
-        states.push(state);
-      },
-    } as unknown as WASocket;
-
-    const session = await startContinuousTyping(sock, "user@s.whatsapp.net", 60_000);
-    expect(states).toEqual(["composing"]);
+    const transport = mockTransport(states);
+    const session = await startActivity(transport, "conversation-1", 60_000);
+    expect(states).toEqual(["start"]);
 
     await session.refresh();
-    expect(states).toEqual(["composing", "composing"]);
+    expect(states).toEqual(["start", "refresh"]);
 
     await session.stop();
-    expect(states.at(-1)).toBe("paused");
+    expect(states.at(-1)).toBe("stop");
   });
 });

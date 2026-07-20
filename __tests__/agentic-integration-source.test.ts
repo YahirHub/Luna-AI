@@ -20,7 +20,7 @@ describe("integración agéntica", () => {
     expect(definition).toContain('["web_search", "read_url"]');
     expect(definition).toContain("includeMessageHistory: false");
     expect(definition).toContain('outputMode: "last_message"');
-    expect(definition).not.toContain("WHATSAPP_TOOLS");
+    expect(definition).not.toContain("MESSAGING_TOOLS");
     expect(definition).not.toContain("REMINDER_TOOLS");
     expect(definition).not.toContain("ALARM_TOOLS");
   });
@@ -32,7 +32,7 @@ describe("integración agéntica", () => {
     expect(bot).toContain('name === "researcher_web"');
     expect(bot).not.toContain('name === "parallel_research_report"');
     expect(bot).toContain("executeArtifactTool");
-    expect(bot).toContain("executeWhatsAppTool");
+    expect(bot).toContain("executeMessagingTool");
     expect(context).toContain("spawn_agents NO genera informes ni PDFs y NO es terminal");
     expect(source("src/artifacts/artifact-tools.ts")).toContain('name: "gitzip"');
   });

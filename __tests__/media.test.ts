@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { WAMessage } from "@whiskeysockets/baileys";
+import type { TransportIncomingMessage } from "../src/transports/types.ts";
 import {
   buildAudioContextText,
   buildImageContextText,
@@ -9,6 +9,19 @@ import {
   isAllowedImageMime,
   isWithinSizeLimit,
 } from "../src/media.ts";
+
+function baseMessage(): TransportIncomingMessage {
+  return {
+    transportId: "test",
+    conversationId: "conversation-1",
+    chatId: "conversation-1",
+    senderId: "user-1",
+    messageId: "message-1",
+    fromSelf: false,
+    isGroup: false,
+    text: "",
+  };
+}
 
 describe("formatos multimedia", () => {
   it("acepta JPEG y PNG para OCR", () => {
@@ -43,11 +56,24 @@ describe("límites", () => {
 });
 
 describe("detección y contexto", () => {
-  it("detecta imagen, audio y pie de imagen", () => {
-    const image = {
-      message: { imageMessage: { caption: "  revisa esta factura  " } },
-    } as unknown as WAMessage;
-    const audio = { message: { audioMessage: {} } } as unknown as WAMessage;
+  it("detecta imagen, audio y pie de imagen sin depender del SDK del cliente", () => {
+    const image: TransportIncomingMessage = {
+      ...baseMessage(),
+      media: {
+        kind: "image",
+        mimeType: "image/jpeg",
+        caption: "  revisa esta factura  ",
+        download: async () => new Uint8Array(),
+      },
+    };
+    const audio: TransportIncomingMessage = {
+      ...baseMessage(),
+      media: {
+        kind: "audio",
+        mimeType: "audio/ogg; codecs=opus",
+        download: async () => new Uint8Array(),
+      },
+    };
 
     expect(getMediaKind(image)).toBe("image");
     expect(getMediaCaption(image)).toBe("revisa esta factura");

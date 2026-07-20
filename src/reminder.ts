@@ -7,7 +7,6 @@ import {
   sanitizePathSegment,
   writeJsonFileAtomically,
 } from "./storage.ts";
-import type { WASocket } from "@whiskeysockets/baileys";
 import {
   buildReminderDeliveryMessage,
   normalizePreparedScheduledMessage,
@@ -48,7 +47,6 @@ export class ReminderManager {
   private reminders: Reminder[] = [];
   private readonly baseDir: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
-  private sock: WASocket | null = null;
   private checking = false;
 
   constructor(testBaseDir?: string) {
@@ -125,17 +123,6 @@ export class ReminderManager {
       this.reminders = snapshot;
       throw err;
     }
-  }
-
-  // ── Socket ───────────────────────────────────────────────────
-
-  /** Actualiza la referencia al socket activo (cambia en reconexiones). */
-  setSock(sock: WASocket | null): void {
-    this.sock = sock;
-  }
-
-  getSock(): WASocket | null {
-    return this.sock;
   }
 
   // ── CRUD ─────────────────────────────────────────────────────
@@ -273,7 +260,7 @@ export class ReminderManager {
    * Llama onDue por cada recordatorio que deba dispararse.
    */
   startChecker(
-    onDue: (reminder: Reminder, sock: WASocket | null) => Promise<void>,
+    onDue: (reminder: Reminder) => Promise<void>,
   ): void {
     if (this.intervalId !== null) return; // ya iniciado
 
@@ -285,7 +272,7 @@ export class ReminderManager {
         for (const reminder of due) {
           try {
             this.markDeliveryPending(reminder.id);
-            await onDue(reminder, this.sock);
+            await onDue(reminder);
             this.markFired(reminder.id);
           } catch (err) {
             console.error(

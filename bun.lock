@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "whatsapp-bot",
+      "name": "luna-ai",
       "dependencies": {
         "@tesseract.js-data/spa": "1.0.0",
         "@twemoji/parser": "15.0.0",

@@ -4,12 +4,13 @@
 
 # Luna AI
 
-Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuario, recordatorios, alarmas recurrentes, transcripción y OCR locales, búsqueda web multiproveedor, subagentes de investigación y navegación interactiva, selección de modelos y control de acceso.
+Asistente agéntico en TypeScript y Bun con un núcleo de mensajería independiente del cliente. El transporte incluido actualmente es WhatsApp mediante Baileys, pero autenticación del cliente, reconexión, presencia, descarga de medios y envío se aíslan detrás de adaptadores para poder sustituir Baileys o incorporar otros transportes, como Telegram, sin reescribir el núcleo del bot.
 
 ## Funciones principales
 
-- Vinculación de WhatsApp mediante código QR o número telefónico.
-- Reconexión automática y sesión persistente.
+- Arquitectura de mensajería multitransporte: el núcleo no importa Baileys ni tipos del SDK de WhatsApp.
+- Transporte incluido: WhatsApp mediante Baileys, con vinculación por código QR o número telefónico.
+- Reconexión automática, sesión persistente y cola de salida administradas por el adaptador Baileys.
 - Conversación con contexto por usuario y compactación automática.
 - Memoria duradera separada del historial conversacional; al crear un perfil nuevo Luna pregunta el nombre de forma simpática y lo guarda cuando se confirma.
 - Recordatorios de una sola vez y alarmas recurrentes con mensaje de entrega persistido desde su creación. Cada creación válida genera una confirmación autoritativa del sistema; Luna no puede sustituirla con una afirmación inventada.
@@ -21,7 +22,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Lectura segura de fuentes públicas mediante una herramienta interna.
 - Subagente investigador aislado para consultas que requieren varias búsquedas o fuentes.
 - Subagente `browser-web` basado en `agent-browser` para navegación interactiva, sesiones autenticadas, extracción de paneles, capturas y descargas sin requerir modelos con visión.
-- Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
+- Configuración del agente y de los motores desde el chat activo, sin editar archivos manualmente.
 - Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
 - OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
@@ -33,7 +34,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 ## Requisitos
 
 - Bun 1.3.14 para desarrollo o compilación local.
-- Una cuenta de WhatsApp para vincular el bot.
+- Para el transporte incluido actualmente, una cuenta de WhatsApp para vincular Baileys.
 - Opcional: claves de uno o más motores de búsqueda.
 - Opcional: un proveedor LLM compatible con la API de chat completions de OpenAI.
 - Conexión a internet durante la primera preparación cuando falten runtimes. `bun install`, `bun run dev`, `bun run start` y `bun run build` preparan automáticamente `agent-browser`; `bun run dev`, `bun run start` y `bun run build` también preparan o reutilizan los assets multimedia cuando corresponde. Después, los componentes ya descargados se reutilizan.
@@ -53,12 +54,69 @@ bun run start --qr
 
 No es necesario crear `.env` ni archivos JSON manualmente.
 
-1. Inicia Luna y vincula WhatsApp.
+1. Inicia Luna y vincula el transporte configurado; con el adaptador incluido, vincula WhatsApp.
 2. Envía `!setup` para crear la primera cuenta administradora.
 3. Inicia sesión con `!login`.
 4. Conversa normalmente: Luna usa OpenCode Free de forma automática.
 5. Configura búsqueda web con `/setup-search` cuando necesites acceso a internet.
 6. Opcionalmente ajusta el modelo de transcripción con `!setup-whisper`.
+
+## Arquitectura de transportes
+
+Luna ejecuta **un transporte activo por proceso** y separa por completo el núcleo conversacional del SDK usado para recibir y enviar mensajes.
+
+```text
+src/index.ts
+  ↓
+src/connection.ts
+  ↓
+src/transports/factory.ts
+  ↓
+TransportRunner
+  ├─ autenticación y ciclo de vida del cliente
+  ├─ reconexión
+  └─ normalización de eventos nativos
+        ↓
+MessagingTransport + TransportIncomingMessage
+        ↓
+src/bot.ts / comandos / media / tools / recordatorios
+```
+
+Los contratos viven en `src/transports/types.ts`:
+
+- `MessagingTransport`: envío de texto/archivos, actividad opcional, marcado de lectura y borrado best-effort.
+- `TransportIncomingMessage`: mensaje normalizado que usa el núcleo sin conocer estructuras de Baileys, Telegram u otro SDK.
+- `TransportRunner`: autenticación, reconexión y ciclo de vida de una implementación concreta.
+
+El transporte actual se encuentra completamente aislado en:
+
+```text
+src/transports/baileys/
+├── adapter.ts   # Normalización, cola, presencia, envío y medios
+└── runner.ts    # Sesión, QR/pairing, socket y reconexión
+```
+
+`src/bot.ts`, `src/commands.ts`, `src/media.ts`, `src/messaging.ts` y `src/scheduled-messages.ts` no importan `@whiskeysockets/baileys`, `WASocket` ni `WAMessage`.
+
+La selección se centraliza en `src/transports/factory.ts`. Actualmente están aceptados:
+
+```bash
+bun run start --transport=baileys
+# alias
+bun run start --transport=whatsapp
+```
+
+También puede usarse:
+
+```text
+LUNA_TRANSPORT=baileys
+```
+
+Para integrar otra librería de WhatsApp o Telegram se implementa un nuevo `MessagingTransport`, un normalizador de mensajes y un `TransportRunner`, y se registra en la factoría. El núcleo de IA, autenticación de usuarios de Luna, memoria, contexto, herramientas, multimedia y recordatorios no necesita conocer el SDK nuevo. Telegram **no viene implementado todavía**; la estructura queda preparada para añadirlo sin acoplarlo al bot principal. Para plataformas con IDs incompatibles se recomienda que el adaptador entregue un `conversationId` con namespace, por ejemplo `telegram:123456`, evitando colisiones con identidades de otros transportes.
+
+La simulación de escritura tampoco existe como implementación de WhatsApp en el núcleo. `src/messaging.ts` solo delega. El adaptador Baileys aplica `composing → espera → envío → paused` a **cada mensaje saliente**, incluidos textos y archivos. Las operaciones largas pueden solicitar una actividad genérica con `startActivity`; cada adaptador decide si eso significa `composing`, `sendChatAction` o ninguna acción.
+
+La herramienta genérica `message_send` recibe texto o una ruta del workdir. Si recibe una carpeta, crea un ZIP; si recibe un archivo, detecta su MIME y entrega `mode=auto` al transporte. Baileys envía imágenes, audio y video pequeños como medios nativos y utiliza documento para otros tipos o archivos mayores. Un futuro adaptador puede aplicar sus propias capacidades sin cambiar la herramienta.
 
 ## Procesamiento multimedia local
 
@@ -72,7 +130,7 @@ Luna procesa localmente las notas de voz y el texto de imágenes. El bot princip
 - El administrador puede usar `!setup-whisper` para descargar otro modelo oficial, activarlo globalmente y ajustar idioma, traducción, hilos, best-of, beam size, temperatura, umbral sin voz, duración máxima y timeout.
 - Los modelos descargados se guardan en `persistent/whisper/models/`, por lo que sobreviven reinicios y actualizaciones del contenedor.
 - FFmpeg realiza la mezcla a mono y el remuestreo a 16 kHz antes de transcribir.
-- WhatsApp muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
+- El transporte activo muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
 
 
 ### Configuración global de Whisper
@@ -124,7 +182,7 @@ Las transcripciones se marcan como texto generado por el sistema. El prompt de L
 - Tesseract WASM y el modelo rápido de español se incorporan al binario.
 - El texto extraído y el pie de imagen se entregan al asistente con marcadores que conservan su origen.
 
-El procesamiento pesado corre en un subproceso persistente y serializado para no bloquear la conexión de WhatsApp. El subproceso ejecuta `whisper-cli` para audio y Tesseract WASM para OCR. Luna mantiene el estado `escribiendo` durante el trabajo y admite como máximo tres solicitudes pendientes para evitar saturar memoria.
+El procesamiento pesado corre en un subproceso persistente y serializado para no bloquear el transporte principal. El subproceso ejecuta `whisper-cli` para audio y Tesseract WASM para OCR. Durante trabajos largos el núcleo solicita una actividad genérica al transporte; Baileys la representa como `composing`. Se admiten como máximo tres solicitudes pendientes para evitar saturar memoria.
 
 Durante `bun run dev`, `bun run start` y `bun run build`, `scripts/prepare-media-assets.ts` prepara los runtimes multimedia. Para whisper.cpp consulta la release `latest` compatible con Windows x64, Linux x64 o Linux arm64. Para FFmpeg descarga el binario estático de la release fijada `b6.1.1` de `eugeneware/ffmpeg-static` según plataforma/arquitectura. Ambos binarios se verifican con el digest SHA-256 publicado por GitHub antes de usarse. También descarga y verifica el modelo Whisper y prepara los recursos OCR. `assets/runtime/` es temporal y no se versiona; los runtimes válidos se reutilizan en ejecuciones posteriores.
 
@@ -266,7 +324,7 @@ La clave de cifrado es compartida por el almacén de credenciales y el runtime d
 
 Cuando `browser-web` llega a una pantalla de login, primero puede consultar `browser_auth_profiles`. Si encuentra una cuenta compatible, `browser_auth_login` descifra la contraseña únicamente dentro del runtime, la entrega temporalmente a `agent-browser` por `stdin`, inicia sesión y vuelve a eliminar el perfil temporal del vault interno del CLI. Si la sesión web caduca, el agente puede repetir el login con el perfil cifrado sin volver a pedir la contraseña. Si la contraseña real cambió o dejó de ser válida, el agente solicita una nueva mediante `browser_request_user_input`; después de un login correcto la credencial cifrada de URL + usuario se reemplaza sin crear duplicados.
 
-Si durante la navegación falta información humana, `browser-web` dispone de `browser_request_user_input`. El sistema puede solicitar `username`, `password`, `otp` o texto adicional y reanudar la solicitud original cuando el usuario responda. Los valores no secretos pueden volver al contexto como datos de sistema; las contraseñas y OTP se capturan fuera del modelo. Las contraseñas se convierten en una `credential_ref` y los secretos de un solo uso en una `secret_ref`, que solo puede consumir `browser_fill_secret`. Los mensajes de contraseña/OTP se intentan borrar de WhatsApp después de capturarlos.
+Si durante la navegación falta información humana, `browser-web` dispone de `browser_request_user_input`. El sistema puede solicitar `username`, `password`, `otp` o texto adicional y reanudar la solicitud original cuando el usuario responda. Los valores no secretos pueden volver al contexto como datos de sistema; las contraseñas y OTP se capturan fuera del modelo. Las contraseñas se convierten en una `credential_ref` y los secretos de un solo uso en una `secret_ref`, que solo puede consumir `browser_fill_secret`. Los mensajes de contraseña/OTP se intentan borrar mediante el transporte activo después de capturarlos, cuando la plataforma lo permite.
 
 Si el orquestador principal sabe desde el inicio que falta una contraseña, todavía puede llamar `browser_request_credential`; solo entonces Luna envía un mensaje marcado como `MENSAJE DEL SISTEMA`, indicando que por seguridad el agente no debe conocer la contraseña. El siguiente mensaje se captura fuera del modelo y la tarea se reanuda automáticamente.
 
@@ -285,7 +343,7 @@ persistent/contexts/<jid>/workdir/tasks/<task-id>/agents/01-browser-web/
     └── downloads/
 ```
 
-Las capturas y descargas se registran como artefactos del workdir. Si el usuario pide una captura, el agente de navegador crea el PNG y el agente principal lo envía con `whatsapp_send`. Si pide un informe, el agente principal recibe la síntesis y las rutas de artefactos, crea el Markdown/PDF y después lo envía. El contenido de páginas se trata como no confiable y `agent-browser` se ejecuta con content boundaries y límite de salida.
+Las capturas y descargas se registran como artefactos del workdir. Si el usuario pide una captura, el agente de navegador crea el PNG y el agente principal lo envía con `message_send`. Si pide un informe, el agente principal recibe la síntesis y las rutas de artefactos, crea el Markdown/PDF y después lo envía. El contenido de páginas se trata como no confiable y `agent-browser` se ejecuta con content boundaries y límite de salida.
 
 La preparación de `agent-browser` es automática. `bun install` ejecuta `prepare:browser` mediante `postinstall`, y `bun run start`, `bun run dev` y `bun run build` vuelven a ejecutar esa preparación de forma idempotente. El script usa primero el binario nativo instalado en `node_modules`; si Bun no ejecutó el lifecycle del paquete, intenta el `postinstall` oficial y, como último fallback, descarga el binario exacto de la release configurada. `assets/runtime/agent-browser/manifest.json` registra versión, plataforma y arquitectura para impedir que un binario x64 conservado se reutilice en ARM64 o viceversa. `scripts/package-runtime.ts` copia tanto el binario como el manifest a `dist/runtime/agent-browser/`.
 
@@ -318,7 +376,7 @@ workspace_write_text
   ↓
 create_pdf_from_markdown
   ↓
-whatsapp_send
+message_send
 ```
 
 `spawn_agents` no es terminal y no crea PDFs por sí mismo. Después de terminar, el agente principal sigue razonando normalmente. Esto permite que una investigación fallida se repita de forma enfocada sin reiniciar las demás y evita convertir la investigación en una mega-herramienta rígida.
@@ -347,7 +405,7 @@ persistent/contexts/<jid>/workdir/tasks/<task-id>/
 
 `task_list`, `task_status` y `task_cancel` siguen disponibles para consultar o cancelar tareas desde lenguaje natural.
 
-### Progreso visible en WhatsApp
+### Progreso visible en el chat activo
 
 Luna muestra solo eventos importantes:
 
@@ -375,11 +433,11 @@ Las herramientas de artefactos pueden:
 - Resolver rutas contra el `realpath` del workdir y de su ancestro existente más cercano, bloqueando lecturas y escrituras que intenten escapar mediante symlinks o junctions externos.
 - Detectar nombres sensibles como `.env`, claves privadas, credenciales, `persistent/` o sesiones de Baileys antes de compartir código.
 
-`whatsapp_send` solo puede devolver contenido al mismo JID que originó la tarea. Imágenes, audio y video de hasta 10 MiB se envían con su tipo nativo; archivos mayores se envían como documento. Las carpetas se comprimen como ZIP antes de enviarse y cualquier tipo desconocido se trata como documento.
+`message_send` solo puede devolver contenido a la misma conversación que originó la tarea. La herramienta detecta rutas del workdir y delega el formato final al transporte activo. Con Baileys, imágenes, audio y video de hasta 10 MiB se envían con su tipo nativo; archivos mayores o tipos desconocidos se envían como documento. Las carpetas se comprimen como ZIP antes de enviarse.
 
 ## `/config`
 
-El administrador puede modificar el comportamiento del agente desde WhatsApp:
+El administrador puede modificar el comportamiento del agente desde el chat activo:
 
 ```text
 /config
@@ -448,7 +506,7 @@ LUNA_SEARCH_RETRY_BASE_MS=1500
 LUNA_LLM_RETRY_ATTEMPTS=3
 LUNA_LLM_RETRY_BASE_MS=1500
 
-# Cadencia de entrega de todos los mensajes salientes por WhatsApp.
+# Cadencia de entrega del adaptador Baileys (WhatsApp).
 # Si el socket se cierra, el mensaje queda temporalmente en memoria y
 # se reenvía automáticamente al reconectar.
 LUNA_WHATSAPP_MIN_DELAY_MS=1200
@@ -458,9 +516,9 @@ LUNA_WHATSAPP_SEND_RETRY_ATTEMPTS=3
 
 Para Tavily Free se recomienda conservar concurrencia `1` e intervalo mínimo de `1250` ms. Los investigadores continúan en paralelo mientras esperan su turno para buscar y pueden leer y procesar sus fuentes de forma independiente. Si Tavily queda limitado y Brave, Exa u otro motor configurado está disponible, la misma consulta continúa automáticamente con el siguiente proveedor.
 
-## Entrega resiliente por WhatsApp
+## Entrega resiliente del adaptador Baileys
 
-Todos los mensajes salientes de Luna —respuestas finales, progreso de subagentes, avisos de herramientas, OCR/transcripción, alarmas, recordatorios y artefactos— pasan por una única cola de entrega. Antes de cada envío se simula brevemente el estado `composing`.
+Con el transporte Baileys, todos los mensajes salientes de Luna —respuestas finales, progreso de subagentes, avisos de herramientas, OCR/transcripción, alarmas, recordatorios y artefactos— pasan por una única cola dentro del adaptador. Antes de cada envío el propio adaptador simula `composing`; el núcleo no contiene llamadas de presencia de WhatsApp.
 
 Si Baileys devuelve errores de desconexión como `Connection Closed`/HTTP 428 o el socket desaparece durante una tarea:
 
@@ -483,17 +541,23 @@ Al dispararse una notificación:
 
 1. Si existe modelo y proveedor, Luna recibe el mensaje persistido y puede usarlo tal cual o reformularlo sin cambiar la acción ni los datos importantes.
 2. Si el proveedor falla, no existe modelo o la respuesta está vacía o solo repite el título, se envía el mensaje persistido.
-3. WhatsApp nunca recibe únicamente `⏰ RECORDATORIO` o un cuerpo vacío.
+3. El transporte activo nunca recibe únicamente `⏰ RECORDATORIO` o un cuerpo vacío.
 4. Después de una entrega confirmada se agregan al contexto el evento automático y el texto exacto enviado.
 
 Esto permite preguntas posteriores como “¿qué recordatorio me enviaste hoy?” o “¿qué alarma sonó?” con contexto conversacional. Luna no lee ni migra el antiguo archivo global `persistent/reminders.json`; durante las pruebas locales puede eliminarse manualmente.
 
 ## Ejecución
 
-Inicio normal:
+Inicio normal (usa `baileys` por defecto):
 
 ```bash
 bun run start
+```
+
+Selección explícita del transporte actual:
+
+```bash
+bun run start --transport=baileys
 ```
 
 Vinculación mediante QR:
@@ -554,7 +618,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 |---|---|
 | `!ayuda` | Muestra los comandos permitidos para la sesión. |
 | `!ping` | Responde con `pong`. |
-| `!id` | Muestra el JID de WhatsApp. |
+| `!id` | Muestra el identificador de la conversación activa. |
 | `!cambiar-password` | Cambia la contraseña de la cuenta autenticada; si no se incluye el valor, inicia una captura segura. |
 | `/cancelar` | Cancela el flujo interactivo actual. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
@@ -573,7 +637,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!desban` | Desbloquea un usuario; solo administrador. |
 | `!userlist` | Lista usuarios; solo administrador. |
 
-Todos los comandos funcionales de una sesión autenticada tienen una vía equivalente por lenguaje natural. Un usuario puede pedir ayuda, consultar su JID, cancelar una operación, limpiar su conversación, listar o cambiar el modelo y limpiar su propio workdir sin recordar el comando exacto. `!setup` y `!login` también aceptan frases naturales como “crear administrador” o “iniciar sesión”, pero siguen procesándose localmente para no enviar credenciales al proveedor LLM.
+Todos los comandos funcionales de una sesión autenticada tienen una vía equivalente por lenguaje natural. Un usuario puede pedir ayuda, consultar su identificador de chat, cancelar una operación, limpiar su conversación, listar o cambiar el modelo y limpiar su propio workdir sin recordar el comando exacto. `!setup` y `!login` también aceptan frases naturales como “crear administrador” o “iniciar sesión”, pero siguen procesándose localmente para no enviar credenciales al proveedor LLM.
 
 Los administradores heredan todas las capacidades normales y además pueden administrar por lenguaje natural usuarios, Whisper, proveedor LLM, motores de búsqueda y las opciones funcionales de `/config`. Si una API key de un motor se incluye directamente en la misma frase natural (por ejemplo, "usa esta key en Firecrawl: ..."), Luna detecta proveedor y secreto localmente, la guarda de inmediato y evita pedirla otra vez. Si el secreto todavía no se proporcionó, inicia la captura segura en el siguiente mensaje. El cambio de contraseña funciona de la misma manera para cualquier usuario autenticado y también está disponible mediante `!cambiar-password`. Los secretos capturados por estas rutas se procesan fuera del LLM cuando es posible y Luna intenta borrar el mensaje que los contiene. Los parámetros internos de resiliencia, reintentos y backoff no se exponen como herramientas naturales.
 
@@ -595,7 +659,7 @@ Ejemplos de administración natural:
 
 ```text
 persistent/
-├── auth_info_baileys/       # Sesión de WhatsApp
+├── auth_info_baileys/       # Sesión del adaptador Baileys actual
 ├── contexts/<jid>/
 │   ├── context.json         # Conversación, alarmas entregadas, modelo y compactación
 │   ├── memory.md            # Memoria duradera del usuario
@@ -670,13 +734,17 @@ src/
 ├── workspace/               # Workdir aislado, rutas seguras y artefactos
 ├── orchestration/           # Persistencia y cancelación de tareas
 ├── artifacts/               # PDF, ZIP y gitzip
-├── tools/                   # Envío de artefactos por WhatsApp
+├── tools/                   # Herramientas de mensajería y envío de artefactos
 ├── providers/
 │   └── opencode-free.ts     # Proveedor LLM gratuito integrado
 ├── llm-config.ts            # Proveedor personalizado y /setup-provider
 ├── auth.ts                  # Usuarios, sesiones y permisos
 ├── admin-tools.ts           # Whisper y usuarios por lenguaje natural, solo admin
 ├── tool-confirmation.ts     # Confirmación autoritativa y bloqueo de falsos positivos
+├── transports/              # Contratos, factoría y adaptadores de clientes de mensajería
+│   └── baileys/             # Runner y adaptador del transporte WhatsApp actual
+├── messaging.ts             # Fachada genérica de salida/actividad sin SDK concreto
+├── connection.ts            # Arranque del TransportRunner seleccionado
 ├── bot.ts                   # Orquestación, comandos, permisos y ejecución confirmada de tools
 ├── context.ts               # Contexto persistente, reglas de veracidad y compactación
 ├── scheduled-copy.ts        # Mensajes persistidos y fallback local de Luna
@@ -685,7 +753,7 @@ src/
 ├── memory.ts                # Memoria persistente y perfil inicial simpático
 ├── reminder.ts              # Recordatorios
 ├── alarm.ts                 # Alarmas recurrentes
-└── index.ts                 # Entrada y vinculación
+└── index.ts                 # Entrada genérica del proceso
 ```
 
 ## Calidad y compilación

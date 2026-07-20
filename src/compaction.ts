@@ -275,7 +275,7 @@ export function buildCompactionPrompt(options: {
     .join("\n\n");
 
   const systemContent = [
-    "Eres el motor de compactación de una conversación de WhatsApp.",
+    "Eres el motor de compactación de una conversación del asistente.",
     "",
     "Tu tarea es convertir mensajes antiguos en una memoria estructurada,",
     "precisa y breve que permita continuar la conversación sin perder datos",

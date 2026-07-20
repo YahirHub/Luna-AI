@@ -1,4 +1,4 @@
-import type { WASocket, WAMessage } from "@whiskeysockets/baileys";
+import type { MessagingTransport, TransportIncomingMessage } from "./transports/types.ts";
 import {
   registerCommand,
   getCommands,
@@ -70,7 +70,7 @@ import {
   estimateRequestTokens,
 } from "./compaction.ts";
 import { estimateTokensAccurate } from "./ai.ts";
-import { sendWithTyping, startContinuousTyping, sendWhatsAppMessage, setMessagingSocket } from "./messaging.ts";
+import { sendTextHumanized, startActivity, sendText } from "./messaging.ts";
 import { deliverScheduledMessage } from "./scheduled-messages.ts";
 import {
   recordAlarmDeliveryInContext,
@@ -126,9 +126,9 @@ import {
 } from "./artifacts/artifact-tools.ts";
 import { TaskRuntime } from "./orchestration/task-runtime.ts";
 import {
-  WHATSAPP_TOOLS,
-  executeWhatsAppTool,
-} from "./tools/whatsapp-tools.ts";
+  MESSAGING_TOOLS,
+  executeMessagingTool,
+} from "./tools/messaging-tools.ts";
 import {
   executeAgentTaskTool,
   executeBrowserWebTool,
@@ -144,12 +144,12 @@ import {
   ADMIN_CONTROL_TOOLS,
 } from "./control-tools.ts";
 import { extractSecretTokenFromMessage } from "./utils.ts";
-import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 import {
   browserCredentialStore,
   extractBrowserLoginIntent,
   sanitizeBrowserCredentialText,
 } from "./browser/browser-credentials.ts";
+import { getActiveTransport } from "./transports/active.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -164,7 +164,7 @@ let schedulersStarted = false;
 /** Modelos disponibles actualmente; siempre incluye el predeterminado. */
 let availableModels: string[] = [];
 
-/** Flujo temporal para configurar el proveedor desde WhatsApp. */
+/** Flujo temporal para configurar el proveedor desde el chat activo. */
 const providerSetupManager = new ProviderSetupManager();
 
 /** Configuración persistente de herramientas y subagentes. */
@@ -190,9 +190,6 @@ const alarmManager = new AlarmManager();
 const workspaceManager = new WorkspaceManager();
 const taskRuntime = new TaskRuntime(workspaceManager);
 
-// Variable para guardar el socket actual (para alarmas)
-let currentSock: WASocket | null = null;
-
 /** JIDs actualmente en proceso de compactación (para ignorar mensajes entrantes). */
 const compactingJids = new Set<string>();
 
@@ -208,7 +205,7 @@ const BASE_TOOLS = [
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
   ...ARTIFACT_TOOLS,
-  ...WHATSAPP_TOOLS,
+  ...MESSAGING_TOOLS,
   ...USER_CONTROL_TOOLS,
 ];
 
@@ -244,7 +241,7 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["create_pdf_from_markdown", "📄 Generando PDF..."],
   ["archive_folder", "🗜️ Comprimiendo carpeta..."],
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
-  ["whatsapp_send", "📤 Preparando envío por WhatsApp..."],
+  ["message_send", "📤 Preparando envío por el chat activo..."],
   ["workspace_clear", "🧹 Limpiando tu workdir..."],
   ["model_list", "📋 Actualizando modelos disponibles..."],
   ["model_set", "🧠 Cambiando modelo global..."],
@@ -269,7 +266,7 @@ function getMemoryContent(jid: string): string {
  * usando el modelo LLM para generar un resumen estructurado.
  * Mientras compacta, ignora mensajes entrantes del mismo JID.
  */
-async function ensureContextCompaction(sock: WASocket, jid: string): Promise<void> {
+async function ensureContextCompaction(transport: MessagingTransport, jid: string): Promise<void> {
   if (!contextManager || !llmConfig) return;
 
   const modelId = contextManager.getModel(jid);
@@ -293,7 +290,7 @@ async function ensureContextCompaction(sock: WASocket, jid: string): Promise<voi
   compactingJids.add(jid);
   try {
     // Notificar al usuario
-    void sendWhatsAppMessage(sock, jid, { text: "🧹 Espera un momento, estoy limpiando mi memoria..." }, { waitForDelivery: false });
+    void sendText(transport, jid, "🧹 Espera un momento, estoy limpiando mi memoria...", { waitForDelivery: false });
 
     console.log(
       `[compact] Contexto de ${jid}: ~${currentTokens} tokens, ` +
@@ -505,22 +502,13 @@ function activateOpenCodeFreeGlobally(): void {
   initLlm(null, llmConfigPath);
 }
 
-/**
- * Actualiza la referencia al socket activo.
- * Se llama desde connection.ts cuando el socket se conecta/reconecta.
- */
-export function setSocket(sock: WASocket | null): void {
-  reminderManager.setSock(sock);
-  currentSock = sock;
-  setMessagingSocket(sock);
-}
-
 /** Callback cuando una alarma recurrente debe dispararse. */
 async function onAlarmDue(
   alarm: import("./alarm.ts").RecurringAlarm,
 ): Promise<void> {
-  if (!currentSock) {
-    throw new Error("Socket no disponible para entregar la alarma.");
+  const transport = getActiveTransport();
+  if (!transport) {
+    throw new Error("Transporte de mensajería no disponible para entregar la alarma.");
   }
 
   const dayName = new Intl.DateTimeFormat("es-MX", {
@@ -529,7 +517,7 @@ async function onAlarmDue(
   }).format(new Date());
 
   const deliveredText = await deliverScheduledMessage({
-    sock: currentSock,
+    transport,
     jid: alarm.jid,
     model: contextManager?.getModel(alarm.jid),
     llmConfig: llmConfig ?? undefined,
@@ -545,7 +533,7 @@ async function onAlarmDue(
   });
 
   // La entrega real se incorpora al historial persistente. Un fallo de disco
-  // no debe provocar que WhatsApp reciba la misma alarma nuevamente.
+  // no debe provocar que el transporte entregue la misma alarma nuevamente.
   if (contextManager) {
     try {
       await contextManager.withLock(alarm.jid, async () => {
@@ -570,14 +558,14 @@ async function onAlarmDue(
 /** Callback cuando un recordatorio debe dispararse. */
 async function onReminderDue(
   reminder: import("./reminder.ts").Reminder,
-  sock: WASocket | null,
 ): Promise<void> {
-  if (!sock) {
-    throw new Error("Socket no disponible para entregar el recordatorio.");
+  const transport = getActiveTransport();
+  if (!transport) {
+    throw new Error("Transporte de mensajería no disponible para entregar el recordatorio.");
   }
 
   const deliveredText = await deliverScheduledMessage({
-    sock,
+    transport,
     jid: reminder.jid,
     model: contextManager?.getModel(reminder.jid),
     llmConfig: llmConfig ?? undefined,
@@ -634,9 +622,9 @@ function formatCommandName(name: string): string {
   return `${SLASH_COMMANDS.has(name) ? "/" : "!"}${name}`;
 }
 
-const WHATSAPP_PROGRESS_CHUNK_LENGTH = 3500;
+const MESSAGE_PROGRESS_CHUNK_LENGTH = 3500;
 
-function splitProgressText(value: string, maxLength = WHATSAPP_PROGRESS_CHUNK_LENGTH): string[] {
+function splitProgressText(value: string, maxLength = MESSAGE_PROGRESS_CHUNK_LENGTH): string[] {
   const text = value.trim();
   if (!text) return [];
   if (text.length <= maxLength) return [text];
@@ -719,13 +707,13 @@ function providerSetupPrompt(step: ProviderSetupStep, models: readonly string[] 
 }
 
 async function deleteSensitiveIncomingMessage(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
 ): Promise<void> {
   try {
-    await sock.sendMessage(message.key.remoteJid!, { delete: message.key });
+    await transport.deleteMessage(message);
   } catch {
-    // WhatsApp puede impedir borrar mensajes ajenos según el tipo de chat.
+    // Best-effort: una plataforma sin borrado no debe romper el flujo seguro.
   }
 }
 
@@ -789,7 +777,7 @@ function cancelCurrentOperation(jid: string): string {
   return "✅ Operación actual cancelada.";
 }
 
-async function formatModelsForUser(jid: string): Promise<string> {
+async function formatModelsForUser(): Promise<string> {
   if (!llmConfig || !contextManager) return "Error: el proveedor LLM todavía está iniciando.";
   const usedFallback = await refreshAvailableModels();
   const current = llmConfig.defaultModel || "ninguno";
@@ -882,7 +870,7 @@ async function executeUserControlTool(
     case "control_ping":
       return "🏓 pong";
     case "control_get_id":
-      return `🆔 Tu JID: ${jid}`;
+      return `🆔 Tu identificador de chat: ${jid}`;
     case "control_cancel":
       return cancelCurrentOperation(jid);
     case "conversation_clear":
@@ -897,7 +885,7 @@ async function executeUserControlTool(
     case "model_status":
       return `Modelo global actual: ${llmConfig?.defaultModel ?? "ninguno"}`;
     case "model_list":
-      return await formatModelsForUser(jid);
+      return await formatModelsForUser();
     case "model_set": {
       if (!contextManager) return "Error: el gestor de contexto no está disponible.";
       const requested = typeof args.model_id === "string" ? args.model_id.trim() : "";
@@ -1065,9 +1053,9 @@ registerCommand(
 
 registerCommand(
   "id",
-  "Muestra tu identificador (JID)",
+  "Muestra tu identificador de chat",
   (_cmd, senderJid) => ({
-    text: `🆔 Tu JID: ${senderJid}`,
+    text: `🆔 Tu identificador de chat: ${senderJid}`,
   }),
 );
 
@@ -1274,7 +1262,7 @@ registerCommand(
   "Crea la primera cuenta de administrador del bot",
   async (_cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     if (authManager.userExists()) {
       return { text: "⚠️ Ya existe una cuenta de administrador. Usa !login para iniciar sesión." };
@@ -1295,7 +1283,7 @@ registerCommand(
   "Inicia sesión en el bot",
   async (_cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     if (authManager.isLoggedIn(senderJid)) {
       const loggedUsername = authManager.getUsername(senderJid);
@@ -1317,7 +1305,7 @@ registerCommand(
   "Crea un nuevo usuario (solo administrador)",
   async (_cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     const adjUsername = authManager.getUsername(senderJid);
     if (!adjUsername || !authManager.isAdmin(adjUsername)) {
@@ -1340,7 +1328,7 @@ registerCommand(
   "Bloquea el acceso de un usuario (solo administrador)",
   async (cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     const adjUsername = authManager.getUsername(senderJid);
     if (!adjUsername || !authManager.isAdmin(adjUsername)) {
@@ -1367,7 +1355,7 @@ registerCommand(
   "Desbloquea el acceso de un usuario (solo administrador)",
   async (cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     const adjUsername = authManager.getUsername(senderJid);
     if (!adjUsername || !authManager.isAdmin(adjUsername)) {
@@ -1391,7 +1379,7 @@ registerCommand(
   "Muestra todos los usuarios registrados (solo administrador)",
   async (_cmd, senderJid) => {
     if (senderJid == null) {
-      return { text: "❌ Error: no se pudo identificar tu JID." };
+      return { text: "❌ Error: no se pudo identificar tu conversación." };
     }
     const ulUsername = authManager.getUsername(senderJid);
     if (!ulUsername || !authManager.isAdmin(ulUsername)) {
@@ -1426,8 +1414,8 @@ registerCommand(
  * de autenticación (login, setup, adduser).
  */
 async function handlePendingAuthAction(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   jid: string,
   text: string,
 ): Promise<void> {
@@ -1435,28 +1423,28 @@ async function handlePendingAuthAction(
   if (!action) return;
 
   if (action.step === "awaiting-password") {
-    await deleteSensitiveIncomingMessage(sock, message);
+    await deleteSensitiveIncomingMessage(transport, message);
   }
 
   try {
     switch (action.type) {
       case "setup":
-        await handleSetupStep(sock, jid, text, action);
+        await handleSetupStep(transport, jid, text, action);
         break;
       case "login":
-        await handleLoginStep(sock, jid, text, action);
+        await handleLoginStep(transport, jid, text, action);
         break;
       case "adduser":
-        await handleAdduserStep(sock, jid, text, action);
+        await handleAdduserStep(transport, jid, text, action);
         break;
       case "change-password":
-        await handleChangePasswordStep(sock, jid, text, action);
+        await handleChangePasswordStep(transport, jid, text, action);
         break;
     }
   } catch (err) {
     console.error(`[auth] Error en flujo ${action.type}:`, err);
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "❌ No se pudo guardar el cambio. Revisa permisos y espacio en disco e inténtalo de nuevo.",
     );
@@ -1464,7 +1452,7 @@ async function handlePendingAuthAction(
 }
 
 async function handleSetupStep(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
   action: PendingAction,
@@ -1472,16 +1460,16 @@ async function handleSetupStep(
   if (action.step === "awaiting-username") {
     const username = text.trim().toLowerCase();
     if (!username || username.length < 2 || !/^[a-z0-9_]+$/.test(username)) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "❌ Nombre de usuario inválido. Usa solo letras, números y guion bajo (mín 2 caracteres).\n\nIntenta de nuevo:",
       );
       return;
     }
     if (authManager.findUser(username)) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "❌ Ese nombre de usuario ya existe. Elige otro:",
       );
@@ -1492,15 +1480,15 @@ async function handleSetupStep(
       step: "awaiting-password",
       username,
     });
-    await sendWithTyping(sock, jid, `Ingresa la contraseña para ${username}:`);
+    await sendTextHumanized(transport, jid, `Ingresa la contraseña para ${username}:`);
     return;
   }
 
   // step === "awaiting-password"
   const password = text.trim();
   if (!password || password.length < 4) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "❌ La contraseña debe tener al menos 4 caracteres.\n\nIntenta de nuevo:",
     );
@@ -1509,14 +1497,14 @@ async function handleSetupStep(
   const setupUsername = action.username;
   if (!setupUsername) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(sock, jid, "❌ Error interno. Intenta de nuevo con !setup.");
+    await sendTextHumanized(transport, jid, "❌ Error interno. Intenta de nuevo con !setup.");
     return;
   }
   await authManager.createAdmin(setupUsername, password);
   await authManager.login(jid, setupUsername, password);
   authManager.clearPendingAction(jid);
-  await sendWithTyping(
-    sock,
+  await sendTextHumanized(
+    transport,
     jid,
     [
       `✅ Cuenta de administrador creada exitosamente. Bienvenido, ${setupUsername}.`,
@@ -1529,7 +1517,7 @@ async function handleSetupStep(
 }
 
 async function handleLoginStep(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
   action: PendingAction,
@@ -1538,8 +1526,8 @@ async function handleLoginStep(
     const username = text.trim().toLowerCase();
     const user = authManager.findUser(username);
     if (!user) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "❌ Usuario no encontrado. Intenta de nuevo:",
       );
@@ -1547,8 +1535,8 @@ async function handleLoginStep(
     }
     if (user.banned) {
       authManager.clearPendingAction(jid);
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "🚫 Tu cuenta ha sido baneada. Contacta al administrador.",
       );
@@ -1559,7 +1547,7 @@ async function handleLoginStep(
       step: "awaiting-password",
       username,
     });
-    await sendWithTyping(sock, jid, "Ingresa tu contraseña:");
+    await sendTextHumanized(transport, jid, "Ingresa tu contraseña:");
     return;
   }
 
@@ -1568,15 +1556,15 @@ async function handleLoginStep(
   const loginUsername = action.username;
   if (!loginUsername) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(sock, jid, "❌ Error interno. Intenta de nuevo con !login.");
+    await sendTextHumanized(transport, jid, "❌ Error interno. Intenta de nuevo con !login.");
     return;
   }
   // Verificar si fue baneado entre el paso de usuario y contraseña
   const userCheck = authManager.findUser(loginUsername);
   if (userCheck?.banned) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "🚫 Tu cuenta ha sido baneada durante el inicio de sesión. Contacta al administrador.",
     );
@@ -1585,14 +1573,14 @@ async function handleLoginStep(
   const success = await authManager.login(jid, loginUsername, password);
   if (success) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       `✅ Inicio de sesión exitoso. Bienvenido, ${loginUsername}.`,
     );
   } else {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "❌ Contraseña incorrecta. Intenta de nuevo:",
     );
@@ -1600,7 +1588,7 @@ async function handleLoginStep(
 }
 
 async function handleAdduserStep(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
   action: PendingAction,
@@ -1608,16 +1596,16 @@ async function handleAdduserStep(
   if (action.step === "awaiting-username") {
     const username = text.trim().toLowerCase();
     if (!username || username.length < 2 || !/^[a-z0-9_]+$/.test(username)) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "❌ Nombre de usuario inválido. Usa solo letras, números y guion bajo (mín 2 caracteres).\n\nIntenta de nuevo:",
       );
       return;
     }
     if (authManager.findUser(username)) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         jid,
         "❌ Ese nombre de usuario ya existe. Elige otro:",
       );
@@ -1628,15 +1616,15 @@ async function handleAdduserStep(
       step: "awaiting-password",
       username,
     });
-    await sendWithTyping(sock, jid, `Ingresa la contraseña para ${username}:`);
+    await sendTextHumanized(transport, jid, `Ingresa la contraseña para ${username}:`);
     return;
   }
 
   // step === "awaiting-password"
   const password = text.trim();
   if (!password || password.length < 4) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "❌ La contraseña debe tener al menos 4 caracteres.\n\nIntenta de nuevo:",
     );
@@ -1645,20 +1633,20 @@ async function handleAdduserStep(
   const addUsername = action.username;
   if (!addUsername) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(sock, jid, "❌ Error interno. Intenta de nuevo con !adduser.");
+    await sendTextHumanized(transport, jid, "❌ Error interno. Intenta de nuevo con !adduser.");
     return;
   }
   await authManager.addUser(addUsername, password, "user");
   authManager.clearPendingAction(jid);
-  await sendWithTyping(
-    sock,
+  await sendTextHumanized(
+    transport,
     jid,
     `✅ Usuario ${addUsername} creado exitosamente.`,
   );
 }
 
 async function handleChangePasswordStep(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
   action: PendingAction,
@@ -1666,22 +1654,22 @@ async function handleChangePasswordStep(
   const username = action.username ?? authManager.getUsername(jid);
   if (!username) {
     authManager.clearPendingAction(jid);
-    await sendWithTyping(sock, jid, "❌ No pude identificar tu cuenta activa.");
+    await sendTextHumanized(transport, jid, "❌ No pude identificar tu cuenta activa.");
     return;
   }
   const password = text.trim();
   if (!password || password.length < 4) {
-    await sendWithTyping(sock, jid, "❌ La contraseña debe tener al menos 4 caracteres. Intenta de nuevo:");
+    await sendTextHumanized(transport, jid, "❌ La contraseña debe tener al menos 4 caracteres. Intenta de nuevo:");
     return;
   }
   await authManager.changePassword(username, password);
   authManager.clearPendingAction(jid);
-  await sendWithTyping(sock, jid, "✅ Tu contraseña fue actualizada correctamente.");
+  await sendTextHumanized(transport, jid, "✅ Tu contraseña fue actualizada correctamente.");
 }
 
 async function handlePendingProviderSetup(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   jid: string,
   text: string,
 ): Promise<void> {
@@ -1692,13 +1680,13 @@ async function handlePendingProviderSetup(
     const result = providerSetupManager.submit(jid, text);
 
     if (result.kind === "next") {
-      await sendWithTyping(sock, jid, providerSetupPrompt(result.nextStep));
+      await sendTextHumanized(transport, jid, providerSetupPrompt(result.nextStep));
       return;
     }
 
     if (result.kind === "discover-models") {
       if (result.secretInput) {
-        await deleteSensitiveIncomingMessage(sock, message);
+        await deleteSensitiveIncomingMessage(transport, message);
       }
 
       const draft = providerSetupManager.getDiscoveryDraft(jid);
@@ -1713,8 +1701,8 @@ async function handlePendingProviderSetup(
           discovered.baseUrl,
           discovered.models,
         );
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           jid,
           providerSetupPrompt("defaultModel", discovered.models),
         );
@@ -1722,8 +1710,8 @@ async function handlePendingProviderSetup(
         const reason = error instanceof Error ? error.message : String(error);
         providerSetupManager.resetToBaseUrl(jid);
         console.warn(`[provider-setup] No se pudo descubrir el catálogo: ${reason}`);
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           jid,
           [
             `❌ ${reason}`,
@@ -1742,8 +1730,8 @@ async function handlePendingProviderSetup(
     initLlm(savedConfig, llmConfigPath);
     providerSetupManager.cancel(jid);
 
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       [
         "✅ PROVEEDOR CONFIGURADO",
@@ -1764,8 +1752,8 @@ async function handlePendingProviderSetup(
       ? providerSetupManager.getAvailableModels(jid)
       : [];
     console.warn(`[provider-setup] Entrada inválida en ${step}: ${reason}`);
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       [
         `❌ ${reason}`,
@@ -1777,17 +1765,17 @@ async function handlePendingProviderSetup(
 }
 
 async function handlePendingAgentConfig(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
 ): Promise<void> {
   try {
     const result = agentConfigFlowManager.submit(jid, text, agentConfig);
     agentConfig = result.config;
-    await sendWithTyping(sock, jid, result.text);
+    await sendTextHumanized(transport, jid, result.text);
   } catch (error) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       `❌ ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -1795,20 +1783,20 @@ async function handlePendingAgentConfig(
 }
 
 async function handlePendingSearchSetup(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   jid: string,
   text: string,
 ): Promise<void> {
   try {
     const result = await searchSetupManager.submit(jid, text);
     if (result.secretInput) {
-      await deleteSensitiveIncomingMessage(sock, message);
+      await deleteSensitiveIncomingMessage(transport, message);
     }
-    await sendWithTyping(sock, jid, result.text);
+    await sendTextHumanized(transport, jid, result.text);
   } catch (error) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       `❌ ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -1816,29 +1804,27 @@ async function handlePendingSearchSetup(
 }
 
 async function handlePendingWhisperSetup(
-  sock: WASocket,
+  transport: MessagingTransport,
   jid: string,
   text: string,
 ): Promise<void> {
   let lastProgress = -25;
-  const typing = await startContinuousTyping(sock, jid);
+  const activity = await startActivity(transport, jid);
   try {
     const result = await whisperSetupManager.submit(jid, text, async (progress) => {
       if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
       lastProgress = progress.percent;
-      await sendWhatsAppMessage(sock, jid, {
-        text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
-      }, { waitForDelivery: false });
+      await sendText(transport, jid, `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`, { waitForDelivery: false });
     });
-    await sendWithTyping(sock, jid, result.text);
+    await sendTextHumanized(transport, jid, result.text);
   } catch (error) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       `❌ ${error instanceof Error ? error.message : String(error)}`,
     );
   } finally {
-    await typing.stop();
+    await activity.stop();
   }
 }
 
@@ -1903,8 +1889,8 @@ function hasInlineCredentialIntent(text: string): boolean {
 }
 
 async function tryHandleInlineSearchCredential(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   jid: string,
   text: string,
 ): Promise<boolean> {
@@ -1918,9 +1904,9 @@ async function tryHandleInlineSearchCredential(
 
   saveSearchProviderApiKey(provider, secret);
   searchSetupManager.cancel(jid);
-  await deleteSensitiveIncomingMessage(sock, message);
-  await sendWithTyping(
-    sock,
+  await deleteSensitiveIncomingMessage(transport, message);
+  await sendTextHumanized(
+    transport,
     jid,
     `✅ API key de ${SEARCH_PROVIDER_LABELS[provider]} actualizada y motor activado.`,
   );
@@ -1975,8 +1961,8 @@ function extractInlinePasswordChange(text: string): string | null {
 }
 
 async function tryHandleNaturalPasswordChange(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   jid: string,
   text: string,
 ): Promise<boolean> {
@@ -1988,8 +1974,8 @@ async function tryHandleNaturalPasswordChange(
 
   if (!extracted) {
     authManager.setPendingAction(jid, { type: "change-password", step: "awaiting-password", username });
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       jid,
       "🔐 Envía tu nueva contraseña en el siguiente mensaje. Luna intentará borrar ese mensaje después de procesarlo.",
     );
@@ -1997,8 +1983,8 @@ async function tryHandleNaturalPasswordChange(
   }
 
   await authManager.changePassword(username, extracted);
-  await deleteSensitiveIncomingMessage(sock, message);
-  await sendWithTyping(sock, jid, "✅ Tu contraseña fue actualizada correctamente.");
+  await deleteSensitiveIncomingMessage(transport, message);
+  await sendTextHumanized(transport, jid, "✅ Tu contraseña fue actualizada correctamente.");
   return true;
 }
 
@@ -2045,28 +2031,23 @@ function parseNaturalLocalCommand(text: string, jid: string): ParsedCommand | nu
 // ─── Procesamiento de mensajes ───────────────────────────────────
 
 export async function handleMessage(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
 ): Promise<void> {
-  const key = message.key;
-  const remoteJid = key.remoteJid;
-  const fromMe = key.fromMe;
+  const remoteJid = message.conversationId;
 
-  if (!remoteJid || fromMe || isWhatsAppGroupJid(remoteJid)) {
+  // Los adaptadores deben filtrar grupos cuanto antes; esta segunda barrera
+  // protege auth/contexto si una implementación futura entrega uno por error.
+  if (!remoteJid || message.fromSelf || message.isGroup) {
     return;
   }
 
-  // Marcar como leído (2 palomitas azules) inmediatamente
-  void sock.readMessages([key]).catch(() => {});
+  void transport.markRead(message).catch(() => {});
 
   const mediaKind = getMediaKind(message);
-  let text =
-    message.message?.conversation ??
-    message.message?.extendedTextMessage?.text ??
-    message.message?.imageMessage?.caption ??
-    "";
+  let text = message.text ?? "";
 
-  // Baileys también emite notificaciones sin contenido conversacional
+  // Algunos adaptadores emiten eventos sin contenido conversacional
   // (protocolos, reacciones, recibos y otros eventos internos). No deben
   // convertirse en mensajes vacíos para el LLM porque provocarían respuestas
   // espontáneas sin una entrada real del usuario.
@@ -2085,14 +2066,14 @@ export async function handleMessage(
     if (command && command.name === "cancelar") {
       authManager.clearPendingAction(remoteJid);
       contextManager?.clearAwaitingModelSelection(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Operación cancelada.");
+      await sendTextHumanized(transport, remoteJid, "❌ Operación cancelada.");
       return;
     }
     if (command) {
       // Envió un comando durante flujo — cancelar pending y seguir
       authManager.clearPendingAction(remoteJid);
     } else {
-      await handlePendingAuthAction(sock, message, remoteJid, text);
+      await handlePendingAuthAction(transport, message, remoteJid, text);
       return;
     }
   }
@@ -2100,8 +2081,8 @@ export async function handleMessage(
   // ── Puerta de autenticación ─────────────────────────────────────
   if (!authManager.userExists()) {
     if (!(command && ["setup", "cancelar"].includes(command.name))) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         remoteJid,
         "🔒 No hay cuentas de administrador. Envía !setup para crear la primera.",
       );
@@ -2109,8 +2090,8 @@ export async function handleMessage(
     }
   } else if (!authManager.isLoggedIn(remoteJid)) {
     if (!(command && ["login", "cancelar"].includes(command.name))) {
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         remoteJid,
         "🔒 Debes iniciar sesión primero. Envía !login",
       );
@@ -2123,8 +2104,8 @@ export async function handleMessage(
       const userRecord = authManager.findUser(sessionUsername);
       if (userRecord?.banned) {
         authManager.logout(remoteJid);
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           remoteJid,
           "🚫 Tu cuenta ha sido baneada. Contacta al administrador.",
         );
@@ -2143,7 +2124,7 @@ export async function handleMessage(
   const pendingBrowserInput = browserCredentialStore.getPendingInput(remoteJid);
   if (pendingBrowserInput) {
     if (command && command.name === "cancelar") {
-      await sendWithTyping(sock, remoteJid, cancelCurrentOperation(remoteJid));
+      await sendTextHumanized(transport, remoteJid, cancelCurrentOperation(remoteJid));
       return;
     }
 
@@ -2165,7 +2146,7 @@ export async function handleMessage(
           ? "El agente no verá el valor. Tu respuesta se capturará fuera del modelo y se inyectará únicamente en la misma tarea del navegador, que continuará sin reiniciar la sesión."
           : "Responde con el dato solicitado y la misma tarea continuará desde la página actual.",
       );
-      await sendWithTyping(sock, remoteJid, targetLines.join("\n"));
+      await sendTextHumanized(transport, remoteJid, targetLines.join("\n"));
       return;
     }
 
@@ -2176,7 +2157,7 @@ export async function handleMessage(
       if (pendingBrowserInput.kind === "password") {
         const password = extractPendingBrowserSecret(text);
         if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
-          await sendWithTyping(sock, remoteJid, [
+          await sendTextHumanized(transport, remoteJid, [
             "🔐 MENSAJE DEL SISTEMA",
             "",
             "No pude asociar la contraseña con una cuenta concreta.",
@@ -2190,7 +2171,7 @@ export async function handleMessage(
           username: pendingBrowserInput.username,
           password,
         });
-        await deleteSensitiveIncomingMessage(sock, message);
+        await deleteSensitiveIncomingMessage(transport, message);
         const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
           kind: "password",
           credentialRef: credential.ref,
@@ -2199,32 +2180,28 @@ export async function handleMessage(
         });
         if (!resumed) {
           browserCredentialStore.delete(credential.ref);
-          await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa. Vuelve a solicitar la navegación.");
+          await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa. Vuelve a solicitar la navegación.");
           return;
         }
-        await sendWhatsAppMessage(sock, remoteJid, {
-          text: "🔐 MENSAJE DEL SISTEMA\n\nContraseña recibida de forma segura. La misma tarea del navegador continúa ahora desde la sesión que estaba abierta.",
-        }, { waitForDelivery: false });
+        await sendText(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nContraseña recibida de forma segura. La misma tarea del navegador continúa ahora desde la sesión que estaba abierta.", { waitForDelivery: false });
         return;
       }
 
       if (pendingBrowserInput.kind === "otp") {
         const value = extractPendingBrowserSecret(text);
         if (!value) {
-          await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el código solicitado. La misma tarea permanece pausada.");
+          await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el código solicitado. La misma tarea permanece pausada.");
           return;
         }
         const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
-        await deleteSensitiveIncomingMessage(sock, message);
+        await deleteSensitiveIncomingMessage(transport, message);
         const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: "otp", secretRef: secret.ref });
         if (!resumed) {
           browserCredentialStore.delete(secret.ref);
-          await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+          await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
           return;
         }
-        await sendWhatsAppMessage(sock, remoteJid, {
-          text: "🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido de forma segura. La misma tarea del navegador continúa ahora.",
-        }, { waitForDelivery: false });
+        await sendText(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido de forma segura. La misma tarea del navegador continúa ahora.", { waitForDelivery: false });
         return;
       }
 
@@ -2232,7 +2209,7 @@ export async function handleMessage(
         ? extractPendingBrowserUsername(text)
         : text.trim();
       if (!value) {
-        await sendWithTyping(sock, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName}. La misma tarea permanece pausada.`);
+        await sendTextHumanized(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName}. La misma tarea permanece pausada.`);
         return;
       }
       const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
@@ -2240,12 +2217,10 @@ export async function handleMessage(
         value,
       });
       if (!resumed) {
-        await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+        await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
         return;
       }
-      await sendWhatsAppMessage(sock, remoteJid, {
-        text: `🧩 MENSAJE DEL SISTEMA\n\nDato recibido. La misma tarea del navegador continúa ahora desde la página actual.`,
-      }, { waitForDelivery: false });
+      await sendText(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nDato recibido. La misma tarea del navegador continúa ahora desde la página actual.`, { waitForDelivery: false });
       return;
     }
 
@@ -2255,7 +2230,7 @@ export async function handleMessage(
     if (pendingBrowserInput.kind === "password") {
       const password = extractPendingBrowserSecret(text);
       if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
-        await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nNo pude asociar la contraseña con una cuenta concreta. Indica primero el sitio y el correo/usuario.");
+        await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nNo pude asociar la contraseña con una cuenta concreta. Indica primero el sitio y el correo/usuario.");
         return;
       }
       const credential = browserCredentialStore.create({
@@ -2265,23 +2240,23 @@ export async function handleMessage(
         password,
       });
       browserCredentialStore.clearPendingInput(remoteJid);
-      await deleteSensitiveIncomingMessage(sock, message);
+      await deleteSensitiveIncomingMessage(transport, message);
       const resumedText = sanitizeBrowserCredentialText(pendingBrowserInput.originalText, credential);
-      await handleAiChat(sock, remoteJid, resumedText);
+      await handleAiChat(transport, remoteJid, resumedText);
       return;
     }
 
     if (pendingBrowserInput.kind === "otp") {
       const value = extractPendingBrowserSecret(text);
       if (!value) {
-        await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía el código o secreto solicitado para continuar.");
+        await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía el código o secreto solicitado para continuar.");
         return;
       }
       const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
       browserCredentialStore.clearPendingInput(remoteJid);
-      await deleteSensitiveIncomingMessage(sock, message);
+      await deleteSensitiveIncomingMessage(transport, message);
       await handleAiChat(
-        sock,
+        transport,
         remoteJid,
         `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario respondió al dato secreto ${pendingBrowserInput.fieldName}. El valor fue retirado antes del LLM. Usa secret_ref=${secret.ref} únicamente con browser_fill_secret. Nunca pidas, repitas ni muestres el valor.]`,
       );
@@ -2292,12 +2267,12 @@ export async function handleMessage(
       ? extractPendingBrowserUsername(text)
       : text.trim();
     if (!value) {
-      await sendWithTyping(sock, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName} para continuar.`);
+      await sendTextHumanized(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName} para continuar.`);
       return;
     }
     browserCredentialStore.clearPendingInput(remoteJid);
     await handleAiChat(
-      sock,
+      transport,
       remoteJid,
       `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario proporcionó ${pendingBrowserInput.fieldName}: ${value}. Usa este dato únicamente para continuar la tarea solicitada.]`,
     );
@@ -2325,14 +2300,14 @@ export async function handleMessage(
         password: inlineBrowserCredential.password,
       });
       text = sanitizeBrowserCredentialText(text, credential);
-      await deleteSensitiveIncomingMessage(sock, message);
+      await deleteSensitiveIncomingMessage(transport, message);
     }
   }
 
-  if (await tryHandleInlineSearchCredential(sock, message, remoteJid, text)) {
+  if (await tryHandleInlineSearchCredential(transport, message, remoteJid, text)) {
     return;
   }
-  if (!command && await tryHandleNaturalPasswordChange(sock, message, remoteJid, text)) {
+  if (!command && await tryHandleNaturalPasswordChange(transport, message, remoteJid, text)) {
     return;
   }
 
@@ -2340,8 +2315,8 @@ export async function handleMessage(
   if (providerSetupManager.has(remoteJid)) {
     if (!isAdminSession(remoteJid)) {
       providerSetupManager.cancel(remoteJid);
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         remoteJid,
         "⚠️ La configuración se canceló porque la sesión ya no es administradora.",
       );
@@ -2350,14 +2325,14 @@ export async function handleMessage(
 
     if (command && command.name === "cancelar") {
       providerSetupManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Configuración del proveedor cancelada.");
+      await sendTextHumanized(transport, remoteJid, "❌ Configuración del proveedor cancelada.");
       return;
     }
 
     if (command) {
       providerSetupManager.cancel(remoteJid);
     } else {
-      await handlePendingProviderSetup(sock, message, remoteJid, text);
+      await handlePendingProviderSetup(transport, message, remoteJid, text);
       return;
     }
   }
@@ -2366,18 +2341,18 @@ export async function handleMessage(
   if (agentConfigFlowManager.has(remoteJid)) {
     if (!isAdminSession(remoteJid)) {
       agentConfigFlowManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      await sendTextHumanized(transport, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
       return;
     }
     if (command && command.name === "cancelar") {
       agentConfigFlowManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Configuración del agente cancelada.");
+      await sendTextHumanized(transport, remoteJid, "❌ Configuración del agente cancelada.");
       return;
     }
     if (command) {
       agentConfigFlowManager.cancel(remoteJid);
     } else {
-      await handlePendingAgentConfig(sock, remoteJid, text);
+      await handlePendingAgentConfig(transport, remoteJid, text);
       return;
     }
   }
@@ -2386,18 +2361,18 @@ export async function handleMessage(
   if (searchSetupManager.has(remoteJid)) {
     if (!isAdminSession(remoteJid)) {
       searchSetupManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      await sendTextHumanized(transport, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
       return;
     }
     if (command && command.name === "cancelar") {
       searchSetupManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Configuración de búsqueda cancelada.");
+      await sendTextHumanized(transport, remoteJid, "❌ Configuración de búsqueda cancelada.");
       return;
     }
     if (command) {
       searchSetupManager.cancel(remoteJid);
     } else {
-      await handlePendingSearchSetup(sock, message, remoteJid, text);
+      await handlePendingSearchSetup(transport, message, remoteJid, text);
       return;
     }
   }
@@ -2406,18 +2381,18 @@ export async function handleMessage(
   if (whisperSetupManager.has(remoteJid)) {
     if (!isAdminSession(remoteJid)) {
       whisperSetupManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
+      await sendTextHumanized(transport, remoteJid, "⚠️ La configuración se canceló porque la sesión ya no es administradora.");
       return;
     }
     if (command && command.name === "cancelar") {
       whisperSetupManager.cancel(remoteJid);
-      await sendWithTyping(sock, remoteJid, "❌ Configuración de Whisper cancelada.");
+      await sendTextHumanized(transport, remoteJid, "❌ Configuración de Whisper cancelada.");
       return;
     }
     if (command) {
       whisperSetupManager.cancel(remoteJid);
     } else {
-      await handlePendingWhisperSetup(sock, remoteJid, text);
+      await handlePendingWhisperSetup(transport, remoteJid, text);
       return;
     }
   }
@@ -2428,8 +2403,8 @@ export async function handleMessage(
       const index = parseInt(text.trim(), 10) - 1;
       if (availableModels.length === 0) {
         contextManager.clearAwaitingModelSelection(remoteJid);
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           remoteJid,
           "❌ No hay modelos disponibles. Usa !modelos para recargar.",
         );
@@ -2439,14 +2414,14 @@ export async function handleMessage(
       if (model) {
         const selected = applyGlobalModelSelection(model);
         contextManager.clearAwaitingModelSelection(remoteJid);
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           remoteJid,
           `✅ Modelo global seleccionado: ${selected}. Se aplicará a todos los chats.`,
         );
       } else {
-        await sendWithTyping(
-          sock,
+        await sendTextHumanized(
+          transport,
           remoteJid,
           `❌ Número inválido. Elige entre 1 y ${availableModels.length}.`,
         );
@@ -2460,12 +2435,12 @@ export async function handleMessage(
   // ── Comandos con prefijo ───────────────────────────────────────
   if (command) {
     if (command.name === "cambiar-password" && command.body.trim()) {
-      await deleteSensitiveIncomingMessage(sock, message);
+      await deleteSensitiveIncomingMessage(transport, message);
     }
-    const result = await dispatchCommand(command, remoteJid, sock);
+    const result = await dispatchCommand(command, remoteJid, transport);
 
     if (result) {
-      await sendWithTyping(sock, remoteJid, result.text);
+      await sendTextHumanized(transport, remoteJid, result.text);
     } else {
       const sessionUsername = authManager.getUsername(remoteJid);
       const isAdmin = sessionUsername
@@ -2475,8 +2450,8 @@ export async function handleMessage(
       const lista = cmds
         .map((c) => formatCommandName(c.name))
         .join(", ");
-      await sendWithTyping(
-        sock,
+      await sendTextHumanized(
+        transport,
         remoteJid,
         [
           `❓ Comando desconocido: !${command.name}`,
@@ -2492,7 +2467,7 @@ export async function handleMessage(
 
   // ── Procesamiento local de audio e imágenes ────────────────────
   if (mediaKind) {
-    await handleMediaMessage(sock, message, remoteJid, mediaKind);
+    await handleMediaMessage(transport, message, remoteJid, mediaKind);
     return;
   }
 
@@ -2505,15 +2480,15 @@ export async function handleMessage(
 
   // ── Chat AI (mensajes sin prefijo) ─────────────────────────────
   if (!llmConfig || !contextManager) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       remoteJid,
       "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.",
     );
     return;
   }
 
-  await handleAiChat(sock, remoteJid, text);
+  await handleAiChat(transport, remoteJid, text);
 }
 
 /**
@@ -2521,7 +2496,7 @@ export async function handleMessage(
  * con soporte de function calling (tools), responde.
  */
 async function handleAiChat(
-  sock: WASocket,
+  transport: MessagingTransport,
   remoteJid: string,
   userText: string,
 ): Promise<void> {
@@ -2532,8 +2507,8 @@ async function handleAiChat(
   const model = contextManager.getModel(remoteJid);
 
   if (!model) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       remoteJid,
       "⚠️ No hay un modelo seleccionado. Usa !modelos para elegir uno.",
     );
@@ -2556,7 +2531,7 @@ async function handleAiChat(
   cm.addMessage(remoteJid, userMessage);
 
   // Verificar si necesita compactación antes de llamar a la API
-  await ensureContextCompaction(sock, remoteJid);
+  await ensureContextCompaction(transport, remoteJid);
 
   const messages = cm.getMessages(remoteJid);
 
@@ -2569,8 +2544,8 @@ async function handleAiChat(
     lastMsg.content = `${dynamicCtx}\n\n---\n\n${lastMsg.content}`;
   }
 
-  // Mantener el estado escribiendo durante toda la operación real.
-  const typingSession = await startContinuousTyping(sock, remoteJid);
+  // Mantener una actividad genérica durante toda la operación real; cada transporte decide cómo representarla.
+  const activitySession = await startActivity(transport, remoteJid);
   const runController = new AbortController();
   activeAiRuns.set(remoteJid, runController);
 
@@ -2600,10 +2575,8 @@ async function handleAiChat(
       });
 
       if (isConfirmedScheduledCreation(name, result)) {
-        await sendWhatsAppMessage(sock, remoteJid, {
-          text: buildVisibleSystemConfirmation(result),
-        }, { waitForDelivery: false });
-        await typingSession.refresh();
+        await sendText(transport, remoteJid, buildVisibleSystemConfirmation(result), { waitForDelivery: false });
+        await activitySession.refresh();
       }
     };
 
@@ -2617,8 +2590,8 @@ async function handleAiChat(
       if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
         shownNotifs.add(name);
         const notification = TOOL_NOTIFICATION_TEXTS.get(name) ?? "";
-        await sendWhatsAppMessage(sock, remoteJid, { text: notification }, { waitForDelivery: false });
-        await typingSession.refresh();
+        await sendText(transport, remoteJid, notification , { waitForDelivery: false });
+        await activitySession.refresh();
       }
 
       if (
@@ -2707,16 +2680,16 @@ async function handleAiChat(
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
-            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
+            await sendText(transport, remoteJid, text, { waitForDelivery: false });
+            await activitySession.refresh();
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressMessages = formatSpawnAgentsProgress(event);
             for (const progressText of progressMessages) {
-              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+              await sendText(transport, remoteJid, progressText , { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            if (progressMessages.length > 0) await activitySession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2734,16 +2707,16 @@ async function handleAiChat(
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
-            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
+            await sendText(transport, remoteJid, text, { waitForDelivery: false });
+            await activitySession.refresh();
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressMessages = formatSpawnAgentsProgress(event);
             for (const progressText of progressMessages) {
-              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+              await sendText(transport, remoteJid, progressText , { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            if (progressMessages.length > 0) await activitySession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2769,15 +2742,13 @@ async function handleAiChat(
           return result;
         }
         browserCredentialStore.setPendingInput({ jid: remoteJid, kind: "password", fieldName: "contraseña", originalText: userText || prompt, url, username });
-        await sendWhatsAppMessage(sock, remoteJid, {
-          text: [
-            "🔐 MENSAJE DEL SISTEMA",
-            "",
-            `Se necesita la contraseña para ${url} (usuario: ${username}).`,
-            "Por seguridad, el agente no debe saber tu contraseña ni recibirla en su contexto.",
-            "Envía la contraseña en tu siguiente mensaje. El sistema la capturará fuera del modelo, intentará borrar ese mensaje y después reanudará la tarea con una referencia segura.",
-          ].join("\n"),
-        }, { waitForDelivery: false });
+        await sendText(transport, remoteJid, [
+          "🔐 MENSAJE DEL SISTEMA",
+          "",
+          `Se necesita la contraseña para ${url} (usuario: ${username}).`,
+          "Por seguridad, el agente no debe saber tu contraseña ni recibirla en su contexto.",
+          "Envía la contraseña en tu siguiente mensaje. El sistema la capturará fuera del modelo, intentará borrar ese mensaje y después reanudará la tarea con una referencia segura.",
+        ].join("\n"), { waitForDelivery: false });
         result = "El sistema quedó esperando la contraseña fuera del LLM. No vuelvas a pedirla ni la menciones; espera el siguiente mensaje del usuario.";
         toolResults.push({ name, result });
         return result;
@@ -2794,16 +2765,16 @@ async function handleAiChat(
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
-            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
+            await sendText(transport, remoteJid, text, { waitForDelivery: false });
+            await activitySession.refresh();
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressMessages = formatSpawnAgentsProgress(event);
             for (const progressText of progressMessages) {
-              await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
+              await sendText(transport, remoteJid, progressText , { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            if (progressMessages.length > 0) await activitySession.refresh();
           },
         });
         toolResults.push({ name, result });
@@ -2819,10 +2790,10 @@ async function handleAiChat(
         return result;
       }
 
-      if (WHATSAPP_TOOLS.some((tool) => tool.function.name === name)) {
-        result = await executeWhatsAppTool(args, {
-          sock,
-          jid: remoteJid,
+      if (MESSAGING_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeMessagingTool(args, {
+          transport,
+          conversationId: remoteJid,
           workspace: workspaceManager,
         });
         await recordToolResult(name, result);
@@ -2844,10 +2815,8 @@ async function handleAiChat(
           result = await executeWhisperAdminTool(name, args, async (progress) => {
             if (progress.percent < 100 && progress.percent < lastProgress + 25) return;
             lastProgress = progress.percent;
-            await sendWhatsAppMessage(sock, remoteJid, {
-              text: `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`,
-            }, { waitForDelivery: false });
-            await typingSession.refresh();
+            await sendText(transport, remoteJid, `⬇️ Descargando ${progress.model.id}: ${progress.percent}%`, { waitForDelivery: false });
+            await activitySession.refresh();
           });
         }
         await recordToolResult(name, result);
@@ -2911,11 +2880,11 @@ async function handleAiChat(
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
     // Todo mensaje saliente pasa por la cola resiliente y simula escritura.
-    // Si WhatsApp se desconectó durante la tarea, queda pendiente y se envía
+    // Si el transporte se desconectó durante la tarea, queda pendiente y se envía
     // automáticamente al reconectar sin abortar el flujo del agente.
-    await sendWithTyping(sock, remoteJid, finalContent, 1_500, 3_000);
+    await sendTextHumanized(transport, remoteJid, finalContent, 1_500, 3_000);
     if (clearConversationAfterResponse) {
-      // La confirmación se entrega por WhatsApp, pero el historial queda realmente
+      // La confirmación se entrega por el chat activo, pero el historial queda realmente
       // limpio igual que con !clear; memoria, modelo y workdir se conservan.
       cm.clearConversation(remoteJid);
     }
@@ -2989,8 +2958,8 @@ async function handleAiChat(
       }
     }
 
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       remoteJid,
       isOverflow
         ? "⚠️ La conversación alcanzó su límite y fue compactada. Envía tu mensaje nuevamente."
@@ -3000,7 +2969,7 @@ async function handleAiChat(
     );
   } finally {
     if (activeAiRuns.get(remoteJid) === runController) activeAiRuns.delete(remoteJid);
-    await typingSession.stop();
+    await activitySession.stop();
   }
 
   }); // fin de withLock
@@ -3009,25 +2978,25 @@ async function handleAiChat(
 // ─── Media ───────────────────────────────────────────────────────
 
 async function handleMediaMessage(
-  sock: WASocket,
-  message: WAMessage,
+  transport: MessagingTransport,
+  message: TransportIncomingMessage,
   remoteJid: string,
   mediaKind: "image" | "audio",
 ): Promise<void> {
   if (!llmConfig || !contextManager) {
-    await sendWithTyping(
-      sock,
+    await sendTextHumanized(
+      transport,
       remoteJid,
       "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.",
     );
     return;
   }
 
-  const typingSession = await startContinuousTyping(sock, remoteJid);
+  const activitySession = await startActivity(transport, remoteJid);
 
   try {
     if (mediaKind === "audio") {
-      await sendWhatsAppMessage(sock, remoteJid, { text: "🎙️ Transcribiendo audio..." }, { waitForDelivery: false });
+      await sendText(transport, remoteJid, "🎙️ Transcribiendo audio..." , { waitForDelivery: false });
       const media = await downloadAudioForTranscription(
         message,
         loadWhisperConfig().maxAudioSeconds,
@@ -3038,16 +3007,16 @@ async function handleMediaMessage(
         media.mimeType,
       );
       if (!result.text.trim()) {
-        await sendWhatsAppMessage(sock, remoteJid, { text: "⚠️ No pude identificar voz o texto en el audio." }, { waitForDelivery: false });
+        await sendText(transport, remoteJid, "⚠️ No pude identificar voz o texto en el audio." , { waitForDelivery: false });
         return;
       }
 
-      await typingSession.stop();
-      await handleAiChat(sock, remoteJid, buildAudioContextText(result.text));
+      await activitySession.stop();
+      await handleAiChat(transport, remoteJid, buildAudioContextText(result.text));
       return;
     }
 
-    await sendWhatsAppMessage(sock, remoteJid, { text: "🖼️ Extrayendo texto de la imagen..." }, { waitForDelivery: false });
+    await sendText(transport, remoteJid, "🖼️ Extrayendo texto de la imagen..." , { waitForDelivery: false });
     const media = await downloadImageForOcr(message);
     const result = await mediaProcessor.process(
       "ocr-image",
@@ -3056,24 +3025,20 @@ async function handleMediaMessage(
     );
     const caption = getMediaCaption(message);
     if (!result.text.trim()) {
-      await sendWhatsAppMessage(sock, remoteJid, {
-        text: "⚠️ No encontré texto legible en la imagen. No enviaré una respuesta al asistente sin el resultado del OCR.",
-      }, { waitForDelivery: false });
+      await sendText(transport, remoteJid, "⚠️ No encontré texto legible en la imagen. No enviaré una respuesta al asistente sin el resultado del OCR.", { waitForDelivery: false });
       return;
     }
 
-    await typingSession.stop();
+    await activitySession.stop();
     await handleAiChat(
-      sock,
+      transport,
       remoteJid,
       buildImageContextText(result.text, caption),
     );
   } catch (error) {
     console.error(`[media] Error procesando ${mediaKind}:`, error);
-    await sendWhatsAppMessage(sock, remoteJid, {
-      text: `❌ ${error instanceof Error ? error.message : "No se pudo procesar el archivo."}`,
-    }, { waitForDelivery: false });
+    await sendText(transport, remoteJid, `❌ ${error instanceof Error ? error.message : "No se pudo procesar el archivo."}`, { waitForDelivery: false });
   } finally {
-    await typingSession.stop();
+    await activitySession.stop();
   }
 }
