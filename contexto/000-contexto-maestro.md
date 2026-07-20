@@ -16,6 +16,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - No eliminar ni reemplazar innecesariamente `node_modules`, `assets`, `persistent` ni `dist`.
 - Las eliminaciones intencionales deben quedar reproducibles mediante un script Python seguro desde la raíz del proyecto.
 - Mantener aislados los datos por JID. Ninguna herramienta debe poder leer o escribir fuera del `workdir` privado del usuario.
+- Mientras no exista un modelo seguro de identidad multiusuario, ignorar por completo los mensajes de grupos de WhatsApp (`@g.us`); nunca autenticar ni restaurar sesiones de grupo.
 - Contraseñas, OTP y otras credenciales sensibles no deben exponerse al LLM.
 
 # Arquitectura actual
@@ -41,6 +42,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - El workdir valida tanto la ruta léxica como el destino real del ancestro existente más cercano, bloqueando escrituras nuevas a través de symlinks externos.
 - La clave `persistent/browser/encryption.key` no se regenera si ya existe pero está corrupta, evitando invalidar silenciosamente credenciales cifradas previas.
 - `credential-profiles.json` se persiste mediante reemplazo atómico.
+- Los mensajes de grupos de WhatsApp se descartan antes del procesamiento y `AuthManager` rechaza/purga JIDs `@g.us`, evitando que un login grupal reemplace la sesión privada.
 
 # Archivos y módulos clave
 
@@ -68,4 +70,4 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Último registro
 
-- `contexto/68-auditoria-saneamiento-y-seguridad.md`
+- `contexto/69-ignorar-grupos-y-proteger-sesiones-whatsapp.md`

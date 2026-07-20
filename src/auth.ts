@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
 import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
+import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -74,16 +75,26 @@ export class AuthManager {
         : [];
 
       const validUsers = new Map(this.users.map((user) => [user.username, user]));
-      const restoredSessions = Object.entries(data.sessions ?? {}).filter(
-        ([jid, username]) => {
-          if (typeof username !== "string") return false;
-          const user = validUsers.get(normalizeUsername(username));
-          return Boolean(jid && user && !user.banned);
-        },
-      );
+      const rawSessions = Object.entries(data.sessions ?? {});
+      const restoredSessions = rawSessions.filter(([jid, username]) => {
+        if (typeof username !== "string" || isWhatsAppGroupJid(jid)) return false;
+        const user = validUsers.get(normalizeUsername(username));
+        return Boolean(jid && user && !user.banned);
+      });
       this.sessions = new Map(
         restoredSessions.map(([jid, username]) => [jid, normalizeUsername(username)]),
       );
+
+      // Elimina también del archivo las sesiones de grupo creadas por versiones
+      // anteriores. Si el archivo no se puede escribir, la sesión sigue descartada
+      // en memoria y se volverá a intentar sanear en un inicio posterior.
+      if (rawSessions.some(([jid]) => isWhatsAppGroupJid(jid))) {
+        try {
+          this.save();
+        } catch (err) {
+          console.warn("[auth] No se pudieron purgar sesiones de grupo antiguas:", err);
+        }
+      }
     } catch (err) {
       console.warn("[auth] Error al cargar usuarios, comenzando de cero:", err);
       this.users = [];
@@ -184,6 +195,8 @@ export class AuthManager {
   // ── Sesiones ─────────────────────────────────────────────────
 
   async login(jid: string, username: string, password: string): Promise<boolean> {
+    if (isWhatsAppGroupJid(jid)) return false;
+
     const user = this.findUser(username);
     if (!user || user.banned) return false;
 

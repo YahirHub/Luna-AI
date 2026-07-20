@@ -6,6 +6,7 @@ import makeWASocket, {
 import type { WASocket, WAMessage } from "@whiskeysockets/baileys";
 import { delay, getAppDir } from "./utils.ts";
 import { setSocket } from "./bot.ts";
+import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 import { join } from "node:path";
 import pino from "pino";
 import QRCode from "qrcode";
@@ -88,6 +89,10 @@ export async function connectToWhatsApp(
       return;
     }
     for (const message of m.messages) {
+      const remoteJid = message.key.remoteJid;
+      if (isWhatsAppGroupJid(remoteJid)) {
+        continue;
+      }
       handleMessage(sock, message).catch((err: unknown) => {
         console.error("[msg] Error al procesar mensaje:", err);
       });

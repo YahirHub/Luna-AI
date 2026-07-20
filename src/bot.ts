@@ -140,6 +140,7 @@ import {
   ADMIN_CONTROL_TOOLS,
 } from "./control-tools.ts";
 import { extractSecretTokenFromMessage } from "./utils.ts";
+import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 import {
   browserCredentialStore,
   extractBrowserLoginIntent,
@@ -1975,7 +1976,7 @@ export async function handleMessage(
   const remoteJid = key.remoteJid;
   const fromMe = key.fromMe;
 
-  if (!remoteJid || fromMe) {
+  if (!remoteJid || fromMe || isWhatsAppGroupJid(remoteJid)) {
     return;
   }
 
