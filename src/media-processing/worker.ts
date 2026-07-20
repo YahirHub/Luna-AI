@@ -1,5 +1,4 @@
 import { gunzipSync } from "node:zlib";
-import { OggOpusDecoder } from "ogg-opus-decoder";
 import { decode as decodeJpeg } from "jpeg-js";
 import { PNG } from "pngjs";
 import { createOCREngine, supportsFastBuild, type OCREngine } from "tesseract-wasm";
@@ -7,9 +6,10 @@ import tesseractFastPath from "../../assets/runtime/tesseract/tesseract-core.was
 import tesseractFallbackPath from "../../assets/runtime/tesseract/tesseract-core-fallback.wasm" with { type: "file" };
 import spanishModelPath from "../../assets/runtime/ocr/spa.traineddata.gz" with { type: "file" };
 import type { MediaWorkerRequest, MediaWorkerResponse } from "./protocol.ts";
-import { downsampleTo16k, estimateOggDurationSeconds, mixToMono } from "./audio-utils.ts";
+import { estimateOggDurationSeconds } from "./audio-utils.ts";
 import { readImageDimensions } from "./image-utils.ts";
 import { transcribeWithWhisperCli } from "./whisper-native.ts";
+import { decodeAudioWithFfmpeg } from "./ffmpeg-native.ts";
 import { loadWhisperConfig } from "../whisper-config.ts";
 
 const MAX_IMAGE_PIXELS = 16_000_000;
@@ -58,22 +58,29 @@ async function transcribeAudio(request: MediaWorkerRequest): Promise<{ text: str
     throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
   }
 
-  const decoder = new OggOpusDecoder();
-  await decoder.ready;
-  try {
-    const decoded = await decoder.decodeFile(encodedBytes);
-    const mono = downsampleTo16k(mixToMono(decoded.channelData), decoded.sampleRate);
-    const durationSeconds = mono.length / 16_000;
-    if (durationSeconds <= 0) throw new Error("El audio no contiene muestras válidas.");
-    if (durationSeconds > config.maxAudioSeconds) {
-      throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
-    }
-
-    const text = await transcribeWithWhisperCli(mono, { config });
-    return { text, durationSeconds };
-  } finally {
-    decoder.free();
+  const mono = await decodeAudioWithFfmpeg(encodedBytes, request.mimeType);
+  const durationSeconds = mono.length / 16_000;
+  if (durationSeconds <= 0) throw new Error("El audio no contiene muestras válidas.");
+  if (durationSeconds > config.maxAudioSeconds) {
+    throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
   }
+
+  if (estimatedDuration !== null) {
+    const toleranceSeconds = Math.max(1.5, estimatedDuration * 0.03);
+    if (durationSeconds + toleranceSeconds < estimatedDuration) {
+      throw new Error(
+        `La decodificación de audio quedó incompleta: OGG≈${estimatedDuration.toFixed(1)} s, ` +
+          `PCM=${durationSeconds.toFixed(1)} s.`,
+      );
+    }
+  }
+
+  console.log(
+    `[media] Audio decodificado con FFmpeg: ${durationSeconds.toFixed(2)} s` +
+      (estimatedDuration === null ? "" : ` (OGG estimado ${estimatedDuration.toFixed(2)} s)`),
+  );
+  const text = await transcribeWithWhisperCli(mono, { config });
+  return { text, durationSeconds };
 }
 
 type RawImageData = { width: number; height: number; data: Uint8ClampedArray };

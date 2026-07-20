@@ -188,7 +188,6 @@ export function buildWhisperArguments(
     "--no-speech-thold", String(config.noSpeechThreshold),
     "--output-txt",
     "--output-file", outputPrefix,
-    "--no-timestamps",
     "--no-prints",
     "--no-gpu",
   ];

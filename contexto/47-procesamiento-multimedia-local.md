@@ -1,5 +1,8 @@
 # 47 — Procesamiento multimedia local
 
+
+> **Estado histórico:** la decodificación `ogg-opus-decoder` descrita aquí fue reemplazada por el runtime FFmpeg administrado en `contexto/70-ffmpeg-para-audio-largo-y-runtime-portable.md`.
+
 2026-07-17
 
 # Objetivo

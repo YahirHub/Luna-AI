@@ -9,6 +9,8 @@ import {
 const root = process.cwd();
 const source = join(root, "assets", "runtime", "whisper");
 const destination = join(root, "dist", "runtime", "whisper");
+const ffmpegSource = join(root, "assets", "runtime", "ffmpeg");
+const ffmpegDestination = join(root, "dist", "runtime", "ffmpeg");
 const twemojiSource = join(root, "assets", "twemoji");
 const twemojiDestination = join(root, "dist", "runtime", "twemoji");
 
@@ -33,6 +35,20 @@ for (const dependency of dependencies) {
   console.log(`[package-runtime] Dependencia Linux incluida: ${relative(destination, dependency)}`);
 }
 console.log(`[package-runtime] Runtime de whisper.cpp copiado a ${destination}`);
+
+if (!existsSync(join(ffmpegSource, "manifest.json"))) {
+  throw new Error("Falta el runtime de FFmpeg. Ejecuta bun run prepare:media.");
+}
+rmSync(ffmpegDestination, { recursive: true, force: true });
+cpSync(ffmpegSource, ffmpegDestination, {
+  recursive: true,
+  filter(path: string) {
+    return !path.includes(`${join("ffmpeg", ".downloads")}`);
+  },
+});
+const ffmpegExecutable = join(ffmpegDestination, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+if (process.platform !== "win32" && existsSync(ffmpegExecutable)) chmodSync(ffmpegExecutable, 0o755);
+console.log(`[package-runtime] Runtime de FFmpeg copiado a ${ffmpegDestination}`);
 if (existsSync(twemojiSource)) {
   rmSync(twemojiDestination, { recursive: true, force: true });
   cpSync(twemojiSource, twemojiDestination, { recursive: true });

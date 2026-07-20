@@ -14,6 +14,7 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import {
   ensureLinuxRuntimeDependencies,
   ensureLinuxSharedLibraryAliases,
@@ -30,6 +31,11 @@ const WHISPER_MODEL_FILENAME = "ggml-base-q5_1.bin";
 const WHISPER_MODEL_PATH = join(WHISPER_DIR, "models", WHISPER_MODEL_FILENAME);
 const WHISPER_MODEL_SHA256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898";
 const WHISPER_RELEASE_API = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest";
+const FFMPEG_DIR = join(RUNTIME_DIR, "ffmpeg");
+const FFMPEG_DOWNLOAD_DIR = join(FFMPEG_DIR, ".downloads");
+const FFMPEG_MANIFEST_PATH = join(FFMPEG_DIR, "manifest.json");
+const FFMPEG_RELEASE_TAG = process.env.FFMPEG_STATIC_RELEASE_TAG?.trim() || "b6.1.1";
+const FFMPEG_RELEASE_API = `https://api.github.com/repos/eugeneware/ffmpeg-static/releases/tags/${encodeURIComponent(FFMPEG_RELEASE_TAG)}`;
 const DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000;
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 
@@ -73,6 +79,17 @@ export type WhisperRuntimeManifest = {
   executable: string;
   model: string;
   libraryDirs: string[];
+  preparedAt: string;
+};
+
+export type FfmpegRuntimeManifest = {
+  schemaVersion: 1;
+  version: string;
+  platform: NodeJS.Platform;
+  arch: string;
+  assetName: string;
+  assetDigest: string;
+  executable: string;
   preparedAt: string;
 };
 
@@ -331,6 +348,139 @@ async function fetchLatestWhisperRelease(): Promise<GitHubRelease> {
   }
 }
 
+async function fetchFfmpegRelease(): Promise<GitHubRelease> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOWNLOAD_CONNECT_TIMEOUT_MS);
+  const token = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": `Luna-AI-media-assets/Bun-${Bun.version}`,
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  try {
+    const response = await fetch(FFMPEG_RELEASE_API, { headers, signal: controller.signal });
+    if (!response.ok) throw new Error(`GitHub API respondió HTTP ${response.status}.`);
+    const value = await response.json() as Partial<GitHubRelease>;
+    if (!value.tag_name || !Array.isArray(value.assets)) {
+      throw new Error("GitHub devolvió una release de FFmpeg inválida.");
+    }
+    return value as GitHubRelease;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function ffmpegAssetName(platform = process.platform, arch = process.arch): string {
+  const supported = (platform === "linux" && ["x64", "arm64", "arm", "ia32"].includes(arch))
+    || (platform === "win32" && arch === "x64");
+  if (!supported) {
+    throw new Error(`No existe un FFmpeg estático configurado para ${platform}/${arch}.`);
+  }
+  return `ffmpeg-${platform}-${arch}.gz`;
+}
+
+function readFfmpegManifest(): FfmpegRuntimeManifest | null {
+  try {
+    const parsed = JSON.parse(readFileSync(FFMPEG_MANIFEST_PATH, "utf8")) as FfmpegRuntimeManifest;
+    return parsed?.schemaVersion === 1 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function ffmpegManifestIsUsable(manifest: FfmpegRuntimeManifest | null): manifest is FfmpegRuntimeManifest {
+  if (!manifest) return false;
+  if (manifest.platform !== process.platform || manifest.arch !== process.arch) return false;
+  return existsSync(join(FFMPEG_DIR, manifest.executable));
+}
+
+async function validateFfmpegRuntime(manifest: FfmpegRuntimeManifest): Promise<void> {
+  const executable = join(FFMPEG_DIR, manifest.executable);
+  const child = Bun.spawn([executable, "-hide_banner", "-version"], {
+    cwd: FFMPEG_DIR,
+    stdout: "pipe",
+    stderr: "pipe",
+    windowsHide: true,
+  });
+  const stdoutPromise = child.stdout ? new Response(child.stdout).text() : Promise.resolve("");
+  const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
+  const exitCode = await child.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+  if (exitCode !== 0) {
+    const detail = stderr.trim() || stdout.trim() || `código ${exitCode}`;
+    throw new Error(`El runtime de FFmpeg no puede iniciar: ${detail.slice(-1_500)}`);
+  }
+}
+
+async function prepareFfmpegBinary(): Promise<void> {
+  const assetName = ffmpegAssetName();
+  const cachedManifest = readFfmpegManifest();
+  let release: GitHubRelease;
+
+  try {
+    release = await fetchFfmpegRelease();
+  } catch (error) {
+    if (ffmpegManifestIsUsable(cachedManifest)) {
+      if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cachedManifest.executable), 0o755);
+      await validateFfmpegRuntime(cachedManifest);
+      console.warn(`[media-assets] No se pudo consultar FFmpeg ${FFMPEG_RELEASE_TAG}; reutilizando runtime local: ${String(error)}`);
+      return;
+    }
+    throw error;
+  }
+
+  const asset = release.assets.find((candidate) => candidate.name === assetName);
+  if (!asset) throw new Error(`La release ${release.tag_name} no contiene ${assetName}.`);
+  const assetSha256 = parseSha256Digest(asset.digest, asset.name);
+
+  if (
+    ffmpegManifestIsUsable(cachedManifest)
+    && cachedManifest.version === release.tag_name
+    && cachedManifest.assetName === asset.name
+    && cachedManifest.assetDigest === assetSha256
+  ) {
+    if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cachedManifest.executable), 0o755);
+    await validateFfmpegRuntime(cachedManifest);
+    console.log(`[media-assets] Reutilizando FFmpeg ${release.tag_name} (${asset.name}).`);
+    return;
+  }
+
+  ensureDir(FFMPEG_DOWNLOAD_DIR);
+  const archivePath = join(FFMPEG_DOWNLOAD_DIR, asset.name);
+  const localArchive = process.env.FFMPEG_STATIC_ARCHIVE_PATH?.trim();
+  if (localArchive) {
+    const source = resolve(localArchive);
+    if (!(await isVerifiedFile(source, assetSha256))) {
+      throw new Error(`FFMPEG_STATIC_ARCHIVE_PATH no coincide con el digest de ${release.tag_name}.`);
+    }
+    copyFileSync(source, archivePath);
+  } else {
+    await downloadVerified([asset.browser_download_url], archivePath, assetSha256, asset.name);
+  }
+
+  const executableName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const executable = join(FFMPEG_DIR, executableName);
+  ensureDir(FFMPEG_DIR);
+  writeFileSync(executable, gunzipSync(readFileSync(archivePath)));
+  if (process.platform !== "win32") chmodSync(executable, 0o755);
+
+  const manifest: FfmpegRuntimeManifest = {
+    schemaVersion: 1,
+    version: release.tag_name,
+    platform: process.platform,
+    arch: process.arch,
+    assetName: asset.name,
+    assetDigest: assetSha256,
+    executable: executableName,
+    preparedAt: new Date().toISOString(),
+  };
+  writeFileSync(FFMPEG_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await validateFfmpegRuntime(manifest);
+  console.log(`[media-assets] FFmpeg ${release.tag_name} preparado para ${process.platform}/${process.arch}.`);
+}
+
 function readManifest(): WhisperRuntimeManifest | null {
   try {
     const parsed = JSON.parse(readFileSync(WHISPER_MANIFEST_PATH, "utf8")) as WhisperRuntimeManifest;
@@ -570,6 +720,7 @@ function copyDependencyAsset(source: string, destination: string): void {
   console.log(`[media-assets] Copiado ${basename(destination)}`);
 }
 
+await prepareFfmpegBinary();
 await prepareWhisperModel();
 await prepareWhisperBinary();
 copyDependencyAsset(

@@ -68,6 +68,7 @@ describe("runtime nativo de whisper.cpp", () => {
     expect(args).toContain("--language");
     expect(args).toContain("auto");
     expect(args).toContain("--output-txt");
+    expect(args).not.toContain("--no-timestamps");
     expect(args).toContain("--no-gpu");
     expect(args).toContain("4");
     expect(args).toContain("--best-of");

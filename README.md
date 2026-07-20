@@ -25,7 +25,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
 - OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
-- Luna compila como binario standalone y se distribuye junto al runtime oficial de whisper.cpp; sin FFmpeg, Python ni APIs multimedia.
+- Luna compila como binario standalone y se distribuye junto a runtimes administrados de whisper.cpp y FFmpeg; no requiere que FFmpeg, Python ni Tesseract estén instalados globalmente.
 - Administrador, usuarios, sesiones y bloqueo de cuentas, también gestionables por lenguaje natural con herramientas restringidas a administradores.
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
@@ -36,7 +36,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Una cuenta de WhatsApp para vincular el bot.
 - Opcional: claves de uno o más motores de búsqueda.
 - Opcional: un proveedor LLM compatible con la API de chat completions de OpenAI.
-- Conexión a internet durante la primera preparación cuando falten runtimes. `bun install`, `bun run dev`, `bun run start` y `bun run build` preparan automáticamente `agent-browser`; `bun run dev` y `bun run build` también preparan los assets multimedia cuando corresponde. Después, los componentes ya descargados se reutilizan.
+- Conexión a internet durante la primera preparación cuando falten runtimes. `bun install`, `bun run dev`, `bun run start` y `bun run build` preparan automáticamente `agent-browser`; `bun run dev`, `bun run start` y `bun run build` también preparan o reutilizan los assets multimedia cuando corresponde. Después, los componentes ya descargados se reutilizan.
 
 ## Instalación local
 
@@ -68,10 +68,10 @@ Luna procesa localmente las notas de voz y el texto de imágenes. El bot princip
 
 - Formatos aceptados: `audio/ogg` y `audio/opus`, incluidos los mensajes OGG/Opus habituales de WhatsApp.
 - Límite de archivo: 12 MB. La duración máxima predeterminada es 120 segundos y puede cambiarse globalmente.
-- El decoder OGG/Opus convierte la nota a WAV PCM mono de 16 kHz sin FFmpeg. Después Luna invoca el `whisper-cli` oficial con el modelo multilingüe cuantizado `base-q5_1` incluido por defecto.
+- FFmpeg decodifica OGG/Opus y normaliza el audio completo a PCM mono de 16 kHz antes de invocar `whisper-cli`. Luna compara la duración OGG estimada con el PCM generado para detectar decodificaciones truncadas en lugar de aceptar transcripciones parciales silenciosamente.
 - El administrador puede usar `!setup-whisper` para descargar otro modelo oficial, activarlo globalmente y ajustar idioma, traducción, hilos, best-of, beam size, temperatura, umbral sin voz, duración máxima y timeout.
 - Los modelos descargados se guardan en `persistent/whisper/models/`, por lo que sobreviven reinicios y actualizaciones del contenedor.
-- El audio se mezcla a mono y se reduce de 48 kHz a 16 kHz antes de transcribir.
+- FFmpeg realiza la mezcla a mono y el remuestreo a 16 kHz antes de transcribir.
 - WhatsApp muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
 
 
@@ -126,9 +126,9 @@ Las transcripciones se marcan como texto generado por el sistema. El prompt de L
 
 El procesamiento pesado corre en un subproceso persistente y serializado para no bloquear la conexión de WhatsApp. El subproceso ejecuta `whisper-cli` para audio y Tesseract WASM para OCR. Luna mantiene el estado `escribiendo` durante el trabajo y admite como máximo tres solicitudes pendientes para evitar saturar memoria.
 
-Durante `bun run dev` y `bun run build`, `scripts/prepare-media-assets.ts` consulta la API oficial de GitHub, selecciona la release `latest` de whisper.cpp para Windows x64, Linux x64 o Linux arm64, verifica el digest SHA-256 publicado por GitHub y extrae todo el paquete oficial. También descarga y verifica el modelo Whisper y prepara los recursos OCR. `assets/runtime/` es temporal y no se versiona.
+Durante `bun run dev`, `bun run start` y `bun run build`, `scripts/prepare-media-assets.ts` prepara los runtimes multimedia. Para whisper.cpp consulta la release `latest` compatible con Windows x64, Linux x64 o Linux arm64. Para FFmpeg descarga el binario estático de la release fijada `b6.1.1` de `eugeneware/ffmpeg-static` según plataforma/arquitectura. Ambos binarios se verifican con el digest SHA-256 publicado por GitHub antes de usarse. También descarga y verifica el modelo Whisper y prepara los recursos OCR. `assets/runtime/` es temporal y no se versiona; los runtimes válidos se reutilizan en ejecuciones posteriores.
 
-`bun run build` copia a `dist/runtime/whisper/` el ejecutable, las DLL o bibliotecas compartidas, el manifiesto de versión y el modelo. Para mover Luna manualmente debes copiar el ejecutable **junto con la carpeta `runtime/`**. Los paquetes de GitHub Releases ya vienen completos y listos para ejecutar.
+`bun run build` copia a `dist/runtime/whisper/` el ejecutable, las DLL o bibliotecas compartidas, el manifiesto de versión y el modelo, y copia FFmpeg a `dist/runtime/ffmpeg/`. Para mover Luna manualmente debes copiar el ejecutable **junto con la carpeta `runtime/`**. Los paquetes de GitHub Releases ya vienen completos y listos para ejecutar.
 
 En Linux, la preparación restaura como archivos regulares los nombres SONAME que suelen distribuirse como enlaces simbólicos, por ejemplo `libwhisper.so.1`. También incluye `libgomp.so.1`, requerido por OpenMP, dentro de `runtime/whisper/system-libs`. Para evitar incompatibilidades entre la glibc del host de build y la del servidor final, el camino normal ya no copia `libgomp` directamente desde el sistema de build: usa un paquete oficial Debian Bookworm fijado por arquitectura y SHA-256 para amd64 o ARM64 y registra `portable-runtime-dependencies.json`. Un runtime antiguo conservado en `assets/` sin ese manifest se repara automáticamente. APT queda solo como fallback. Antes de aceptar un runtime Linux, el build ejecuta `whisper-cli --help` con su `LD_LIBRARY_PATH`; si falta una biblioteca, el build falla en lugar de publicar un release roto. Durante la transcripción, Luna vuelve a agregar automáticamente todas las carpetas de bibliotecas del runtime a `PATH` y `LD_LIBRARY_PATH`.
 
@@ -137,6 +137,7 @@ Si una descarga automática está bloqueada, puedes descargar manualmente el ass
 ```powershell
 $env:WHISPER_CPP_ARCHIVE_PATH = "C:\Descargas\whisper-bin-x64.zip"
 $env:WHISPER_MODEL_PATH = "C:\Descargas\ggml-base-q5_1.bin"
+$env:FFMPEG_STATIC_ARCHIVE_PATH = "C:\Descargas\ffmpeg-win32-x64.gz"
 bun run build
 ```
 
@@ -628,18 +629,16 @@ persistent/
 ```text
 assets/
 ├── luna-ai.png
-└── runtime/                 # whisper.cpp, modelo y WASM OCR preparados; ignorados por Git
-
-patches/
-└── ogg-opus-decoder@1.7.3.patch # Evita incluir su WebWorker opcional en Bun compile
+└── runtime/                 # whisper.cpp, FFmpeg, modelo y WASM OCR preparados; ignorados por Git
 
 scripts/
 ├── prepare-agent-browser.ts # Prepara binario nativo y navegador compatible
-├── prepare-media-assets.ts  # Descarga latest, repara y valida whisper.cpp
+├── prepare-media-assets.ts  # Descarga/verifica FFmpeg, whisper.cpp, modelo y assets OCR
 ├── package-runtime.ts       # Copia runtimes preparados a dist/
 ├── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1 portable
 ├── remove-legacy-research.py # Elimina el pipeline de investigación legado
-└── remove-context-noise.py  # Limpia registros duplicados/espurios de contexto
+├── remove-context-noise.py  # Limpia registros duplicados/espurios de contexto
+└── remove-obsolete-ogg-opus.py # Elimina el parche del decoder OGG/Opus reemplazado por FFmpeg
 
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
@@ -651,11 +650,12 @@ src/
 ├── whisper-config.ts        # Catálogo, persistencia y descarga segura de modelos
 ├── whisper-setup.ts         # Flujo administrativo !setup-whisper
 ├── media-processing/
-│   ├── audio-utils.ts       # Mezcla mono y reducción a 16 kHz
+│   ├── audio-utils.ts       # Estimación de duración del contenedor OGG
 │   ├── client.ts            # Cola e IPC con el subproceso multimedia
 │   ├── protocol.ts          # Contrato de mensajes
+│   ├── ffmpeg-native.ts     # Resolución del runtime y decodificación OGG/Opus a PCM 16 kHz
 │   ├── whisper-native.ts    # WAV, resolución del runtime y ejecución de whisper-cli
-│   └── worker.ts            # OGG/Opus, whisper.cpp y OCR WASM
+│   └── worker.ts            # FFmpeg, whisper.cpp y OCR WASM
 ├── search/
 │   ├── read-url.ts          # Lectura y extracción Markdown con protecciones SSRF
 │   ├── search-config.ts     # Tipos, proveedores y normalización
@@ -698,10 +698,11 @@ Salida local esperada:
 dist/
 ├── luna-ai.exe              # Windows; en Linux se llama luna-ai
 └── runtime/
-    └── whisper/             # whisper-cli, bibliotecas, modelo y manifest.json
+    ├── whisper/             # whisper-cli, bibliotecas, modelo y manifest.json
+    └── ffmpeg/              # ffmpeg/ffmpeg.exe y manifest.json
 ```
 
-El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. Los paquetes Linux incluyen además `libgomp.so.1`, requerido por OpenMP, y el workflow comprueba su presencia antes de comprimir el release. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Ninguna credencial se incrusta en los releases.
+El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, FFmpeg estático, sus DLL o bibliotecas compartidas cuando aplican, el modelo Whisper y el README. Los paquetes Linux incluyen además `libgomp.so.1`, requerido por OpenMP, y el workflow comprueba su presencia antes de comprimir el release. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados globalmente. Ninguna credencial se incrusta en los releases.
 
 ## Pruebas manuales importantes
 

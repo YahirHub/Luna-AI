@@ -28,10 +28,10 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
 - Workdir privado por usuario con tareas, inbox, exports y registro de artefactos.
 - Generación local de PDF/ZIP, envío por WhatsApp y registro de artefactos.
-- Procesamiento multimedia local con whisper.cpp y OCR WASM.
+- Procesamiento multimedia local con FFmpeg administrado para decodificación/normalización, whisper.cpp para transcripción y OCR WASM.
 - Alarmas, recordatorios, memoria y contexto persistentes por usuario.
 - Credenciales web persistentes cifradas con AES-256-GCM y clave local compartida con el runtime de `agent-browser`.
-- Docker multi-arquitectura basado en Debian Bookworm, Chromium del sistema y runtime portable de Whisper/libgomp.
+- Docker multi-arquitectura basado en Debian Bookworm, Chromium del sistema y runtimes portables de FFmpeg y Whisper/libgomp.
 
 # Estado técnico vigente
 
@@ -43,6 +43,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - La clave `persistent/browser/encryption.key` no se regenera si ya existe pero está corrupta, evitando invalidar silenciosamente credenciales cifradas previas.
 - `credential-profiles.json` se persiste mediante reemplazo atómico.
 - Los mensajes de grupos de WhatsApp se descartan antes del procesamiento y `AuthManager` rechaza/purga JIDs `@g.us`, evitando que un login grupal reemplace la sesión privada.
+- Las notas OGG/Opus se decodifican con un runtime FFmpeg estático preparado por plataforma/arquitectura; se verifica su SHA-256, se empaqueta junto al binario y se compara la duración estimada del OGG con el PCM para detectar truncamientos. Whisper ya no usa `--no-timestamps` en audios largos.
 
 # Archivos y módulos clave
 
@@ -70,4 +71,4 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Último registro
 
-- `contexto/69-ignorar-grupos-y-proteger-sesiones-whatsapp.md`
+- `contexto/70-ffmpeg-para-audio-largo-y-runtime-portable.md`
