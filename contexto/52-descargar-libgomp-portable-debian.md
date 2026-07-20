@@ -1,4 +1,4 @@
-# 52 — Fecha
+# 52 — Descargar libgomp portable desde Debian
 
 2026-07-17
 

@@ -257,6 +257,7 @@ Inicia sesión en domain.tld con el usuario user123 y la contraseña patito123, 
 La contraseña incluida explícitamente en el mensaje se intercepta antes de llegar al LLM y se sustituye por una `credential_ref` opaca, pero este preprocesamiento de seguridad no decide ni ejecuta herramientas. La presencia de una URL, `localhost`, un correo o una credencial segura nunca abre el navegador automáticamente: el agente principal conserva la responsabilidad de decidir entre `browser_agent`, `researcher_web`, `spawn_agents` o ninguna herramienta.
 
 Las credenciales de sitios web se administran por usuario de Luna y pueden existir varias cuentas para el mismo dominio. `browser_credentials_save`, `browser_credentials_list` y `browser_credentials_delete` permiten configurar, consultar y eliminar perfiles desde lenguaje natural sin exponer contraseñas al LLM. La contraseña queda cifrada en `persistent/browser/credential-profiles.json` mediante AES-256-GCM usando la clave local `persistent/browser/encryption.key`; el índice puede contener URL, correo/usuario y referencias opacas, pero nunca la contraseña en texto plano.
+La clave de cifrado es compartida por el almacén de credenciales y el runtime de `agent-browser`. Si el archivo ya existe pero no contiene una clave válida de 256 bits, Luna falla de forma explícita y **no lo regenera automáticamente**, evitando invalidar silenciosamente credenciales cifradas con una clave anterior. El índice de perfiles se actualiza mediante escritura atómica para reducir el riesgo de corrupción ante una interrupción.
 
 Cuando `browser-web` llega a una pantalla de login, primero puede consultar `browser_auth_profiles`. Si encuentra una cuenta compatible, `browser_auth_login` descifra la contraseña únicamente dentro del runtime, la entrega temporalmente a `agent-browser` por `stdin`, inicia sesión y vuelve a eliminar el perfil temporal del vault interno del CLI. Si la sesión web caduca, el agente puede repetir el login con el perfil cifrado sin volver a pedir la contraseña. Si la contraseña real cambió o dejó de ser válida, el agente solicita una nueva mediante `browser_request_user_input`; después de un login correcto la credencial cifrada de URL + usuario se reemplaza sin crear duplicados.
 
@@ -366,6 +367,7 @@ Las herramientas de artefactos pueden:
 - Usar orientación horizontal automáticamente cuando una tabla tiene cinco o más columnas, evitando tablas de precios comprimidas o ilegibles.
 - Comprimir una carpeta completa con `archive_folder`.
 - Crear un ZIP de código con `gitzip`, respetando `.gitignore` de la raíz y de carpetas anidadas, negaciones `!`, excluyendo `.git/` y evitando enlaces externos.
+- Resolver rutas contra el `realpath` del workdir y de su ancestro existente más cercano, bloqueando lecturas y escrituras que intenten escapar mediante symlinks o junctions externos.
 - Detectar nombres sensibles como `.env`, claves privadas, credenciales, `persistent/` o sesiones de Baileys antes de compartir código.
 
 `whatsapp_send` solo puede devolver contenido al mismo JID que originó la tarea. Imágenes, audio y video de hasta 10 MiB se envían con su tipo nativo; archivos mayores se envían como documento. Las carpetas se comprimen como ZIP antes de enviarse y cualquier tipo desconocido se trata como documento.
@@ -601,7 +603,7 @@ persistent/
 ├── llm.config.json          # Solo si existe proveedor LLM personalizado
 ├── whisper.json             # Modelo y parámetros globales de transcripción
 ├── whisper/models/          # Modelos adicionales descargados por el administrador
-├── browser/                 # Clave local para cifrar el estado persistente de sesiones del navegador
+├── browser/                 # Clave y perfiles cifrados de credenciales/sesiones web
 └── users.json               # Usuarios y sesiones del bot
 ```
 
@@ -632,10 +634,12 @@ patches/
 └── ogg-opus-decoder@1.7.3.patch # Evita incluir su WebWorker opcional en Bun compile
 
 scripts/
+├── prepare-agent-browser.ts # Prepara binario nativo y navegador compatible
 ├── prepare-media-assets.ts  # Descarga latest, repara y valida whisper.cpp
-├── package-runtime.ts       # Copia whisper.cpp y restaura aliases Linux
-├── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1
-└── eliminar-whisper-wasm-obsoleto.ps1 # Limpieza segura de la implementación sustituida
+├── package-runtime.ts       # Copia runtimes preparados a dist/
+├── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1 portable
+├── remove-legacy-research.py # Elimina el pipeline de investigación legado
+└── remove-context-noise.py  # Limpia registros duplicados/espurios de contexto
 
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
@@ -714,24 +718,28 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 11. Revisar `context.json` y comprobar que no contenga páginas completas; revisar `workdir/tasks/<task-id>/agents/*/events.jsonl` para la trazabilidad.
 12. Intentar provocar la lectura de una URL privada o local y verificar que sea rechazada.
 13. Desactivar búsqueda y subagentes desde `/config` y comprobar que `researcher_web` y `spawn_agents` desaparezcan.
-13. Abrir `!setup-whisper`, comprobar el catálogo, cambiar un parámetro y verificar `persistent/whisper.json`.
-14. Descargar un modelo alternativo pequeño, activarlo y comprobar que se conserve después de reiniciar.
-15. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
-16. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
-17. Probar un audio mayor que la duración configurada y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
-18. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
-19. Pedir una comparación de cuatro proveedores y verificar que se use una sola tarea paralela, con carpetas independientes, continuación ante un fallo y entrega del PDF.
-20. Abrir el PDF y comprobar que las tablas Markdown se dibujen como celdas reales, sin mostrar los caracteres `|`.
-21. Crear un proyecto con `.gitignore` anidados, ejecutar `gitzip` y revisar que no incluya `.git/` ni archivos ignorados.
-22. Enviar una imagen menor de 10 MiB, un video mayor de 10 MiB y una carpeta; comprobar imagen nativa, documento y ZIP.
-23. Forzar el máximo de rondas de herramientas después de un envío exitoso y confirmar que Luna cierre con el resultado, sin mostrar “excedió el número de llamadas”.
-24. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
+14. Abrir `!setup-whisper`, comprobar el catálogo, cambiar un parámetro y verificar `persistent/whisper.json`.
+15. Descargar un modelo alternativo pequeño, activarlo y comprobar que se conserve después de reiniciar.
+16. Enviar una nota de voz OGG/Opus en español, verificar el progreso, la transcripción y que Luna responda al contenido.
+17. Enviar una imagen JPEG o PNG con texto, verificar el OCR y que el pie de imagen también llegue al asistente.
+18. Probar un audio mayor que la duración configurada y una imagen mayor de 10 MB para confirmar que se rechacen antes de procesarlos.
+19. Reiniciar el contenedor con el mismo volumen y verificar que toda la configuración persista.
+20. Pedir una comparación de cuatro proveedores y verificar que se use una sola tarea paralela, con carpetas independientes, continuación ante un fallo y entrega del PDF.
+21. Abrir el PDF y comprobar que las tablas Markdown se dibujen como celdas reales, sin mostrar los caracteres `|`.
+22. Crear un proyecto con `.gitignore` anidados, ejecutar `gitzip` y revisar que no incluya `.git/` ni archivos ignorados.
+23. Enviar una imagen menor de 10 MiB, un video mayor de 10 MiB y una carpeta; comprobar imagen nativa, documento y ZIP.
+24. Forzar el máximo de rondas de herramientas después de un envío exitoso y confirmar que Luna cierre con el resultado, sin mostrar “excedió el número de llamadas”.
+25. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
+26. Crear un symlink/junction dentro del workdir que apunte fuera y verificar que una escritura nueva a través de ese directorio sea rechazada.
+27. Probar una copia con `persistent/browser/encryption.key` corrupta y confirmar que el archivo no sea reemplazado automáticamente.
 
-## Limpieza segura en Windows
+## Limpieza reproducible
+
+Los scripts de limpieza son Python puro y funcionan desde PowerShell, CMD, Linux o macOS. Antes de aplicar una limpieza de contexto se puede revisar el alcance exacto:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\limpiar-archivos-innecesarios.ps1 -WhatIf
-powershell -ExecutionPolicy Bypass -File .\scripts\limpiar-archivos-innecesarios.ps1
+python .\scripts\remove-context-noise.py --dry-run
+python .\scripts\remove-context-noise.py
 ```
 
-El script no toca `persistent/`.
+`remove-context-noise.py` solo toca las rutas enumeradas dentro del propio script y no modifica `persistent/`, `assets/`, `dist/` ni `node_modules/`.

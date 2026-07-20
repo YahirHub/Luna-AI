@@ -53,6 +53,16 @@ function isInside(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
+function nearestExistingAncestor(path: string, root: string): string {
+  let current = path;
+  while (!existsSync(current) && current !== root) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return current;
+}
+
 function normalizeRelativePath(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/");
   if (!trimmed || trimmed === ".") return ".";
@@ -114,8 +124,14 @@ export class WorkspaceManager {
       throw new Error(`No existe "${normalized}" en el workdir.`);
     }
 
+    const realRoot = realpathSync(root);
+    const existingAncestor = nearestExistingAncestor(candidate, root);
+    const realAncestor = realpathSync(existingAncestor);
+    if (!isInside(realRoot, realAncestor)) {
+      throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");
+    }
+
     if (existsSync(candidate)) {
-      const realRoot = realpathSync(root);
       const realCandidate = realpathSync(candidate);
       if (!isInside(realRoot, realCandidate)) {
         throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager } from "../src/workspace/workspace-manager.ts";
@@ -44,6 +44,17 @@ describe("WorkspaceManager", () => {
     const workdir = workspace.getWorkdir("user");
     symlinkSync(external, join(workdir, "escape-link"));
     expect(() => workspace.resolvePath("user", "escape-link", { mustExist: true })).toThrow(/enlace simbólico/i);
+  });
+
+  it("impide crear archivos nuevos a través de un directorio simbólico externo", () => {
+    const { root, workspace } = createWorkspace();
+    const externalDir = join(root, "external-dir");
+    mkdirSync(externalDir, { recursive: true });
+    const workdir = workspace.getWorkdir("user");
+    symlinkSync(externalDir, join(workdir, "escape-dir"), process.platform === "win32" ? "junction" : "dir");
+
+    expect(() => workspace.writeText("user", "escape-dir/nuevo.txt", "secreto")).toThrow(/enlace simbólico/i);
+    expect(existsSync(join(externalDir, "nuevo.txt"))).toBe(false);
   });
 
   it("limpia todo el workdir y recrea únicamente la estructura base", () => {

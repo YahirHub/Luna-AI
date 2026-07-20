@@ -1,4 +1,4 @@
-# 48 — Fecha
+# 48 — Configuración global de Whisper
 
 2026-07-17
 

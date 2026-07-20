@@ -94,6 +94,27 @@ it("guarda perfiles cifrados persistentes y soporta varias cuentas por sitio", a
   }
 });
 
+it("no reemplaza silenciosamente una clave de cifrado persistente corrupta", async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const baseDir = mkdtempSync(join(tmpdir(), "luna-browser-corrupt-key-"));
+  const keyPath = join(baseDir, "encryption.key");
+  try {
+    writeFileSync(keyPath, "clave-corrupta\n", { mode: 0o600 });
+    const store = new BrowserCredentialStore({ persistent: true, baseDir });
+    expect(() => store.saveProfile({
+      jid: "owner@lid",
+      url: "https://site.test",
+      username: "owner@test.com",
+      password: "secreto",
+    })).toThrow(/clave de cifrado.*inválida/i);
+    expect(readFileSync(keyPath, "utf8")).toBe("clave-corrupta\n");
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
 it("reemplaza la contraseña cifrada de la misma cuenta sin duplicar el perfil", async () => {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

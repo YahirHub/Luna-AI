@@ -1,4 +1,4 @@
-# 49 — Fecha
+# 49 — Corregir bibliotecas de Whisper en Linux
 
 2026-07-17
 

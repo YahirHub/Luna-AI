@@ -1,4 +1,4 @@
-# 51 — Fecha
+# 51 — Incluir libgomp en el runtime Linux
 
 2026-07-17
 

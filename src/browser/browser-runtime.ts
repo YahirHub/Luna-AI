@@ -1,5 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAppDir } from "../utils.ts";
 import {
@@ -13,6 +13,7 @@ import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import type { BrowserCredentialStore, BrowserInputKind } from "./browser-credentials.ts";
 import { debugInfo, debugLog, debugWarn } from "../debug.ts";
 import { createProcessOutputCollector } from "./process-output.ts";
+import { loadOrCreateBrowserEncryptionKey } from "./browser-encryption.ts";
 
 export function resolveAgentBrowserBinary(): string {
   const appDir = getAppDir();
@@ -37,14 +38,7 @@ export function resolveAgentBrowserBinary(): string {
 }
 
 function encryptionKey(): string {
-  const directory = join(getAppDir(), "persistent", "browser");
-  const path = join(directory, "encryption.key");
-  mkdirSync(directory, { recursive: true });
-  if (existsSync(path)) return readFileSync(path, "utf8").trim();
-  const key = randomBytes(32).toString("hex");
-  writeFileSync(path, `${key}\n`, { mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch { /* Windows */ }
-  return key;
+  return loadOrCreateBrowserEncryptionKey(join(getAppDir(), "persistent", "browser", "encryption.key"));
 }
 
 function safeName(value: string): string {

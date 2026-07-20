@@ -1,4 +1,4 @@
-# 47 — Fecha
+# 47 — Procesamiento multimedia local
 
 2026-07-17
 
