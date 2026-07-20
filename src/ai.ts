@@ -1,4 +1,4 @@
-import type { LlmConfig } from "./llm-config.ts";
+import { deriveLlmEndpointUrls, type LlmConfig } from "./llm-config.ts";
 import { debugError, debugWarn } from "./debug.ts";
 
 /** Mensaje en formato OpenAI. */
@@ -541,7 +541,9 @@ export async function chatCompletionWithTools(
  * No aplica filtros por sufijo, proveedor o nombre: el endpoint es la fuente
  * de verdad y solo se descartan identificadores vacíos o duplicados.
  */
-export async function fetchModels(config: LlmConfig): Promise<string[]> {
+export async function fetchModels(
+  config: Pick<LlmConfig, "modelsUrl" | "apiKey" | "requestTimeoutMs">,
+): Promise<string[]> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (config.apiKey) {
     headers["Authorization"] = `Bearer ${config.apiKey}`;
@@ -560,21 +562,84 @@ export async function fetchModels(config: LlmConfig): Promise<string[]> {
     );
   }
 
-  const payload = (await response.json()) as { data?: unknown };
+  const payload = (await response.json()) as unknown;
+  let entries: unknown[] | null = null;
 
-  if (!Array.isArray(payload.data)) {
+  if (Array.isArray(payload)) {
+    entries = payload;
+  } else if (payload && typeof payload === "object") {
+    const object = payload as { data?: unknown; models?: unknown };
+    if (Array.isArray(object.data)) entries = object.data;
+    else if (Array.isArray(object.models)) entries = object.models;
+  }
+
+  if (!entries) {
     throw new Error("Respuesta inesperada del endpoint de modelos");
   }
 
-  const ids = payload.data.flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || !("id" in entry)) {
+  const ids = entries.flatMap((entry) => {
+    if (typeof entry === "string") {
+      return entry.trim() ? [entry.trim()] : [];
+    }
+    if (!entry || typeof entry !== "object") {
       return [];
     }
-    const id = (entry as { id?: unknown }).id;
-    return typeof id === "string" && id.trim() !== "" ? [id.trim()] : [];
+
+    const object = entry as { id?: unknown; name?: unknown; model?: unknown };
+    const rawId = object.id ?? object.model ?? object.name;
+    return typeof rawId === "string" && rawId.trim() !== ""
+      ? [rawId.trim()]
+      : [];
   });
 
   return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
+}
+
+export interface ProviderModelDiscoveryResult {
+  baseUrl: string;
+  chatCompletionsUrl: string;
+  modelsUrl: string;
+  models: string[];
+}
+
+/**
+ * Prueba automáticamente las URLs base candidatas y selecciona la primera cuyo
+ * catálogo /models responda correctamente. Nunca registra ni incluye la API key
+ * en los errores.
+ */
+export async function discoverProviderModels(
+  baseUrlCandidates: readonly string[],
+  apiKey: string,
+  requestTimeoutMs: number,
+): Promise<ProviderModelDiscoveryResult> {
+  const errors: string[] = [];
+
+  for (const baseUrlCandidate of baseUrlCandidates) {
+    const endpoints = deriveLlmEndpointUrls(baseUrlCandidate);
+    try {
+      const models = await fetchModels({
+        modelsUrl: endpoints.modelsUrl,
+        apiKey,
+        requestTimeoutMs,
+      });
+      if (models.length === 0) {
+        errors.push(`${endpoints.modelsUrl}: catálogo vacío`);
+        continue;
+      }
+      return { ...endpoints, models };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      errors.push(`${endpoints.modelsUrl}: ${reason}`);
+    }
+  }
+
+  const attempted = baseUrlCandidates
+    .map((baseUrl) => deriveLlmEndpointUrls(baseUrl).modelsUrl)
+    .join(", ");
+  throw new Error(
+    `No se pudo obtener el catálogo de modelos. Se probaron automáticamente: ${attempted}. ` +
+    `Verifica la URL base y la API key. ${errors.join(" | ")}`,
+  );
 }
 
 export interface ModelDiscoveryResult {

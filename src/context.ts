@@ -15,7 +15,8 @@ export const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
 /** Datos persistidos por usuario. */
 interface UserContextData {
   jid: string;
-  model: string;
+  /** Campo legado: las selecciones por chat ya no se usan. */
+  model?: string;
   messages: ChatMessage[];
   awaitingModelSelection: boolean;
   /** Metadatos de compactación (undefined si nunca se ha compactado). */
@@ -169,7 +170,7 @@ export const STATIC_SYSTEM_PROMPT_CONTENT = [
   "- Los comandos funcionales del bot también tienen herramientas equivalentes; cuando el usuario pida una acción en lenguaje natural, ejecuta la herramienta real en vez de limitarte a explicar el comando",
   "- Puedes mostrar ayuda, responder ping, consultar el JID, cancelar operaciones, limpiar la conversación, listar/cambiar el modelo y limpiar el workdir mediante herramientas",
   "- workspace_clear es destructiva: úsala solo ante una petición explícita de vaciar todo el workdir y con confirmed=true; nunca la uses para borrar un único archivo",
-  "- Para cambiar de modelo usa model_list cuando sea necesario y model_set para persistir la selección de esa conversación",
+  "- Para cambiar de modelo usa model_list cuando sea necesario y model_set; la selección es global y afecta a todos los chats, tareas y subagentes",
   "",
   "ADMINISTRACIÓN EN LENGUAJE NATURAL:",
   "- Cuando las herramientas administrativas estén disponibles, el usuario actual es administrador y hereda todas las capacidades normales además de la administración global",
@@ -224,9 +225,14 @@ export class ContextManager {
     this.defaultModel = defaultModel;
   }
 
-  /** Actualiza el modelo inicial sin modificar selecciones ya persistidas. */
+  /** Actualiza el único modelo global usado por todas las conversaciones. */
   setDefaultModel(defaultModel: string): void {
     this.defaultModel = defaultModel;
+  }
+
+  /** Alias explícito para cambios globales de modelo en caliente. */
+  setGlobalModel(model: string): void {
+    this.defaultModel = model;
   }
 
   /**
@@ -314,9 +320,10 @@ export class ContextManager {
           data.messages.unshift(this.makeSystemPrompt());
         }
         data.jid = jid;
-        data.model = typeof data.model === "string" && data.model
-          ? data.model
-          : this.defaultModel;
+        // Las versiones anteriores persistían un modelo distinto por chat.
+        // Se elimina de la representación cargada para que nunca vuelva a
+        // imponerse sobre el modelo global del provider activo.
+        delete data.model;
         data.awaitingModelSelection = data.awaitingModelSelection === true;
         this.contexts.set(jid, data);
         return data;
@@ -329,7 +336,6 @@ export class ContextManager {
 
     const fresh: UserContextData = {
       jid,
-      model: this.defaultModel,
       messages: [this.makeSystemPrompt()],
       awaitingModelSelection: false,
     };
@@ -377,16 +383,14 @@ export class ContextManager {
     return this.loadContext(jid).messages;
   }
 
-  /** Obtiene el modelo seleccionado para el usuario. */
-  getModel(jid: string): string {
-    return this.loadContext(jid).model || this.defaultModel;
+  /** Obtiene el único modelo global activo. El JID se conserva por compatibilidad. */
+  getModel(_jid: string): string {
+    return this.defaultModel;
   }
 
-  /** Cambia el modelo del usuario. */
-  setModel(jid: string, model: string): void {
-    const ctx = this.loadContext(jid);
-    ctx.model = model;
-    this.saveContext(jid);
+  /** Cambia el modelo global. El JID se conserva por compatibilidad con llamadas antiguas. */
+  setModel(_jid: string, model: string): void {
+    this.setGlobalModel(model);
   }
 
   /** Marca al usuario como esperando selección de modelo. */

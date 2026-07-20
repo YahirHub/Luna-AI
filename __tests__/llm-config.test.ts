@@ -5,10 +5,15 @@ import { join, resolve } from "node:path";
 import {
   DEFAULT_LLM_CONFIG_FILE,
   ProviderSetupManager,
+  buildLlmBaseUrlCandidates,
+  deriveLlmEndpointUrls,
   deleteLlmConfig,
   getLlmConfigPath,
+  getLlmModelSelectionPath,
+  loadGlobalLlmModel,
   loadLlmConfig,
   loadLlmConfigIfPresent,
+  saveGlobalLlmModel,
   saveLlmConfig,
 } from "../src/llm-config.ts";
 
@@ -138,65 +143,119 @@ describe("getLlmConfigPath", () => {
   });
 });
 
+describe("Llm endpoint inference", () => {
+  it("deriva /models y /chat/completions desde una URL base /v1", () => {
+    expect(deriveLlmEndpointUrls("https://api.example.com/v1")).toEqual({
+      baseUrl: "https://api.example.com/v1",
+      chatCompletionsUrl: "https://api.example.com/v1/chat/completions",
+      modelsUrl: "https://api.example.com/v1/models",
+    });
+  });
+
+  it("recupera la base si el administrador pega un endpoint completo", () => {
+    expect(deriveLlmEndpointUrls("https://api.example.com/v1/chat/completions").baseUrl)
+      .toBe("https://api.example.com/v1");
+    expect(deriveLlmEndpointUrls("https://api.example.com/v1/models").baseUrl)
+      .toBe("https://api.example.com/v1");
+  });
+
+  it("asume /v1 y conserva la raíz como fallback cuando solo recibe el dominio", () => {
+    expect(buildLlmBaseUrlCandidates("https://api.example.com")).toEqual([
+      "https://api.example.com/v1",
+      "https://api.example.com",
+    ]);
+  });
+});
+
+
+
+describe("selección global de modelo", () => {
+  it("persiste el modelo global junto al provider actual", () => {
+    const configPath = join(TEST_DIR, "global-model", "llm.config.json");
+    const config = {
+      chatCompletionsUrl: "https://api.example.com/v1/chat/completions",
+      modelsUrl: "https://api.example.com/v1/models",
+      defaultModel: "model-b",
+      apiKey: "",
+      requestTimeoutMs: 60_000,
+    };
+
+    saveGlobalLlmModel(config, configPath);
+
+    expect(getLlmModelSelectionPath(configPath)).toBe(
+      join(TEST_DIR, "global-model", "llm.model.json"),
+    );
+    expect(loadGlobalLlmModel(config.modelsUrl, configPath)).toBe("model-b");
+  });
+
+  it("no reutiliza el modelo global de un provider distinto", () => {
+    const configPath = join(TEST_DIR, "provider-switch", "llm.config.json");
+    saveGlobalLlmModel(
+      {
+        modelsUrl: "https://old.example.com/v1/models",
+        defaultModel: "old-model",
+      },
+      configPath,
+    );
+
+    expect(
+      loadGlobalLlmModel("https://new.example.com/v1/models", configPath),
+    ).toBeNull();
+  });
+});
+
 describe("ProviderSetupManager", () => {
-  it("construye la configuración en cuatro pasos sin filtrar modelos", () => {
+  it("configura URL base, API key y modelo por selección numérica", () => {
     const setup = new ProviderSetupManager();
     const jid = "admin@s.whatsapp.net";
 
     setup.start(jid);
-    expect(setup.getStep(jid)).toBe("chatCompletionsUrl");
-    expect(setup.submit(jid, "https://api.example.com/v1/chat/completions")).toEqual({
-      completed: false,
-      nextStep: "modelsUrl",
-    });
-    expect(setup.submit(jid, "https://api.example.com/v1/models")).toEqual({
-      completed: false,
-      nextStep: "defaultModel",
-    });
-    expect(setup.submit(jid, "vendor/model-main")).toEqual({
-      completed: false,
+    expect(setup.getStep(jid)).toBe("baseUrl");
+    expect(setup.submit(jid, "https://api.example.com/v1")).toEqual({
+      kind: "next",
       nextStep: "apiKey",
     });
 
-    const result = setup.submit(jid, "secret-key");
-    expect(result.completed).toBe(true);
-    if (result.completed) {
+    expect(setup.submit(jid, "secret-key")).toEqual({
+      kind: "discover-models",
+      secretInput: true,
+    });
+    expect(setup.getDiscoveryDraft(jid)).toEqual({
+      baseUrlCandidates: ["https://api.example.com/v1"],
+      apiKey: "secret-key",
+      requestTimeoutMs: 60_000,
+    });
+
+    setup.setDiscoveredModels(jid, "https://api.example.com/v1", [
+      "vendor/model-a",
+      "vendor/model-b",
+    ]);
+    expect(setup.getStep(jid)).toBe("defaultModel");
+
+    const result = setup.submit(jid, "2");
+    expect(result.kind).toBe("completed");
+    if (result.kind === "completed") {
       expect(result.config).toEqual({
         chatCompletionsUrl: "https://api.example.com/v1/chat/completions",
         modelsUrl: "https://api.example.com/v1/models",
-        defaultModel: "vendor/model-main",
+        defaultModel: "vendor/model-b",
         apiKey: "secret-key",
         requestTimeoutMs: 60_000,
       });
-      expect(result.secretInput).toBe(true);
     }
   });
 
-  it("acepta URLs y modelo expresados dentro de frases naturales", () => {
+  it("acepta que la URL base venga dentro de una frase y normaliza endpoints pegados por error", () => {
     const setup = new ProviderSetupManager();
     const jid = "admin-natural-fields@s.whatsapp.net";
 
     setup.start(jid);
-    expect(setup.submit(jid, "El endpoint de chat es https://api.example.com/v1/chat/completions")).toEqual({
-      completed: false,
-      nextStep: "modelsUrl",
-    });
-    expect(setup.submit(jid, "El catálogo está en https://api.example.com/v1/models")).toEqual({
-      completed: false,
-      nextStep: "defaultModel",
-    });
-    expect(setup.submit(jid, "Usa el modelo vendor/model-main")).toEqual({
-      completed: false,
+    expect(setup.submit(jid, "Mi proveedor está en https://api.example.com/v1/models")).toEqual({
+      kind: "next",
       nextStep: "apiKey",
     });
-    const result = setup.submit(jid, "sin-clave");
-
-    expect(result.completed).toBe(true);
-    if (result.completed) {
-      expect(result.config.chatCompletionsUrl).toBe("https://api.example.com/v1/chat/completions");
-      expect(result.config.modelsUrl).toBe("https://api.example.com/v1/models");
-      expect(result.config.defaultModel).toBe("vendor/model-main");
-    }
+    setup.submit(jid, "sin-clave");
+    expect(setup.getDiscoveryDraft(jid).baseUrlCandidates[0]).toBe("https://api.example.com/v1");
   });
 
   it("extrae la API key cuando el administrador la envía dentro de una frase natural", () => {
@@ -204,16 +263,14 @@ describe("ProviderSetupManager", () => {
     const jid = "admin-natural@s.whatsapp.net";
 
     setup.start(jid);
-    setup.submit(jid, "https://api.example.com/v1/chat/completions");
-    setup.submit(jid, "https://api.example.com/v1/models");
-    setup.submit(jid, "vendor/model-main");
+    setup.submit(jid, "https://api.example.com/v1");
     const result = setup.submit(jid, "Esta es mi API key: sk-natural-secret");
 
-    expect(result.completed).toBe(true);
-    if (result.completed) {
-      expect(result.config.apiKey).toBe("sk-natural-secret");
-      expect(result.secretInput).toBe(true);
-    }
+    expect(result).toEqual({
+      kind: "discover-models",
+      secretInput: true,
+    });
+    expect(setup.getDiscoveryDraft(jid).apiKey).toBe("sk-natural-secret");
   });
 
   it("acepta sin-clave y conserva el timeout previo", () => {
@@ -221,23 +278,31 @@ describe("ProviderSetupManager", () => {
     const jid = "admin2@s.whatsapp.net";
 
     setup.start(jid, {
-      chatCompletionsUrl: "https://old.example.com/chat",
-      modelsUrl: "https://old.example.com/models",
+      chatCompletionsUrl: "https://old.example.com/v1/chat/completions",
+      modelsUrl: "https://old.example.com/v1/models",
       defaultModel: "old-model",
       apiKey: "old-key",
       requestTimeoutMs: 15_000,
     });
-    setup.submit(jid, "https://new.example.com/chat");
-    setup.submit(jid, "https://new.example.com/models");
-    setup.submit(jid, "new-model");
-    const result = setup.submit(jid, "sin-clave");
+    setup.submit(jid, "https://new.example.com/v1");
+    expect(setup.submit(jid, "sin-clave")).toEqual({
+      kind: "discover-models",
+      secretInput: false,
+    });
+    expect(setup.getDiscoveryDraft(jid).requestTimeoutMs).toBe(15_000);
+    expect(setup.getDiscoveryDraft(jid).apiKey).toBe("");
+  });
 
-    expect(result.completed).toBe(true);
-    if (result.completed) {
-      expect(result.config.apiKey).toBe("");
-      expect(result.config.requestTimeoutMs).toBe(15_000);
-      expect(result.secretInput).toBe(false);
-    }
+  it("rechaza selecciones fuera del catálogo y conserva el paso", () => {
+    const setup = new ProviderSetupManager();
+    const jid = "admin-model@s.whatsapp.net";
+    setup.start(jid);
+    setup.submit(jid, "https://api.example.com/v1");
+    setup.submit(jid, "sin-clave");
+    setup.setDiscoveredModels(jid, "https://api.example.com/v1", ["model-a"]);
+
+    expect(() => setup.submit(jid, "2")).toThrow("Número inválido");
+    expect(setup.getStep(jid)).toBe("defaultModel");
   });
 
   it("mantiene el paso actual cuando una URL es inválida", () => {
@@ -246,7 +311,19 @@ describe("ProviderSetupManager", () => {
     setup.start(jid);
 
     expect(() => setup.submit(jid, "no-es-url")).toThrow();
-    expect(setup.getStep(jid)).toBe("chatCompletionsUrl");
+    expect(setup.getStep(jid)).toBe("baseUrl");
+  });
+
+  it("permite reiniciar el flujo a URL base tras un fallo de descubrimiento", () => {
+    const setup = new ProviderSetupManager();
+    const jid = "admin-reset@s.whatsapp.net";
+    setup.start(jid);
+    setup.submit(jid, "https://api.example.com/v1");
+    setup.submit(jid, "secret");
+    setup.resetToBaseUrl(jid);
+
+    expect(setup.getStep(jid)).toBe("baseUrl");
+    expect(() => setup.getDiscoveryDraft(jid)).toThrow();
   });
 
   it("permite cancelar el flujo", () => {

@@ -20,6 +20,7 @@ import { loadWhisperConfig } from "./whisper-config.ts";
 import { WhisperSetupManager } from "./whisper-setup.ts";
 import {
   discoverModels,
+  discoverProviderModels,
   fetchModels,
   chatCompletion,
   chatCompletionWithTools,
@@ -28,6 +29,9 @@ import {
 import {
   ProviderSetupManager,
   deleteLlmConfig,
+  inferLlmBaseUrl,
+  loadGlobalLlmModel,
+  saveGlobalLlmModel,
   saveLlmConfig,
 } from "./llm-config.ts";
 import type {
@@ -243,7 +247,7 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["whatsapp_send", "📤 Preparando envío por WhatsApp..."],
   ["workspace_clear", "🧹 Limpiando tu workdir..."],
   ["model_list", "📋 Actualizando modelos disponibles..."],
-  ["model_set", "🧠 Cambiando modelo de la conversación..."],
+  ["model_set", "🧠 Cambiando modelo global..."],
   ["llm_provider_start_setup", "🧠 Preparando configuración del proveedor LLM..."],
   ["search_admin_test", "🧪 Probando motores de búsqueda..."],
   ["search_admin_start_set_api_key", "🔑 Preparando configuración segura de API key..."],
@@ -451,7 +455,11 @@ export function initLlm(
   llmConfigPath = configPath;
   ensureSchedulersStarted();
 
-  const activeConfig = config ?? createOpenCodeFreeConfig();
+  const baseConfig = config ?? createOpenCodeFreeConfig();
+  const persistedGlobalModel = loadGlobalLlmModel(baseConfig.modelsUrl, configPath);
+  const activeConfig = persistedGlobalModel
+    ? { ...baseConfig, defaultModel: persistedGlobalModel }
+    : baseConfig;
   llmProviderMode = config ? "custom" : "opencode-free";
   llmConfig = activeConfig;
   availableModels =
@@ -468,6 +476,33 @@ export function initLlm(
 
   // No bloquear el arranque ni /setup-provider por una caída de /models.
   void refreshAvailableModels();
+}
+
+/**
+ * Cambia el modelo activo de Luna para todos los chats, tareas y subagentes.
+ * La selección queda persistida y vinculada al catálogo del provider actual.
+ */
+function applyGlobalModelSelection(model: string): string {
+  if (!llmConfig || !contextManager) {
+    throw new Error("El proveedor LLM todavía no está inicializado.");
+  }
+
+  const nextConfig: LlmConfig = { ...llmConfig, defaultModel: model };
+  llmConfig = llmProviderMode === "custom"
+    ? saveLlmConfig(nextConfig, llmConfigPath)
+    : nextConfig;
+
+  saveGlobalLlmModel(llmConfig, llmConfigPath);
+  contextManager.setGlobalModel(llmConfig.defaultModel);
+  return llmConfig.defaultModel;
+}
+
+/** Activa OpenCode Free y fija su modelo predeterminado como selección global. */
+function activateOpenCodeFreeGlobally(): void {
+  deleteLlmConfig(llmConfigPath);
+  const freeConfig = createOpenCodeFreeConfig();
+  saveGlobalLlmModel(freeConfig, llmConfigPath);
+  initLlm(null, llmConfigPath);
 }
 
 /**
@@ -646,38 +681,40 @@ function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
   }
 }
 
-function providerSetupPrompt(step: ProviderSetupStep): string {
+function providerSetupPrompt(step: ProviderSetupStep, models: readonly string[] = []): string {
   switch (step) {
-    case "chatCompletionsUrl":
+    case "baseUrl":
       return [
-        "1/4 — URL DE CHAT COMPLETIONS",
+        "1/3 — URL BASE DEL PROVEEDOR",
         "",
-        "Envía el endpoint completo usado para generar respuestas.",
-        "Ejemplo: https://api.example.com/v1/chat/completions",
-      ].join("\n");
-    case "modelsUrl":
-      return [
-        "2/4 — URL DEL CATÁLOGO DE MODELOS",
+        "Envía únicamente la URL base compatible con OpenAI.",
+        "Ejemplo: https://api.example.com/v1",
         "",
-        "Envía el endpoint completo que devuelve { data: [{ id }] }.",
-        "Si falla, Luna usará el modelo predeterminado.",
-      ].join("\n");
-    case "defaultModel":
-      return [
-        "3/4 — MODELO PREDETERMINADO",
-        "",
-        "Envía el identificador exacto que usarán los chats nuevos.",
-        "También será el fallback si el catálogo no responde.",
+        "Luna detectará automáticamente /models y /chat/completions.",
+        "También puedes pegar por error una URL terminada en /models o /chat/completions: se normalizará sola.",
       ].join("\n");
     case "apiKey":
       return [
-        "4/4 — API KEY",
+        "2/3 — API KEY",
         "",
         "Envía la clave del proveedor.",
         "Si no requiere clave, responde: sin-clave",
         "",
+        "Al recibirla consultaré automáticamente el catálogo /models.",
         "Por seguridad intentaré eliminar este mensaje después de leerlo.",
       ].join("\n");
+    case "defaultModel": {
+      const rows = models.map((model, index) => `${index + 1}. ${model}`);
+      return [
+        "3/3 — MODELO GLOBAL",
+        "",
+        "Catálogo detectado correctamente. Elige el número del modelo que usará Luna globalmente:",
+        "",
+        ...rows,
+        "",
+        `Responde con un número entre 1 y ${models.length}.`,
+      ].join("\n");
+    }
   }
 }
 
@@ -755,14 +792,14 @@ function cancelCurrentOperation(jid: string): string {
 async function formatModelsForUser(jid: string): Promise<string> {
   if (!llmConfig || !contextManager) return "Error: el proveedor LLM todavía está iniciando.";
   const usedFallback = await refreshAvailableModels();
-  const current = contextManager.getModel(jid) || "ninguno";
+  const current = llmConfig.defaultModel || "ninguno";
   const rows = availableModels.map((model, index) => `${index + 1}. ${model}`);
   return [
     "📋 MODELOS DISPONIBLES",
     "",
     ...rows,
     "",
-    `Modelo actual: ${current}`,
+    `Modelo global actual: ${current}`,
     ...(usedFallback ? ["Nota: se está mostrando un catálogo de respaldo porque el endpoint de modelos no respondió correctamente."] : []),
   ].join("\n");
 }
@@ -858,7 +895,7 @@ async function executeUserControlTool(
       return "🔐 Envía tu nueva contraseña en el siguiente mensaje. Se procesará fuera del LLM y Luna intentará borrar el mensaje después.";
     }
     case "model_status":
-      return `Modelo actual: ${contextManager?.getModel(jid) ?? "ninguno"}`;
+      return `Modelo global actual: ${llmConfig?.defaultModel ?? "ninguno"}`;
     case "model_list":
       return await formatModelsForUser(jid);
     case "model_set": {
@@ -870,13 +907,13 @@ async function executeUserControlTool(
       if (!exact) {
         const partial = availableModels.filter((model) => model.toLowerCase().includes(requested.toLowerCase()));
         if (partial.length === 1) {
-          contextManager.setModel(jid, partial[0]!);
-          return `✅ Modelo seleccionado: ${partial[0]}`;
+          const selected = applyGlobalModelSelection(partial[0]!);
+          return `✅ Modelo global seleccionado: ${selected}`;
         }
         return `Error: el modelo '${requested}' no está disponible. Usa model_list para consultar los modelos actuales.`;
       }
-      contextManager.setModel(jid, exact);
-      return `✅ Modelo seleccionado: ${exact}`;
+      const selected = applyGlobalModelSelection(exact);
+      return `✅ Modelo global seleccionado: ${selected}`;
     }
     default:
       return `Error: herramienta de control desconocida '${name}'.`;
@@ -895,24 +932,22 @@ async function executeAdminControlTool(
       return [
         "🧠 PROVEEDOR LLM",
         `Modo: ${llmProviderMode === "opencode-free" ? OPENCODE_FREE_PROVIDER_NAME : "personalizado"}`,
-        `Chat completions: ${llmConfig?.chatCompletionsUrl ?? "no disponible"}`,
-        `Modelos: ${llmConfig?.modelsUrl ?? "no disponible"}`,
-        `Modelo predeterminado: ${llmConfig?.defaultModel ?? "no disponible"}`,
+        `URL base: ${llmConfig ? inferLlmBaseUrl(llmConfig) : "no disponible"}`,
+        `Modelo global: ${llmConfig?.defaultModel ?? "no disponible"}`,
         `API key configurada: ${llmConfig?.apiKey ? "sí" : "no"}`,
       ].join("\n");
 
     case "llm_provider_use_opencode_free":
       if (args.confirmed !== true) return "Error: restaurar OpenCode Free requiere una petición explícita y confirmed=true.";
-      deleteLlmConfig(llmConfigPath);
       providerSetupManager.cancel(jid);
-      initLlm(null, llmConfigPath);
+      activateOpenCodeFreeGlobally();
       return `✅ ${OPENCODE_FREE_PROVIDER_NAME} activado como proveedor global.`;
 
     case "llm_provider_start_setup":
       providerSetupManager.start(jid, llmProviderMode === "custom" ? llmConfig : null);
       return [
         "✅ Flujo seguro de configuración LLM iniciado.",
-        providerSetupPrompt("chatCompletionsUrl"),
+        providerSetupPrompt("baseUrl"),
       ].join("\n\n");
 
     case "search_admin_status":
@@ -1120,7 +1155,7 @@ registerCommand(
     const list = availableModels
       .map((name, index) => `${index + 1}. ${name}`)
       .join("\n");
-    const currentModel = contextManager?.getModel(senderJid) || "ninguno";
+    const currentModel = llmConfig.defaultModel || "ninguno";
     const fallbackNotice = usedFallback
       ? llmProviderMode === "opencode-free"
         ? [
@@ -1131,7 +1166,7 @@ registerCommand(
         : [
             "",
             "⚠️ El endpoint no respondió o no devolvió modelos utilizables.",
-            `Se muestra el modelo predeterminado: ${llmConfig.defaultModel}`,
+            `Se muestra el modelo global configurado: ${llmConfig.defaultModel}`,
           ]
       : [];
 
@@ -1141,7 +1176,7 @@ registerCommand(
         "",
         list,
         "",
-        `📌 Actual: ${currentModel}`,
+        `📌 Modelo global actual: ${currentModel}`,
         ...fallbackNotice,
         "",
         "✏️ Responde con el NUMERO del modelo que quieras usar.",
@@ -1160,9 +1195,8 @@ registerCommand(
 
     const requestedMode = cmd.body.trim().toLowerCase();
     if (["gratis", "free", "opencode", "opencode-free"].includes(requestedMode)) {
-      deleteLlmConfig(llmConfigPath);
       providerSetupManager.cancel(senderJid);
-      initLlm(null, llmConfigPath);
+      activateOpenCodeFreeGlobally();
       return {
         text: [
           "✅ OPENCODE FREE ACTIVADO",
@@ -1182,12 +1216,12 @@ registerCommand(
         "🧠 CONFIGURAR PROVEEDOR LLM",
         "",
         llmProviderMode === "custom"
-          ? "La configuración personalizada actual se reemplazará al completar los 4 pasos."
-          : `${OPENCODE_FREE_PROVIDER_NAME} seguirá activo hasta completar los 4 pasos.`,
+          ? "La configuración personalizada actual se reemplazará al completar los 3 pasos."
+          : `${OPENCODE_FREE_PROVIDER_NAME} seguirá activo hasta completar los 3 pasos.`,
         "Este comando es opcional: Luna funciona con modelos gratuitos sin configurarlo.",
         "Puedes cancelar en cualquier momento con /cancelar.",
         "",
-        providerSetupPrompt("chatCompletionsUrl"),
+        providerSetupPrompt("baseUrl"),
       ].join("\n"),
     };
   },
@@ -1656,16 +1690,55 @@ async function handlePendingProviderSetup(
 
   try {
     const result = providerSetupManager.submit(jid, text);
-    if (!result.completed) {
+
+    if (result.kind === "next") {
       await sendWithTyping(sock, jid, providerSetupPrompt(result.nextStep));
       return;
     }
 
-    if (result.secretInput) {
-      await deleteSensitiveIncomingMessage(sock, message);
+    if (result.kind === "discover-models") {
+      if (result.secretInput) {
+        await deleteSensitiveIncomingMessage(sock, message);
+      }
+
+      const draft = providerSetupManager.getDiscoveryDraft(jid);
+      try {
+        const discovered = await discoverProviderModels(
+          draft.baseUrlCandidates,
+          draft.apiKey,
+          draft.requestTimeoutMs,
+        );
+        providerSetupManager.setDiscoveredModels(
+          jid,
+          discovered.baseUrl,
+          discovered.models,
+        );
+        await sendWithTyping(
+          sock,
+          jid,
+          providerSetupPrompt("defaultModel", discovered.models),
+        );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        providerSetupManager.resetToBaseUrl(jid);
+        console.warn(`[provider-setup] No se pudo descubrir el catálogo: ${reason}`);
+        await sendWithTyping(
+          sock,
+          jid,
+          [
+            `❌ ${reason}`,
+            "",
+            "La configuración no se guardó. Vuelve a indicar la URL base para reintentar.",
+            "",
+            providerSetupPrompt("baseUrl"),
+          ].join("\n"),
+        );
+      }
+      return;
     }
 
     const savedConfig = saveLlmConfig(result.config, llmConfigPath);
+    saveGlobalLlmModel(savedConfig, llmConfigPath);
     initLlm(savedConfig, llmConfigPath);
     providerSetupManager.cancel(jid);
 
@@ -1675,18 +1748,21 @@ async function handlePendingProviderSetup(
       [
         "✅ PROVEEDOR CONFIGURADO",
         "",
-        `Modelo predeterminado: ${savedConfig.defaultModel}`,
-        "El catálogo se actualizará sin bloquear el bot.",
-        "Si el endpoint falla, Luna mantendrá el modelo predeterminado como fallback.",
+        `URL base: ${inferLlmBaseUrl(savedConfig)}`,
+        `Modelo global: ${savedConfig.defaultModel}`,
+        "El catálogo se detectó y validó antes de guardar la configuración.",
         "La configuración personalizada tiene prioridad sobre OpenCode Free.",
         "",
-        "Los chats nuevos usarán este modelo. Los chats existentes conservan su selección.",
-        "Puedes cambiar de modelo con !modelos.",
+        "Este modelo queda activo globalmente para todos los chats existentes y nuevos.",
+        "Cualquier cambio posterior con !modelos también se aplicará globalmente.",
       ].join("\n"),
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const step = providerSetupManager.getStep(jid) ?? currentStep;
+    const models = step === "defaultModel"
+      ? providerSetupManager.getAvailableModels(jid)
+      : [];
     console.warn(`[provider-setup] Entrada inválida en ${step}: ${reason}`);
     await sendWithTyping(
       sock,
@@ -1694,7 +1770,7 @@ async function handlePendingProviderSetup(
       [
         `❌ ${reason}`,
         "",
-        providerSetupPrompt(step),
+        providerSetupPrompt(step, models),
       ].join("\n"),
     );
   }
@@ -2361,9 +2437,13 @@ export async function handleMessage(
       }
       const model = availableModels[index];
       if (model) {
-        contextManager.setModel(remoteJid, model);
+        const selected = applyGlobalModelSelection(model);
         contextManager.clearAwaitingModelSelection(remoteJid);
-        await sendWithTyping(sock, remoteJid, `✅ Modelo seleccionado: ${model}`);
+        await sendWithTyping(
+          sock,
+          remoteJid,
+          `✅ Modelo global seleccionado: ${selected}. Se aplicará a todos los chats.`,
+        );
       } else {
         await sendWithTyping(
           sock,

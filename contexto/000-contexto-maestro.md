@@ -2,7 +2,7 @@
 
 # Fecha
 
-2026-07-19
+2026-07-20
 
 # Objetivo
 
@@ -23,6 +23,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 - Runtime principal en TypeScript/Bun con WhatsApp mediante Baileys.
 - OpenCode Free es el proveedor LLM integrado predeterminado; se admite proveedor OpenAI-compatible personalizado.
+- La configuración de proveedores LLM personalizados solicita una sola URL base OpenAI-compatible y la API key; Luna deriva automáticamente `/models` y `/chat/completions`, consulta el catálogo y obliga a elegir por número el modelo global antes de guardar.
 - El agente principal es el orquestador y delega investigación a `researcher-web` y navegación interactiva a `browser-web`.
 - `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales.
 - Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
@@ -44,6 +45,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - `credential-profiles.json` se persiste mediante reemplazo atómico.
 - Los mensajes de grupos de WhatsApp se descartan antes del procesamiento y `AuthManager` rechaza/purga JIDs `@g.us`, evitando que un login grupal reemplace la sesión privada.
 - Las notas OGG/Opus se decodifican con un runtime FFmpeg estático preparado por plataforma/arquitectura; se verifica su SHA-256, se empaqueta junto al binario y se compara la duración estimada del OGG con el PCM para detectar truncamientos. Whisper ya no usa `--no-timestamps` en audios largos.
+- El modelo LLM es global: los campos `model` heredados de contextos por JID se ignoran y eliminan al cargarse. Cambiar de proveedor o seleccionar un modelo con `!modelos` actualiza inmediatamente todos los chats, tareas y subagentes; la selección global se persiste en `persistent/llm.model.json` ligada al catálogo del provider para impedir cruces entre proveedores.
 
 # Archivos y módulos clave
 
@@ -71,4 +73,4 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Último registro
 
-- `contexto/70-ffmpeg-para-audio-largo-y-runtime-portable.md`
+- `contexto/72-modelo-llm-global.md`

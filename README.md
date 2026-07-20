@@ -154,7 +154,7 @@ Modelos:          https://opencode.ai/zen/v1/models
 
 Solo se aceptan IDs terminados en `-free`. Si el catálogo remoto falla, Luna usa una lista local de emergencia.
 
-El modelo inicial para chats nuevos es `deepseek-v4-flash-free`. Los modelos desconocidos usan límites conservadores para reducir el riesgo de desbordar el contexto.
+El modelo global inicial es `deepseek-v4-flash-free`. Luna usa una única selección de modelo para todos los chats, tareas programadas y subagentes. Los modelos desconocidos usan límites conservadores para reducir el riesgo de desbordar el contexto.
 
 ### Proveedor personalizado opcional
 
@@ -164,18 +164,22 @@ El administrador puede ejecutar:
 /setup-provider
 ```
 
-El flujo solicita:
+El flujo solicita únicamente:
 
-1. Endpoint completo de chat completions.
-2. Endpoint completo del catálogo de modelos.
-3. Modelo predeterminado.
-4. API key, o `sin-clave`.
+1. URL base compatible con OpenAI, por ejemplo `https://api.example.com/v1`.
+2. API key, o `sin-clave`.
+3. Elegir por número el modelo global del catálogo detectado automáticamente.
 
-Al terminar se genera automáticamente:
+Luna deriva por sí sola `.../chat/completions` y `.../models`. Si se pega accidentalmente una URL terminada en `/models` o `/chat/completions`, recupera la URL base automáticamente. Si solo se indica el dominio, prueba primero `/v1/models` y después `/models`. Tras recibir la API key consulta el catálogo, muestra los modelos disponibles numerados y no guarda la configuración hasta seleccionar uno válido. Ese modelo sustituye inmediatamente cualquier selección antigua guardada por conversaciones previas y pasa a ser el único modelo global activo.
+
+Al terminar se generan automáticamente:
 
 ```text
 persistent/llm.config.json
+persistent/llm.model.json
 ```
+
+`llm.model.json` conserva la selección global y la vincula al endpoint `/models` del proveedor activo para evitar reutilizar accidentalmente un modelo de otro provider.
 
 La configuración se aplica en caliente y tiene prioridad en reinicios posteriores. Si falta o es inválida, Luna vuelve automáticamente a OpenCode Free.
 
@@ -556,7 +560,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
 | `!clear-workdir confirmar` | Limpia todo el workdir privado del usuario sin borrar conversación, memoria ni configuración. |
 | `!limpiar-workdir confirmar` | Alias en español de `!clear-workdir`. |
-| `!modelos` | Actualiza el catálogo y permite seleccionar un modelo. |
+| `!modelos` | Actualiza el catálogo y cambia el modelo global para todos los chats. |
 | `!setup` | Crea la primera cuenta administradora. |
 | `!login` | Inicia sesión. |
 | `/setup-provider` | Configura un proveedor LLM personalizado; solo administrador. |

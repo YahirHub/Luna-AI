@@ -1,10 +1,17 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonFileAtomically } from "./storage.ts";
 import { extractSecretTokenFromMessage, getAppDir } from "./utils.ts";
 
 export const DEFAULT_LLM_CONFIG_FILE = join("persistent", "llm.config.json");
 export const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 60_000;
+
+export const DEFAULT_LLM_MODEL_SELECTION_FILE = "llm.model.json";
+
+interface PersistedGlobalModelSelection {
+  modelsUrl: string;
+  model: string;
+}
 
 /** Configuración explícita del proveedor LLM. */
 export interface LlmConfig {
@@ -12,7 +19,7 @@ export interface LlmConfig {
   chatCompletionsUrl: string;
   /** Endpoint completo que lista modelos disponibles. */
   modelsUrl: string;
-  /** Modelo usado por chats nuevos y como fallback. */
+  /** Único modelo global activo para chats, tareas y subagentes. */
   defaultModel: string;
   /** API key del proveedor. Puede estar vacía si no se requiere. */
   apiKey: string;
@@ -28,21 +35,32 @@ interface RawLlmConfig {
   requestTimeoutMs?: unknown;
 }
 
-export type ProviderSetupStep =
-  | "chatCompletionsUrl"
-  | "modelsUrl"
-  | "defaultModel"
-  | "apiKey";
+export interface LlmEndpointUrls {
+  baseUrl: string;
+  chatCompletionsUrl: string;
+  modelsUrl: string;
+}
+
+export type ProviderSetupStep = "baseUrl" | "apiKey" | "defaultModel";
 
 interface ProviderSetupSession {
   step: ProviderSetupStep;
   draft: Partial<LlmConfig>;
   requestTimeoutMs: number;
+  baseUrlCandidates: string[];
+  availableModels: string[];
+}
+
+export interface ProviderDiscoveryDraft {
+  baseUrlCandidates: string[];
+  apiKey: string;
+  requestTimeoutMs: number;
 }
 
 export type ProviderSetupSubmission =
-  | { completed: false; nextStep: ProviderSetupStep }
-  | { completed: true; config: LlmConfig; secretInput: boolean };
+  | { kind: "next"; nextStep: ProviderSetupStep }
+  | { kind: "discover-models"; secretInput: boolean }
+  | { kind: "completed"; config: LlmConfig };
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim() === "") {
@@ -65,12 +83,8 @@ export function normalizeLlmHttpUrl(value: unknown, field: string): string {
     throw new Error(`El campo "${field}" solo admite URLs http o https.`);
   }
 
-  return raw.replace(/\/+$/, "");
-}
-
-/** Valida el identificador del modelo predeterminado. */
-export function normalizeDefaultModel(value: unknown): string {
-  return requireString(value, "defaultModel");
+  parsed.hash = "";
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 function extractHttpUrlInput(value: string): string {
@@ -79,18 +93,108 @@ function extractHttpUrlInput(value: string): string {
   return (match?.[0] ?? trimmed).replace(/[.,;]+$/g, "");
 }
 
-function extractModelIdInput(value: string): string {
-  const trimmed = value.trim();
-  const quoted = /[`"']([^`"']+)[`"']\s*$/u.exec(trimmed);
-  if (quoted?.[1]) return quoted[1].trim();
+function stripKnownLlmEndpoint(pathname: string): string {
+  const clean = pathname.replace(/\/+$/, "");
+  const suffixes = [
+    "/chat/completions",
+    "/completions",
+    "/responses",
+    "/models",
+  ];
 
-  const natural = /(?:modelo|model)\s+(?:es|is|:)?\s*([a-z0-9._:/-]+)\s*$/iu.exec(trimmed);
-  if (natural?.[1]) return natural[1];
+  for (const suffix of suffixes) {
+    if (clean.toLowerCase().endsWith(suffix)) {
+      return clean.slice(0, -suffix.length).replace(/\/+$/, "");
+    }
+  }
 
-  const delimited = /[:=]\s*([a-z0-9._:/-]+)\s*$/iu.exec(trimmed);
-  if (delimited?.[1]) return delimited[1];
+  return clean;
+}
 
-  return trimmed;
+/**
+ * Normaliza una URL base OpenAI-compatible. Acepta también que el usuario
+ * pegue por error /models o /chat/completions y recupera la base automáticamente.
+ * Si solo se proporciona el origen, asume el estándar /v1.
+ */
+export function normalizeLlmBaseUrl(value: unknown): string {
+  const raw = extractHttpUrlInput(requireString(value, "baseUrl"));
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('El campo "baseUrl" debe contener una URL válida.');
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error('El campo "baseUrl" solo admite URLs http o https.');
+  }
+
+  parsed.search = "";
+  parsed.hash = "";
+  const pathname = stripKnownLlmEndpoint(parsed.pathname);
+  parsed.pathname = (!pathname || pathname === "/")
+    ? "/"
+    : pathname.replace(/\/+$/, "");
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+/** Deriva los endpoints estándar de chat y catálogo desde una única URL base. */
+export function deriveLlmEndpointUrls(baseUrl: unknown): LlmEndpointUrls {
+  const normalizedBaseUrl = normalizeLlmBaseUrl(baseUrl);
+  return {
+    baseUrl: normalizedBaseUrl,
+    chatCompletionsUrl: `${normalizedBaseUrl}/chat/completions`,
+    modelsUrl: `${normalizedBaseUrl}/models`,
+  };
+}
+
+/**
+ * Genera alternativas conservadoras para detectar proveedores que exponen sus
+ * endpoints en la raíz en lugar de /v1, sin pedir URLs adicionales al usuario.
+ */
+export function buildLlmBaseUrlCandidates(value: unknown): string[] {
+  const extracted = extractHttpUrlInput(requireString(value, "baseUrl"));
+  const normalized = normalizeLlmBaseUrl(extracted);
+  const candidates: string[] = [];
+
+  let parsed: URL;
+  try {
+    parsed = new URL(extracted);
+  } catch {
+    return candidates;
+  }
+
+  parsed.search = "";
+  parsed.hash = "";
+  const stripped = stripKnownLlmEndpoint(parsed.pathname);
+  const explicitPath = stripped.replace(/\/+$/, "");
+
+  if (!explicitPath || explicitPath === "/") {
+    const root = `${parsed.origin}`;
+    candidates.push(`${root}/v1`, root);
+  } else {
+    if (!candidates.includes(normalized)) candidates.push(normalized);
+    if (!explicitPath.toLowerCase().endsWith("/v1")) {
+      const withV1 = `${normalized}/v1`;
+      if (!candidates.includes(withV1)) candidates.push(withV1);
+    }
+  }
+
+  return candidates;
+}
+
+/** Intenta recuperar la URL base desde una configuración ya persistida. */
+export function inferLlmBaseUrl(config: Pick<LlmConfig, "chatCompletionsUrl" | "modelsUrl">): string {
+  try {
+    return normalizeLlmBaseUrl(config.chatCompletionsUrl);
+  } catch {
+    return normalizeLlmBaseUrl(config.modelsUrl);
+  }
+}
+
+/** Valida el identificador del modelo predeterminado. */
+export function normalizeDefaultModel(value: unknown): string {
+  return requireString(value, "defaultModel");
 }
 
 function parseApiKey(value: unknown): string {
@@ -134,6 +238,54 @@ function resolveConfigPath(configPath: string): string {
   return isAbsolute(configPath)
     ? configPath
     : resolve(getAppDir(), configPath);
+}
+
+/** Ruta del modelo global, vecina al archivo de configuración LLM. */
+export function getLlmModelSelectionPath(
+  configPath = DEFAULT_LLM_CONFIG_FILE,
+): string {
+  return join(dirname(resolveConfigPath(configPath)), DEFAULT_LLM_MODEL_SELECTION_FILE);
+}
+
+/**
+ * Carga el modelo global solo cuando pertenece al mismo catálogo/proveedor.
+ * Una selección antigua de otro provider nunca se reutiliza accidentalmente.
+ */
+export function loadGlobalLlmModel(
+  modelsUrl: string,
+  configPath = DEFAULT_LLM_CONFIG_FILE,
+): string | null {
+  const path = getLlmModelSelectionPath(configPath);
+  if (!existsSync(path)) return null;
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<PersistedGlobalModelSelection>;
+    if (
+      typeof parsed.modelsUrl !== "string" ||
+      typeof parsed.model !== "string" ||
+      parsed.model.trim() === ""
+    ) {
+      return null;
+    }
+
+    const expectedModelsUrl = normalizeLlmHttpUrl(modelsUrl, "modelsUrl");
+    const persistedModelsUrl = normalizeLlmHttpUrl(parsed.modelsUrl, "modelsUrl");
+    if (persistedModelsUrl !== expectedModelsUrl) return null;
+    return normalizeDefaultModel(parsed.model);
+  } catch {
+    return null;
+  }
+}
+
+/** Persiste la única selección de modelo activa de Luna para el provider actual. */
+export function saveGlobalLlmModel(
+  config: Pick<LlmConfig, "modelsUrl" | "defaultModel">,
+  configPath = DEFAULT_LLM_CONFIG_FILE,
+): void {
+  writeJsonFileAtomically(getLlmModelSelectionPath(configPath), {
+    modelsUrl: normalizeLlmHttpUrl(config.modelsUrl, "modelsUrl"),
+    model: normalizeDefaultModel(config.defaultModel),
+  } satisfies PersistedGlobalModelSelection);
 }
 
 /**
@@ -190,7 +342,6 @@ export function saveLlmConfig(
   return normalized;
 }
 
-
 /** Elimina únicamente la configuración personalizada; OpenCode Free toma su lugar. */
 export function deleteLlmConfig(
   configPath = DEFAULT_LLM_CONFIG_FILE,
@@ -224,18 +375,20 @@ export function getLlmConfigPath(argv: string[] = process.argv): string {
 }
 
 /**
- * Estado temporal del asistente /setup-provider. No persiste secretos hasta que
- * todos los campos son válidos y la configuración completa puede guardarse.
+ * Estado temporal del asistente /setup-provider. La API key solo vive en
+ * memoria hasta que el catálogo se valida y el administrador elige un modelo.
  */
 export class ProviderSetupManager {
   private readonly sessions = new Map<string, ProviderSetupSession>();
 
   start(jid: string, currentConfig?: LlmConfig | null): void {
     this.sessions.set(jid, {
-      step: "chatCompletionsUrl",
+      step: "baseUrl",
       draft: {},
       requestTimeoutMs:
         currentConfig?.requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS,
+      baseUrlCandidates: [],
+      availableModels: [],
     });
   }
 
@@ -245,6 +398,55 @@ export class ProviderSetupManager {
 
   getStep(jid: string): ProviderSetupStep | undefined {
     return this.sessions.get(jid)?.step;
+  }
+
+  getAvailableModels(jid: string): string[] {
+    return [...(this.sessions.get(jid)?.availableModels ?? [])];
+  }
+
+  getDiscoveryDraft(jid: string): ProviderDiscoveryDraft {
+    const session = this.sessions.get(jid);
+    if (!session) {
+      throw new Error("No hay una configuración de proveedor en curso.");
+    }
+    if (session.step !== "apiKey" || session.baseUrlCandidates.length === 0) {
+      throw new Error("La URL base del proveedor aún no está lista para consultar modelos.");
+    }
+
+    return {
+      baseUrlCandidates: [...session.baseUrlCandidates],
+      apiKey: session.draft.apiKey ?? "",
+      requestTimeoutMs: session.requestTimeoutMs,
+    };
+  }
+
+  setDiscoveredModels(jid: string, baseUrl: string, models: readonly string[]): void {
+    const session = this.sessions.get(jid);
+    if (!session) {
+      throw new Error("No hay una configuración de proveedor en curso.");
+    }
+
+    const normalizedModels = [...new Set(
+      models.map((model) => model.trim()).filter(Boolean),
+    )];
+    if (normalizedModels.length === 0) {
+      throw new Error("El proveedor no devolvió ningún modelo utilizable.");
+    }
+
+    const endpoints = deriveLlmEndpointUrls(baseUrl);
+    session.draft.chatCompletionsUrl = endpoints.chatCompletionsUrl;
+    session.draft.modelsUrl = endpoints.modelsUrl;
+    session.availableModels = normalizedModels;
+    session.step = "defaultModel";
+  }
+
+  resetToBaseUrl(jid: string): void {
+    const session = this.sessions.get(jid);
+    if (!session) return;
+    session.step = "baseUrl";
+    session.draft = {};
+    session.baseUrlCandidates = [];
+    session.availableModels = [];
   }
 
   cancel(jid: string): void {
@@ -258,23 +460,11 @@ export class ProviderSetupManager {
     }
 
     switch (session.step) {
-      case "chatCompletionsUrl":
-        session.draft.chatCompletionsUrl = normalizeLlmHttpUrl(
-          extractHttpUrlInput(input),
-          "chatCompletionsUrl",
-        );
-        session.step = "modelsUrl";
-        return { completed: false, nextStep: session.step };
-
-      case "modelsUrl":
-        session.draft.modelsUrl = normalizeLlmHttpUrl(extractHttpUrlInput(input), "modelsUrl");
-        session.step = "defaultModel";
-        return { completed: false, nextStep: session.step };
-
-      case "defaultModel":
-        session.draft.defaultModel = normalizeDefaultModel(extractModelIdInput(input));
+      case "baseUrl": {
+        session.baseUrlCandidates = buildLlmBaseUrlCandidates(input);
         session.step = "apiKey";
-        return { completed: false, nextStep: session.step };
+        return { kind: "next", nextStep: session.step };
+      }
 
       case "apiKey": {
         const normalizedInput = input.trim();
@@ -282,16 +472,33 @@ export class ProviderSetupManager {
         session.draft.apiKey = withoutKey.has(normalizedInput.toLowerCase())
           ? ""
           : extractSecretTokenFromMessage(normalizedInput);
+        return {
+          kind: "discover-models",
+          secretInput: session.draft.apiKey !== "",
+        };
+      }
 
+      case "defaultModel": {
+        if (session.availableModels.length === 0) {
+          throw new Error("El catálogo de modelos todavía no está disponible.");
+        }
+
+        const match = /(?:modelo\s*)?(\d+)/iu.exec(input.trim());
+        if (!match) {
+          throw new Error("Selecciona el modelo escribiendo únicamente su número.");
+        }
+
+        const index = Number.parseInt(match[1], 10) - 1;
+        if (!Number.isInteger(index) || index < 0 || index >= session.availableModels.length) {
+          throw new Error(`Número inválido. Elige entre 1 y ${session.availableModels.length}.`);
+        }
+
+        session.draft.defaultModel = session.availableModels[index];
         const config = normalizeLlmConfig({
           ...session.draft,
           requestTimeoutMs: session.requestTimeoutMs,
         });
-        return {
-          completed: true,
-          config,
-          secretInput: config.apiKey !== "",
-        };
+        return { kind: "completed", config };
       }
     }
   }

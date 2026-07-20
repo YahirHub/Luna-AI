@@ -62,7 +62,7 @@ export const USER_CONTROL_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "model_status",
-      description: "Consulta el modelo LLM seleccionado actualmente para la conversación del usuario.",
+      description: "Consulta el modelo LLM global activo actualmente para todos los chats.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -71,7 +71,7 @@ export const USER_CONTROL_TOOLS: ToolDefinition[] = [
     function: {
       name: "model_list",
       description:
-        "Actualiza y lista los modelos disponibles del proveedor LLM activo, indicando el modelo actualmente seleccionado.",
+        "Actualiza y lista los modelos disponibles del proveedor LLM activo, indicando el modelo global actualmente seleccionado.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -80,7 +80,7 @@ export const USER_CONTROL_TOOLS: ToolDefinition[] = [
     function: {
       name: "model_set",
       description:
-        "Cambia el modelo LLM de la conversación actual. Usa model_list si no conoces el ID exacto o si el nombre solicitado es ambiguo.",
+        "Cambia el modelo LLM global para todos los chats, tareas y subagentes. Usa model_list si no conoces el ID exacto o si el nombre solicitado es ambiguo.",
       parameters: {
         type: "object",
         properties: {

@@ -25,7 +25,7 @@ function initLlmFromFile(): void {
     }
 
     console.log(`🧠 Proveedor personalizado cargado: ${configPath}`);
-    console.log(`   Modelo predeterminado: ${config.defaultModel}`);
+    console.log(`   Modelo global: ${config.defaultModel}`);
     console.log("   El catálogo se actualizará en segundo plano.\n");
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

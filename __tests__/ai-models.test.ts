@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { discoverModels, fetchModels } from "../src/ai.ts";
+import { discoverModels, discoverProviderModels, fetchModels } from "../src/ai.ts";
 import type { LlmConfig } from "../src/llm-config.ts";
 
 const originalFetch = globalThis.fetch;
@@ -41,6 +41,20 @@ describe("fetchModels", () => {
     ]);
     expect(requestedUrl).toBe(config.modelsUrl);
   });
+
+  it("acepta catálogos con models[] y nombres alternativos", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ models: [{ name: "model-z" }, { model: "model-y" }, "model-x"] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    await expect(fetchModels(config)).resolves.toEqual([
+      "model-x",
+      "model-y",
+      "model-z",
+    ]);
+  });
 });
 
 describe("discoverModels", () => {
@@ -79,5 +93,56 @@ describe("discoverModels", () => {
       models: ["default-model"],
       usedFallback: true,
     });
+  });
+});
+
+
+describe("discoverProviderModels", () => {
+  it("prueba automáticamente /v1/models y devuelve los endpoints derivados", async () => {
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requested.push(String(input));
+      if (String(input) === "https://provider.example/v1/models") {
+        return new Response(JSON.stringify({ data: [{ id: "model-main" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      discoverProviderModels(
+        ["https://provider.example/v1", "https://provider.example"],
+        "key",
+        5_000,
+      ),
+    ).resolves.toEqual({
+      baseUrl: "https://provider.example/v1",
+      chatCompletionsUrl: "https://provider.example/v1/chat/completions",
+      modelsUrl: "https://provider.example/v1/models",
+      models: ["model-main"],
+    });
+    expect(requested).toEqual(["https://provider.example/v1/models"]);
+  });
+
+  it("usa la siguiente base candidata cuando el primer catálogo falla", async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === "https://provider.example/v1/models") {
+        return new Response("not found", { status: 404 });
+      }
+      return new Response(JSON.stringify({ data: [{ id: "root-model" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await discoverProviderModels(
+      ["https://provider.example/v1", "https://provider.example"],
+      "",
+      5_000,
+    );
+    expect(result.baseUrl).toBe("https://provider.example");
+    expect(result.models).toEqual(["root-model"]);
   });
 });
