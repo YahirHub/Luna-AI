@@ -83,6 +83,7 @@ describe("Agent supervisor", () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         await options.onEvent?.({
           type: "agent_started",
+          backend: options.definition.backend,
           runId: options.runId,
           agentId: options.definition.id,
           displayName: options.definition.displayName,

@@ -633,7 +633,7 @@ function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
     case "task_registered":
       return [`📌 Tarea registrada: ${event.title}\nID: ${event.taskId}\nEstado: en cola; te confirmaré cuando el agente empiece realmente.`];
     case "agent_started": {
-      const prefix = `🚀 Agente ${event.agentId} activo — ${event.agentName}`;
+      const prefix = `🚀 ${event.backend} ${event.agentId} activo — ${event.agentName}`;
       const prompt = event.prompt.replace(/\s+/g, " ").trim();
       return [prompt ? `${prefix}\nMisión: ${prompt.slice(0, 700)}` : prefix];
     }
@@ -643,7 +643,7 @@ function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
       if (event.status === "cancelled") return [];
       const icon = event.status === "completed" ? "✅" : "❌";
       const label = event.status === "completed" ? "terminó" : "falló";
-      return [`${icon} Agente ${event.agentId} — ${event.agentName}: ${label}.`];
+      return [`${icon} ${event.backend} ${event.agentId} — ${event.agentName}: ${label}.`];
     }
     case "task_completed": {
       if (event.status === "cancelled") return [];
@@ -703,6 +703,7 @@ async function reviewBackgroundTask(
           id: agent.id,
           name: agent.name,
           type: agent.agentType,
+          backend: agent.backend,
           status: agent.status,
           activity: agent.activity,
           error: agent.error,
@@ -826,7 +827,7 @@ function formatTaskProgressForUser(jid: string): string {
             ? "en cola"
             : "en ejecución";
         lines.push(
-          `• ${agent.id} — ${agent.name}`,
+          `• ${agent.id} — ${agent.backend} — ${agent.name}`,
           `  Estado: ${state}`,
           `  Ahora: ${agent.activity ?? "Preparando el siguiente paso"}`,
           `  Último evento: ${formatAgentEventAge(agent.lastEventAt)}`,

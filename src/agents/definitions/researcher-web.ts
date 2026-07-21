@@ -2,6 +2,7 @@ import type { AgentDefinition } from "../agent-types.ts";
 
 export const RESEARCHER_WEB_AGENT: AgentDefinition = {
   id: "researcher-web",
+  backend: "api-search",
   displayName: "Investigador web",
   spawnerPrompt: "Investiga una pregunta actual usando búsquedas web y lectura directa de fuentes.",
   toolNames: ["web_search", "read_url"],

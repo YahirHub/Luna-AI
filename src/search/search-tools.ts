@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../ai.ts";
+import type { AgentExecutionLogContext } from "../agents/agent-types.ts";
 import type { SearchDepth } from "../agent-config.ts";
 import { SEARCH_PROVIDER_LABELS } from "./search-config.ts";
 import { loadWebSearchAuth, loadWebSearchSettings } from "./search-storage.ts";
@@ -47,6 +48,7 @@ export async function executeWebSearchToolDetailed(
   args: Record<string, unknown>,
   defaultDepth: SearchDepth,
   signal?: AbortSignal,
+  executionContext?: AgentExecutionLogContext,
 ): Promise<WebSearchToolResult> {
   const query = typeof args.query === "string" ? args.query.trim() : "";
   if (!query) throw new Error("La consulta de búsqueda es obligatoria.");
@@ -66,6 +68,8 @@ export async function executeWebSearchToolDetailed(
       auth: loadWebSearchAuth(),
     },
     signal,
+    fetch,
+    executionContext,
   );
 
   return {

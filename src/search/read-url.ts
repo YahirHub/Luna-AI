@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ToolDefinition } from "../ai.ts";
 import { debugError, debugInfo, debugLog } from "../debug.ts";
+import type { AgentExecutionLogContext } from "../agents/agent-types.ts";
 
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 2_000_000;
@@ -461,15 +462,19 @@ export async function readUrl(
 export async function executeReadUrlTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  executionContext?: AgentExecutionLogContext,
 ): Promise<string> {
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!url) return "Error: la URL es obligatoria.";
   const maxChars = typeof args.max_chars === "number" ? args.max_chars : DEFAULT_MAX_CHARS;
   const startedAt = Date.now();
-  debugLog("read_url", "started", { url, maxChars });
+  const logContext = { backend: "api-search" as const, ...executionContext };
+  debugLog("api-search.read-url", "started", { ...logContext, action: "Abriendo fuente para verificar resultados", url, maxChars });
   try {
     const content = await readUrl(url, maxChars, { signal });
-    debugInfo("read_url", "completed", {
+    debugInfo("api-search.read-url", "completed", {
+      ...logContext,
+      action: "Fuente leída correctamente",
       url,
       maxChars,
       contentChars: content.length,
@@ -477,7 +482,9 @@ export async function executeReadUrlTool(
     });
     return content;
   } catch (error) {
-    debugError("read_url", "failed", error, {
+    debugError("api-search.read-url", "failed", error, {
+      ...logContext,
+      action: "No fue posible leer la fuente",
       url,
       maxChars,
       durationMs: Date.now() - startedAt,

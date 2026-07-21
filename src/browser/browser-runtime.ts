@@ -298,6 +298,19 @@ export class BrowserAgentExecution {
     mkdirSync(dirname(this.stateFile), { recursive: true });
   }
 
+  private logContext(action: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      backend: "browser-agent",
+      taskId: this.options.taskId,
+      agentId: this.options.agentId,
+      agentName: this.options.agentName,
+      agentType: "browser-web",
+      runId: this.options.runId,
+      action,
+      ...extra,
+    };
+  }
+
   private env(): Record<string, string> {
     // Prioridad: ruta explícita del operador > Chrome for Testing administrado
     // por agent-browser > navegador del sistema. Esto evita forzar Chrome/Edge
@@ -368,13 +381,9 @@ export class BrowserAgentExecution {
       const command = args.slice(0, 2).join(" ") || "unknown";
     const startedAt = Date.now();
     const env = this.env();
-    debugLog("browser.runtime", "command_started", {
-      runId: this.options.runId,
-      session: this.session,
-      command,
-      timeoutMs,
-      executablePath: env.AGENT_BROWSER_EXECUTABLE_PATH ?? "managed-default",
-    });
+    debugLog("browser-agent.runtime", "command_started", this.logContext(`Ejecutando agent-browser: ${command}`, {
+      session: this.session, command, timeoutMs, executablePath: env.AGENT_BROWSER_EXECUTABLE_PATH ?? "managed-default",
+    }));
 
     const child = Bun.spawn([
       this.binary,
@@ -423,13 +432,9 @@ export class BrowserAgentExecution {
 
       if (outcome.kind === "timeout") {
         timedOut = true;
-        debugWarn("browser.runtime", "command_timeout", {
-          runId: this.options.runId,
-          session: this.session,
-          command,
-          timeoutMs,
-          durationMs: Date.now() - startedAt,
-        });
+        debugWarn("browser-agent.runtime", "command_timeout", this.logContext(`Tiempo agotado en agent-browser: ${command}`, {
+          session: this.session, command, timeoutMs, durationMs: Date.now() - startedAt,
+        }));
         try { child.kill(); } catch { /* best effort */ }
         // No dejamos que un proceso CLI bloqueado congele el subagente completo.
         await Promise.race([
@@ -458,26 +463,18 @@ export class BrowserAgentExecution {
       const stdout = stdoutCollector.text();
       const stderr = stderrCollector.text();
       if (stdoutWasOpen || stderrWasOpen) {
-        debugLog("browser.runtime", "pipe_detached_after_cli_exit", {
-          runId: this.options.runId,
-          session: this.session,
-          command,
-          stdoutWasOpen,
-          stderrWasOpen,
-        });
+        debugLog("browser-agent.runtime", "pipe_detached_after_cli_exit", this.logContext(`Liberando streams de agent-browser: ${command}`, {
+          session: this.session, command, stdoutWasOpen, stderrWasOpen,
+        }));
       }
 
       if (outcome.exitCode !== 0) {
         throw new Error((stderr || stdout || `agent-browser terminó con código ${outcome.exitCode}`).trim());
       }
 
-      debugInfo("browser.runtime", "command_completed", {
-        runId: this.options.runId,
-        session: this.session,
-        command,
-        durationMs: Date.now() - startedAt,
-        outputChars: (stdout || stderr).length,
-      });
+      debugInfo("browser-agent.runtime", "command_completed", this.logContext(`Comando agent-browser completado: ${command}`, {
+        session: this.session, command, durationMs: Date.now() - startedAt, outputChars: (stdout || stderr).length,
+      }));
       return stdout.trim() || stderr.trim() || "OK";
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -515,11 +512,9 @@ export class BrowserAgentExecution {
   private rotateSessionAfterHang(): void {
     this.recoveryCounter += 1;
     this.session = `${this.sessionBase}-recovery-${this.recoveryCounter}`;
-    debugWarn("browser.runtime", "session_rotated", {
-      runId: this.options.runId,
-      session: this.session,
-      recoveryCounter: this.recoveryCounter,
-    });
+    debugWarn("browser-agent.runtime", "session_rotated", this.logContext("Rotando sesión bloqueada de agent-browser", {
+      session: this.session, recoveryCounter: this.recoveryCounter,
+    }));
   }
 
 
@@ -537,11 +532,9 @@ ${snapshot}
 
 [SISTEMA: snapshot físico guardado en ${path}]`;
     } catch (error) {
-      debugWarn("browser.runtime", "initial_snapshot_failed", {
-        runId: this.options.runId,
-        agentId: this.options.agentId,
+      debugWarn("browser-agent.runtime", "initial_snapshot_failed", this.logContext("No se pudo obtener el snapshot inicial", {
         error: error instanceof Error ? error.message : String(error),
-      });
+      }));
       return opened;
     }
   }
@@ -560,11 +553,9 @@ ${snapshot}
         const currentOutput = await this.run(["get", "url", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
         const currentUrl = extractCurrentUrl(currentOutput);
         if (currentUrl) {
-          debugWarn("browser.runtime", "open_recovered_from_current_url", {
-            runId: this.options.runId,
-            requestedUrl: url,
-            currentUrl,
-          });
+          debugWarn("browser-agent.runtime", "open_recovered_from_current_url", this.logContext("La página abrió aunque el CLI agotó el tiempo", {
+            requestedUrl: url, currentUrl,
+          }));
           this.startKeepAlive();
           return await this.appendInitialSnapshot(JSON.stringify({
             success: true,
@@ -578,11 +569,9 @@ ${snapshot}
       // Si la sesión quedó trabada en el daemon, una sesión nueva evita esperar
       // hasta el timeout global de 20 minutos del subagente.
       this.rotateSessionAfterHang();
-      debugWarn("browser.runtime", "open_retry", {
-        runId: this.options.runId,
-        url,
-        session: this.session,
-      });
+      debugWarn("browser-agent.runtime", "open_retry", this.logContext("Reintentando apertura con una sesión nueva", {
+        url, session: this.session,
+      }));
       const reopened = await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
       this.startKeepAlive();
       return await this.appendInitialSnapshot(reopened, signal);
@@ -613,11 +602,9 @@ ${snapshot}
       });
       return file.relative;
     } catch (error) {
-      debugWarn("browser.runtime", "input_request_screenshot_failed", {
-        runId: this.options.runId,
-        agentId: this.options.agentId,
+      debugWarn("browser-agent.runtime", "input_request_screenshot_failed", this.logContext("No se pudo capturar el formulario antes de pedir datos", {
         error: error instanceof Error ? error.message : String(error),
-      });
+      }));
       return undefined;
     }
   }
@@ -640,11 +627,9 @@ ${snapshot}
     this.cancelled = true;
     this.stopKeepAlive();
     await this.terminateActiveProcesses();
-    debugWarn("browser.runtime", "execution_cancelled", {
-      runId: this.options.runId,
-      session: this.session,
-      reason: reason.message,
-    });
+    debugWarn("browser-agent.runtime", "execution_cancelled", this.logContext("Cancelando navegador y procesos asociados", {
+      session: this.session, reason: reason.message,
+    }));
     // No esperamos a que el runner/LLM reaccione al AbortSignal para liberar el
     // navegador: la cancelación del supervisor debe cerrar recursos de inmediato.
     await this.finalize();
@@ -686,18 +671,13 @@ ${snapshot}
             await this.run(["state", "save", this.runStateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
             this.releaseProfileLease = await acquireBrowserProfileLease(this.profileLeaseKey, controller.signal);
             this.mergePersistentState();
-            debugInfo("browser.runtime", "persistent_state_saved", {
-              runId: this.options.runId,
-              session: this.session,
-              stateFile: this.stateFile,
-              strategy: "merge",
-            });
+            debugInfo("browser-agent.runtime", "persistent_state_saved", this.logContext("Estado autenticado del navegador guardado", {
+              session: this.session, stateFile: this.stateFile, strategy: "merge",
+            }));
           } catch (error) {
-            debugWarn("browser.runtime", "persistent_state_save_failed", {
-              runId: this.options.runId,
-              session: this.session,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            debugWarn("browser-agent.runtime", "persistent_state_save_failed", this.logContext("No se pudo guardar el estado autenticado", {
+              session: this.session, error: error instanceof Error ? error.message : String(error),
+            }));
           } finally {
             this.releaseProfileLease?.();
             this.releaseProfileLease = undefined;
@@ -866,22 +846,15 @@ ${snapshot}
           throw error;
         }
 
-        debugInfo("browser.runtime", "waiting_for_user_input", {
-          runId: this.options.runId,
-          session: this.session,
-          kind,
-          fieldName,
-          url: url || undefined,
-          username: username || undefined,
-        });
+        debugInfo("browser-agent.runtime", "waiting_for_user_input", this.logContext(`Esperando dato del usuario: ${fieldName}`, {
+          session: this.session, kind, fieldName, url: url || undefined, username: username || undefined,
+        }));
 
         const resolution = await pending;
         await this.options.onStateChange?.("running");
-        debugInfo("browser.runtime", "user_input_resumed", {
-          runId: this.options.runId,
-          session: this.session,
-          kind: resolution.kind,
-        });
+        debugInfo("browser-agent.runtime", "user_input_resumed", this.logContext("Dato recibido; reanudando navegación", {
+          session: this.session, kind: resolution.kind,
+        }));
 
         if (resolution.kind === "correction") {
           return JSON.stringify({

@@ -2,7 +2,7 @@
 
 # Fecha
 
-2026-07-20
+2026-07-21
 
 # Objetivo
 
@@ -24,7 +24,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - Runtime principal en TypeScript/Bun con núcleo de mensajería independiente del cliente; actualmente se incluye el transporte WhatsApp mediante Baileys.
 - OpenCode Free es el proveedor LLM integrado predeterminado; se admite proveedor OpenAI-compatible personalizado.
 - La configuración de proveedores LLM personalizados solicita una sola URL base OpenAI-compatible y la API key; Luna deriva automáticamente `/models` y `/chat/completions`, consulta el catálogo y obliga a elegir por número el modelo global antes de guardar.
-- El agente principal es el orquestador y delega investigación a `researcher-web` y navegación interactiva a `browser-web`.
+- El agente principal es el orquestador. `researcher-web` se presenta como `api-search` y usa los proveedores configurados en `/setup-search`; `browser-web` se presenta como `browser-agent` y controla el ejecutable `agent-browser`.
 - `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales; puede ejecutarse en segundo plano cuando se solicita. `browser_agent` trabaja en segundo plano por defecto.
 - Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
 - Workdir privado por usuario con tareas, inbox, exports y registro de artefactos.
@@ -53,6 +53,7 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - Una tarea solo se anuncia como realmente iniciada después del evento `agent_started`; las consultas de progreso leen el registro autoritativo con actividad y último evento.
 - El orquestador revisa automáticamente las tareas de fondo terminadas, inspecciona sus carpetas y artefactos, envía los entregables y reintenta revisiones pendientes.
 - Las solicitudes humanas del navegador incluyen ID y captura anotada, admiten correcciones/reintentos y pueden coexistir entre varios agentes sin capturar mensajes ambiguos.
+- Chat, supervisor, registros persistentes y consola diferencian el backend real: `browser-agent` para navegación interactiva y `api-search` para proveedores de búsqueda. Los scopes incluyen identidad de tarea/agente y acción actual.
 
 # Archivos y módulos clave
 
@@ -83,4 +84,4 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Último registro
 
-- `contexto/76-autonomia-revision-y-concurrencia-de-agentes.md`
+- `contexto/77-diferenciar-browser-agent-y-api-search.md`

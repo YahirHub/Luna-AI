@@ -313,6 +313,10 @@ También existe `browser-web`, especializado en navegación interactiva mediante
 
 ### Supervisor de tareas y agentes
 
+Luna diferencia explícitamente el motor de cada agente. `browser-agent` significa navegación interactiva real mediante el ejecutable `agent-browser`: abre páginas, hace clic, rellena formularios, inicia sesión, toma capturas y descarga archivos. `api-search` significa investigación mediante los proveedores configurados en `/setup-search`: ejecuta `web_search` y `read_url`, pero no abre Chrome ni controla una página interactiva. Los identificadores internos `browser-web` y `researcher-web` se conservan por compatibilidad, mientras que los mensajes del chat, el supervisor, `task_status`, `agent_list`, `events.jsonl` y los logs muestran los nombres públicos `browser-agent` y `api-search`.
+
+Los logs también están separados por scope. La navegación usa `agent.browser-agent`, `browser-agent.runtime` y `supervisor.browser-agent`; la búsqueda usa `agent.api-search`, `api-search.runtime`, `api-search.queue`, `api-search.retry`, `api-search.read-url` y `supervisor.api-search`. Cada evento incluye `taskId`, ID corto del agente, nombre, tipo interno, `runId`, herramienta/proveedor y una descripción legible de la acción actual.
+
 Cada ejecución delegada queda registrada con una tarea (`task_id`) y uno o más agentes con ID corto (`A-XXXXXX`) y nombre legible. El estado de ejecución (`queued`, `running`, `waiting_user`, `completed`, `failed`, `cancelled` o `interrupted`) es independiente del estado de revisión (`pending` o `reviewed`). De este modo Luna distingue un trabajo que ya terminó de uno cuyo resultado ya fue inspeccionado por el orquestador.
 
 `browser_agent` se ejecuta en segundo plano por defecto. Registrar la tarea solo la deja en `queued`: Luna no anuncia que el agente está trabajando hasta recibir el evento autoritativo `agent_started` del runtime. Esto evita respuestas falsas cuando una ejecución quedó únicamente registrada, falló antes de arrancar o todavía esperaba recursos. El chat principal continúa disponible mientras los agentes navegan o esperan datos humanos.

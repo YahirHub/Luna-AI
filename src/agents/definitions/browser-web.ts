@@ -2,6 +2,7 @@ import type { AgentDefinition } from "../agent-types.ts";
 
 export const BROWSER_WEB_AGENT: AgentDefinition = {
   id: "browser-web",
+  backend: "browser-agent",
   displayName: "Agente de navegador",
   spawnerPrompt: "Navega de forma interactiva por un sitio web, puede iniciar sesión mediante una credencial segura, extraer datos y producir capturas o descargas físicas en el workdir.",
   toolNames: [

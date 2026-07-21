@@ -82,6 +82,8 @@ export interface RunAgentOptions {
   agentConfig: AgentConfig;
   runId: string;
   parentRunId?: string;
+  supervisorAgentId?: string;
+  supervisorAgentName?: string;
   parentSignal?: AbortSignal;
   timeoutMs?: number;
   onEvent?: AgentEventHandler;
@@ -97,9 +99,25 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
   const { controller, cleanup } = childAbortController(options.parentSignal, timeoutMs);
   const signal = controller.signal;
   const toolsCalled: string[] = [];
+  const backend = options.definition.backend;
+  const supervisorAgentId = options.supervisorAgentId ?? options.definition.id;
+  const supervisorAgentName = options.supervisorAgentName ?? options.definition.displayName;
+  const logScope = `agent.${backend}`;
+  const logContext = {
+    backend,
+    taskId: options.parentRunId,
+    agentId: supervisorAgentId,
+    agentName: supervisorAgentName,
+    agentType: options.definition.id,
+    runId: options.runId,
+  };
 
   await options.onEvent?.({
     type: "agent_started",
+    backend,
+    taskId: options.parentRunId,
+    supervisorAgentId,
+    supervisorAgentName,
     runId: options.runId,
     parentRunId: options.parentRunId,
     agentId: options.definition.id,
@@ -107,9 +125,9 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
     prompt: options.prompt,
     timeoutMs,
   });
-  debugInfo("agent.runtime", "started", {
-    agentId: options.definition.id,
-    runId: options.runId,
+  debugInfo(logScope, "started", {
+    ...logContext,
+    action: backend === "browser-agent" ? "Iniciando navegación interactiva" : "Iniciando investigación mediante APIs de búsqueda",
     parentRunId: options.parentRunId,
     timeoutMs,
     maxSteps: options.definition.maxSteps,
@@ -125,14 +143,18 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
       async (name, args) => {
         await options.onEvent?.({
           type: "tool_started",
+          backend,
+          taskId: options.parentRunId,
+          supervisorAgentId,
+          supervisorAgentName,
           runId: options.runId,
           agentId: options.definition.id,
           toolName: name,
           args,
         });
-        debugLog("agent.runtime", "tool_started", {
-          agentId: options.definition.id,
-          runId: options.runId,
+        debugLog(logScope, "tool_started", {
+          ...logContext,
+          action: `Ejecutando ${name}`,
           tool: name,
           args,
         });
@@ -143,11 +165,12 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
             const query = typeof args.query === "string" ? args.query.trim() : "";
             toolResult = (await runSearchWithRetry(
               `${options.runId}:${query || "web_search"}`,
-              () => (options.webSearchExecutor ?? executeWebSearchToolDetailed)(args, options.agentConfig.defaultSearchDepth, signal),
+              () => (options.webSearchExecutor ?? executeWebSearchToolDetailed)(args, options.agentConfig.defaultSearchDepth, signal, logContext),
               signal,
+              logContext,
             )).text;
           } else if (name === "read_url") {
-            toolResult = await (options.readUrlExecutor ?? executeReadUrlTool)(args, signal);
+            toolResult = await (options.readUrlExecutor ?? executeReadUrlTool)(args, signal, logContext);
           } else if (name.startsWith("browser_") && options.browserExecution) {
             toolResult = await options.browserExecution.executeTool(name, args, signal);
           } else {
@@ -162,15 +185,19 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
         toolsCalled.push(name);
         await options.onEvent?.({
           type: "tool_completed",
+          backend,
+          taskId: options.parentRunId,
+          supervisorAgentId,
+          supervisorAgentName,
           runId: options.runId,
           agentId: options.definition.id,
           toolName: name,
           ok,
           resultChars: toolResult.length,
         });
-        debugLog("agent.runtime", "tool_completed", {
-          agentId: options.definition.id,
-          runId: options.runId,
+        debugLog(logScope, "tool_completed", {
+          ...logContext,
+          action: ok ? `Finalizó ${name}` : `Falló ${name}`,
           tool: name,
           ok,
           resultChars: toolResult.length,
@@ -192,14 +219,18 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
 
     await options.onEvent?.({
       type: "agent_finished",
+      backend,
+      taskId: options.parentRunId,
+      supervisorAgentId,
+      supervisorAgentName,
       runId: options.runId,
       agentId: options.definition.id,
       outputChars: output.length,
       toolsCalled: [...toolsCalled],
     });
-    debugInfo("agent.runtime", "finished", {
-      agentId: options.definition.id,
-      runId: options.runId,
+    debugInfo(logScope, "finished", {
+      ...logContext,
+      action: "Agente terminado",
       outputChars: output.length,
       toolsCalled,
     });
@@ -222,14 +253,18 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
 
     await options.onEvent?.({
       type: "agent_failed",
+      backend,
+      taskId: options.parentRunId,
+      supervisorAgentId,
+      supervisorAgentName,
       runId: options.runId,
       agentId: options.definition.id,
       cancelled,
       error: message,
     });
-    debugError("agent.runtime", cancelled ? "cancelled" : timedOut ? "timeout" : "failed", error, {
-      agentId: options.definition.id,
-      runId: options.runId,
+    debugError(logScope, cancelled ? "cancelled" : timedOut ? "timeout" : "failed", error, {
+      ...logContext,
+      action: cancelled ? "Agente cancelado" : timedOut ? "Agente agotó su tiempo" : "Agente falló",
       timeoutMs,
       toolsCalled,
     });
