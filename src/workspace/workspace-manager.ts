@@ -187,6 +187,27 @@ export class WorkspaceManager {
       .map((entry) => `${entry.isDirectory() ? "📁" : "📄"} ${join(path, entry.name).replace(/\\/g, "/")}`);
   }
 
+  listRecursive(jid: string, path = ".", maxEntries = 300): string[] {
+    const root = this.resolvePath(jid, path, { mustExist: true, allowDirectory: true });
+    const entries: string[] = [];
+    const walk = (current: string): void => {
+      if (entries.length >= Math.max(1, maxEntries)) return;
+      const info = statSync(current);
+      const relativePath = this.relativePath(jid, current);
+      if (!info.isDirectory()) {
+        entries.push(`📄 ${relativePath} — ${info.size} bytes`);
+        return;
+      }
+      if (current !== root) entries.push(`📁 ${relativePath}`);
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entries.length >= Math.max(1, maxEntries)) break;
+        walk(join(current, entry.name));
+      }
+    };
+    walk(root);
+    return entries;
+  }
+
   remove(jid: string, path: string): void {
     const target = this.resolvePath(jid, path, { mustExist: true, allowDirectory: true });
     if (target === this.getWorkdir(jid)) throw new Error("No se puede eliminar el workdir completo.");

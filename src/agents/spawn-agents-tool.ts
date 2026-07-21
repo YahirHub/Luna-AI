@@ -20,7 +20,7 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
   function: {
     name: "spawn_agents",
     description: [
-      "Crea subagentes especializados con contexto aislado y espera sus resultados.",
+      "Crea subagentes especializados con contexto aislado. Puede ejecutarlos en primer plano o en segundo plano.",
       "Úsala para delegar dos o más investigaciones independientes en paralelo; por ejemplo un researcher-web por proveedor, producto o tema.",
       "Cada subagente puede usar sus propias herramientas y devuelve únicamente su respuesta final compacta.",
       "La herramienta NO crea PDFs ni entrega archivos: cuando termine, tú recuperas el control, revisas los resultados, puedes lanzar investigaciones adicionales si algo falta y después debes crear/sintetizar los archivos solicitados con las herramientas normales.",
@@ -45,6 +45,10 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
                 enum: ["researcher-web", "browser-web"],
                 description: "Tipo de subagente permitido.",
               },
+              name: {
+                type: "string",
+                description: "Nombre corto opcional para identificar al agente en el supervisor.",
+              },
               prompt: {
                 type: "string",
                 description: "Misión autocontenida y específica para este subagente.",
@@ -58,6 +62,10 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
             required: ["agent_type", "prompt"],
             additionalProperties: false,
           },
+        },
+        background: {
+          type: "boolean",
+          description: "Si es true, inicia la tarea y devuelve control inmediatamente para seguir conversando mientras los agentes trabajan.",
         },
       },
       required: ["agents"],
@@ -101,8 +109,10 @@ export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
     parameters: {
       type: "object",
       properties: {
+        name: { type: "string", description: "Nombre corto opcional para identificar esta tarea/agente de navegador." },
         prompt: { type: "string", description: "Misión exacta y autocontenida de navegación." },
         credential_ref: { type: "string", description: "Referencia segura opcional capturada fuera del LLM. Nunca contiene la contraseña." },
+        background: { type: "boolean", description: "Por defecto true. Permite seguir conversando mientras el navegador trabaja." },
       },
       required: ["prompt"],
       additionalProperties: false,
@@ -176,40 +186,16 @@ export const BROWSER_CREDENTIAL_CONTROL_TOOLS: ToolDefinition[] = [
 ];
 
 export const AGENT_TASK_TOOLS: ToolDefinition[] = [
-  {
-    type: "function",
-    function: {
-      name: "task_list",
-      description: "Lista las tareas recientes de subagentes del usuario.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "task_status",
-      description: "Consulta el estado y progreso persistido de una tarea de subagentes.",
-      parameters: {
-        type: "object",
-        properties: { task_id: { type: "string" } },
-        required: ["task_id"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "task_cancel",
-      description: "Cancela una tarea activa de subagentes y propaga la cancelación a sus herramientas.",
-      parameters: {
-        type: "object",
-        properties: { task_id: { type: "string" } },
-        required: ["task_id"],
-        additionalProperties: false,
-      },
-    },
-  },
+  { type: "function", function: { name: "task_list", description: "Lista tareas recientes y su estado de revisión.", parameters: { type: "object", properties: {}, additionalProperties: false } } },
+  { type: "function", function: { name: "task_status", description: "Consulta el estado persistido de una tarea y sus agentes, incluyendo qué hace cada uno ahora.", parameters: { type: "object", properties: { task_id: { type: "string" } }, required: ["task_id"], additionalProperties: false } } },
+  { type: "function", function: { name: "task_inspect", description: "Inspecciona la carpeta completa de una tarea: resultados, eventos, capturas, descargas y archivos creados. Úsala para revisar realmente una tarea antes de responder.", parameters: { type: "object", properties: { task_id: { type: "string" } }, required: ["task_id"], additionalProperties: false } } },
+  { type: "function", function: { name: "task_review", description: "Marca como revisado el resultado de una tarea terminada después de inspeccionarlo.", parameters: { type: "object", properties: { task_id: { type: "string" } }, required: ["task_id"], additionalProperties: false } } },
+  { type: "function", function: { name: "task_cancel", description: "Cancela una tarea activa y todos sus agentes sin cancelar la conversación principal.", parameters: { type: "object", properties: { task_id: { type: "string" } }, required: ["task_id"], additionalProperties: false } } },
+  { type: "function", function: { name: "task_cancel_all", description: "Cancela todas las tareas de fondo activas del usuario sin detener la conversación principal.", parameters: { type: "object", properties: {}, additionalProperties: false } } },
+  { type: "function", function: { name: "agent_list", description: "Lista agentes recientes, activos y terminados pendientes de revisión.", parameters: { type: "object", properties: { task_id: { type: "string" } }, additionalProperties: false } } },
+  { type: "function", function: { name: "agent_status", description: "Consulta el estado de un agente por ID o nombre.", parameters: { type: "object", properties: { agent: { type: "string" } }, required: ["agent"], additionalProperties: false } } },
+  { type: "function", function: { name: "agent_review", description: "Marca como revisado un agente terminado después de inspeccionar su resultado.", parameters: { type: "object", properties: { agent: { type: "string" } }, required: ["agent"], additionalProperties: false } } },
+  { type: "function", function: { name: "agent_cancel", description: "Cancela un agente activo concreto por ID o nombre sin afectar a los demás ni a la conversación.", parameters: { type: "object", properties: { agent: { type: "string" } }, required: ["agent"], additionalProperties: false } } },
 ];
 
 export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
@@ -219,10 +205,11 @@ export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
 }
 
 export type SpawnAgentsProgress =
-  | { type: "task_started"; taskId: string; total: number }
-  | { type: "agent_started"; taskId: string; index: number; total: number; agentType: string; prompt: string }
-  | { type: "agent_completed"; taskId: string; index: number; total: number; agentType: string; status: SpawnAgentReport["status"] }
-  | { type: "task_completed"; taskId: string; status: "completed" | "partial" | "failed" | "cancelled" };
+  | { type: "task_registered"; taskId: string; title: string; total: number; background: boolean }
+  | { type: "agent_started"; taskId: string; agentId: string; agentName: string; index: number; total: number; agentType: string; prompt: string }
+  | { type: "agent_activity"; taskId: string; agentId: string; agentName: string; activity: string }
+  | { type: "agent_completed"; taskId: string; agentId: string; agentName: string; index: number; total: number; agentType: string; status: SpawnAgentReport["status"] }
+  | { type: "task_completed"; taskId: string; status: "completed" | "partial" | "failed" | "cancelled"; background?: boolean };
 
 export type SpawnAgentsProgressHandler = (event: SpawnAgentsProgress) => void | Promise<void>;
 
@@ -242,6 +229,10 @@ export interface SpawnAgentsDependencies {
   resumePrompt?: string;
   /** Permite al subagente pedir datos al usuario mediante un mensaje de sistema. */
   onSystemMessage?: (text: string) => void | Promise<void>;
+  /** Envía una captura/archivo generado por el agente mientras espera datos. */
+  onSystemArtifact?: (path: string, caption: string) => void | Promise<void>;
+  /** Activa la revisión automática del orquestador al terminar una tarea background. */
+  onBackgroundCompleted?: (taskId: string) => void | Promise<void>;
 }
 
 function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
@@ -250,12 +241,13 @@ function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
     if (!entry || typeof entry !== "object") return [];
     const raw = entry as Record<string, unknown>;
     const agentType = typeof raw.agent_type === "string" ? raw.agent_type.trim() : "";
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
     const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
     const params = raw.params && typeof raw.params === "object" && !Array.isArray(raw.params)
       ? raw.params as Record<string, unknown>
       : undefined;
     if (!agentType || !prompt) return [];
-    return [{ agent_type: agentType, prompt, params }];
+    return [{ agent_type: agentType, name: name || undefined, prompt, params }];
   });
 }
 
@@ -267,6 +259,37 @@ function safeSegment(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 48) || "agent";
+}
+
+function conciseAgentName(prompt: string, fallback: string): string {
+  const clean = prompt.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+  return clean ? clean.slice(0, 72) : fallback;
+}
+
+function describeAgentActivity(toolName: string, args: Record<string, unknown>): string {
+  const text = (key: string) => typeof args[key] === "string" ? String(args[key]).trim() : "";
+  switch (toolName) {
+    case "browser_open": return `Abriendo ${text("url") || "el sitio"}`;
+    case "browser_snapshot": return "Inspeccionando los campos y controles de la página";
+    case "browser_read": return "Leyendo el contenido visible de la página";
+    case "browser_click": return `Haciendo clic en ${text("selector") || "un control"}`;
+    case "browser_fill": return `Escribiendo en ${text("selector") || "un campo"}`;
+    case "browser_fill_secret": return `Completando de forma segura ${text("selector") || "un campo protegido"}`;
+    case "browser_type": return `Escribiendo en ${text("selector") || "un campo"}`;
+    case "browser_press": return `Enviando la tecla ${text("key") || "solicitada"}`;
+    case "browser_wait": return "Esperando que la página termine de cargar";
+    case "browser_get_text": return `Leyendo ${text("selector") || "un elemento"}`;
+    case "browser_get_url": return "Comprobando la página actual";
+    case "browser_screenshot": return `Tomando la captura ${text("filename") || "solicitada"}`;
+    case "browser_download": return `Descargando ${text("filename") || "un archivo"}`;
+    case "browser_auth_profiles": return "Buscando una credencial cifrada compatible";
+    case "browser_auth_login": return "Intentando iniciar sesión con una credencial segura";
+    case "browser_auth_confirm": return "Confirmando y guardando el acceso cifrado";
+    case "browser_request_user_input": return `Esperando ${text("field_name") || "un dato del usuario"}`;
+    case "web_search": return `Buscando: ${text("query") || "información en la web"}`;
+    case "read_url": return `Leyendo ${text("url") || "una fuente"}`;
+    default: return `Ejecutando ${toolName}`;
+  }
 }
 
 async function emit(handler: SpawnAgentsProgressHandler | undefined, event: SpawnAgentsProgress): Promise<void> {
@@ -289,50 +312,33 @@ function parentReportBudget(reportCount: number): number {
   return Math.max(3_000, Math.min(MAX_PARENT_RESULT_CHARS, Math.floor(MAX_PARENT_TOTAL_CHARS / reportCount)));
 }
 
-export async function executeSpawnAgentsTool(
-  args: Record<string, unknown>,
+async function runSpawnTask(
+  uniqueAgents: SpawnAgentRequest[],
+  originalToUniqueIndex: number[],
+  task: ReturnType<TaskRuntime["create"]>,
   dependencies: SpawnAgentsDependencies,
+  background: boolean,
 ): Promise<string> {
-  let requested = parseRequests(args);
-  if (requested.length === 0) return "Error: agents debe contener al menos un subagente con agent_type y prompt.";
-  if (requested.length > MAX_AGENTS_PER_CALL) return `Error: solo se permiten ${MAX_AGENTS_PER_CALL} subagentes por llamada.`;
-
-  if (dependencies.filterRequests) requested = dependencies.filterRequests(requested);
-  if (requested.length === 0) {
-    return JSON.stringify({ status: "deduplicated", reports: [], message: "Las solicitudes equivalentes de subagentes ya se ejecutaron en esta ronda." });
-  }
-
-  for (const request of requested) {
-    const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
-    if (definition.id === "researcher-web" && (!dependencies.agentConfig.webSearchEnabled || !dependencies.agentConfig.researchSubagentEnabled)) {
-      return "Error: el investigador web está desactivado en la configuración actual.";
-    }
-  }
-
-  const { uniqueAgents, originalToUniqueIndex } = deduplicateSpawnAgentRequests(requested);
-  const title = typeof args.title === "string" && args.title.trim()
-    ? args.title.trim()
-    : uniqueAgents.length === 1
-      ? `Investigación: ${uniqueAgents[0]?.prompt?.slice(0, 70) ?? "subagente"}`
-      : `Investigación paralela con ${uniqueAgents.length} subagentes`;
-  const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length);
   const taskBase = task.record.taskPath;
   let completed = 0;
-
-  debugInfo("agents.spawn", "task_started", {
-    taskId: task.record.id,
-    jid: dependencies.jid,
-    requested: requested.length,
-    unique: uniqueAgents.length,
-    title,
-  });
-  await emit(dependencies.onProgress, { type: "task_started", taskId: task.record.id, total: uniqueAgents.length });
+  const agentRecords: Array<ReturnType<TaskRuntime["createAgent"]>["record"] | undefined> = [];
 
   try {
     const settled = await Promise.allSettled(uniqueAgents.map(async (request, index) => {
       const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
       const runId = `${task.record.id}-${safeSegment(definition.id)}-${index + 1}`;
       const agentDir = `${taskBase}/agents/${String(index + 1).padStart(2, "0")}-${safeSegment(definition.id)}`;
+      const agentName = request.name?.trim()
+        || conciseAgentName(request.prompt ?? "", definition.displayName);
+      const tracked = dependencies.tasks.createAgent(dependencies.jid, task.record.id, {
+        name: agentName,
+        agentType: definition.id,
+        runId,
+        agentPath: agentDir,
+        prompt: request.prompt ?? "",
+      });
+      agentRecords[index] = tracked.record;
+
       const credentialRef = definition.id === "browser-web" && typeof request.params?.credential_ref === "string"
         ? request.params.credential_ref.trim()
         : "";
@@ -341,6 +347,8 @@ export async function executeSpawnAgentsTool(
         : request.prompt ?? "";
       const events: AgentEvent[] = [];
       dependencies.workspace.writeText(dependencies.jid, `${agentDir}/request.json`, `${JSON.stringify({
+        agentId: tracked.record.id,
+        agentName,
         agentType: definition.id,
         displayName: definition.displayName,
         prompt: agentPrompt,
@@ -348,48 +356,79 @@ export async function executeSpawnAgentsTool(
         runId,
       }, null, 2)}\n`);
 
-      await emit(dependencies.onProgress, {
-        type: "agent_started",
-        taskId: task.record.id,
-        index,
-        total: uniqueAgents.length,
-        agentType: definition.id,
-        // El progreso del chat activo muestra la instrucción completa solicitada al
-        // subagente, pero no los bloques internos que contienen credential_ref.
-        prompt: request.prompt ?? "",
-      });
-
       const browserExecution = definition.id === "browser-web" && dependencies.browserCredentials
         ? new BrowserAgentExecution({
             jid: dependencies.jid,
             runId,
             taskId: task.record.id,
+            agentId: tracked.record.id,
+            agentName,
             agentDir,
             workspace: dependencies.workspace,
             credentials: dependencies.browserCredentials,
             resumePrompt: dependencies.resumePrompt ?? request.prompt ?? "",
+            onStateChange: async (state) => {
+              dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
+                status: state,
+                ...(state === "running" ? {
+                  waitingFieldName: undefined,
+                  waitingRequestId: undefined,
+                  waitingScreenshotPath: undefined,
+                } : {}),
+              });
+            },
             onUserInputRequest: async (input) => {
               const secret = input.kind === "password" || input.kind === "otp";
               const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
+              dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
+                status: "waiting_user",
+                activity: `Esperando ${input.fieldName}`,
+                waitingFieldName: input.fieldName,
+                waitingRequestId: input.requestId,
+                waitingScreenshotPath: input.screenshotPath,
+              });
               const lines = [
                 heading,
                 "",
                 secret
-                  ? `Este es el mensaje seguro del sistema: envía ahora ${input.fieldName} para continuar.`
+                  ? `Envía ahora ${input.fieldName} para continuar.`
                   : (input.message || `La tarea necesita ${input.fieldName} para continuar.`),
               ];
               if (input.url) lines.push(`Sitio: ${input.url}`);
               if (input.username) lines.push(`Cuenta: ${input.username}`);
               lines.push(
+                `Agente: ${tracked.record.id} — ${agentName}`,
                 "",
+                `Responde con: ${tracked.record.id} <dato>`,
+                input.kind === "text"
+                  ? "Para datos libres usa siempre el ID del agente, así puedes seguir conversando sin que otro mensaje se interprete como respuesta."
+                  : "Si esta es la única solicitud pendiente, también puedes enviar solo un usuario, contraseña o código con formato inequívoco.",
                 secret
-                  ? "El agente de navegador está pausado y mantiene la misma sesión abierta. El agente no verá el valor: tu respuesta se capturará fuera del modelo y se inyectará únicamente en esta misma tarea. Al responder, continuará desde la página actual sin crear otro subagente."
-                  : "El agente de navegador está pausado y mantiene la misma sesión abierta. Responde con el dato solicitado y esta misma tarea continuará desde la página actual.",
+                  ? "El valor se capturará fuera del modelo y se inyectará únicamente en esta tarea. Si la cuenta es incorrecta, escribe: corregir usuario."
+                  : "La misma sesión del navegador permanecerá abierta mientras respondes.",
               );
+              if (input.screenshotPath) {
+                try {
+                  await dependencies.onSystemArtifact?.(
+                    input.screenshotPath,
+                    `Vista actual para ${tracked.record.id}. Revisa el campo solicitado antes de responder.`,
+                  );
+                } catch (error) {
+                  debugError("agents.spawn", "input_screenshot_send_failed", error, {
+                    taskId: task.record.id,
+                    agentId: tracked.record.id,
+                    path: input.screenshotPath,
+                  });
+                }
+              }
               await dependencies.onSystemMessage?.(lines.join("\n"));
             },
           })
         : undefined;
+
+      const unregisterTerminator = browserExecution
+        ? dependencies.tasks.registerAgentTerminator(dependencies.jid, tracked.record.id, (reason) => browserExecution.cancel(reason))
+        : () => undefined;
 
       let report: SpawnAgentReport;
       try {
@@ -401,7 +440,7 @@ export async function executeSpawnAgentsTool(
           agentConfig: dependencies.agentConfig,
           runId,
           parentRunId: task.record.id,
-          parentSignal: task.signal,
+          parentSignal: tracked.signal,
           browserExecution,
           onEvent: async (event) => {
             events.push(event);
@@ -410,25 +449,72 @@ export async function executeSpawnAgentsTool(
               `${agentDir}/events.jsonl`,
               `${events.map((item) => JSON.stringify(item)).join("\n")}\n`,
             );
+            if (event.type === "agent_started") {
+              dependencies.tasks.update(dependencies.jid, task.record.id, { status: "running" });
+              dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
+                status: "running",
+                activity: "Analizando la misión y preparando el primer paso",
+              });
+              await emit(dependencies.onProgress, {
+                type: "agent_started",
+                taskId: task.record.id,
+                agentId: tracked.record.id,
+                agentName,
+                index,
+                total: uniqueAgents.length,
+                agentType: definition.id,
+                prompt: request.prompt ?? "",
+              });
+            } else if (event.type === "tool_started") {
+              const activity = describeAgentActivity(event.toolName, event.args);
+              dependencies.tasks.updateAgentActivity(dependencies.jid, tracked.record.id, activity, event.toolName);
+              await emit(dependencies.onProgress, {
+                type: "agent_activity",
+                taskId: task.record.id,
+                agentId: tracked.record.id,
+                agentName,
+                activity,
+              });
+            } else if (event.type === "tool_completed") {
+              dependencies.tasks.updateAgentActivity(
+                dependencies.jid,
+                tracked.record.id,
+                event.ok ? `Procesando el resultado de ${event.toolName}` : `Recuperándose de un error en ${event.toolName}`,
+              );
+            }
           },
         });
       } finally {
+        unregisterTerminator();
         if (browserExecution) await browserExecution.finalize();
       }
 
       const fullResult = report.result ?? "";
+      const resultPath = `${agentDir}/result.md`;
       dependencies.workspace.writeText(
         dependencies.jid,
-        `${agentDir}/result.md`,
+        resultPath,
         fullResult || `# ${definition.displayName}\n\nEstado: ${report.status}\n\nError: ${report.error ?? "Sin respuesta"}\n`,
       );
+      const latestAgentState = dependencies.tasks.getAgent(dependencies.jid, tracked.record.id);
+      if (latestAgentState?.status === "cancelled" && report.status !== "cancelled") {
+        report = { ...report, status: "cancelled", result: undefined, error: latestAgentState.error ?? "Cancelado por el usuario." };
+      }
       dependencies.workspace.writeText(dependencies.jid, `${agentDir}/result.json`, `${JSON.stringify(report, null, 2)}\n`);
+      dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
+        status: report.status,
+        reviewStatus: "pending",
+        resultPath,
+        error: report.error,
+      });
 
       completed += 1;
       dependencies.tasks.update(dependencies.jid, task.record.id, { completedWorkers: completed });
       await emit(dependencies.onProgress, {
         type: "agent_completed",
         taskId: task.record.id,
+        agentId: tracked.record.id,
+        agentName,
         index,
         total: uniqueAgents.length,
         agentType: definition.id,
@@ -442,17 +528,23 @@ export async function executeSpawnAgentsTool(
       const request = uniqueAgents[index];
       const agentType = normalizeAgentType(request?.agent_type ?? "unknown");
       const reason = entry.reason instanceof Error ? entry.reason.message : String(entry.reason);
-      debugError("agents.spawn", "worker_crashed", entry.reason, {
-        taskId: task.record.id,
-        index,
-        agentType,
-      });
+      const tracked = agentRecords[index];
+      const current = tracked ? dependencies.tasks.getAgent(dependencies.jid, tracked.id) : undefined;
+      const workerStatus: "cancelled" | "failed" = current?.status === "cancelled" || task.signal.aborted ? "cancelled" : "failed";
+      if (tracked) {
+        dependencies.tasks.updateAgent(dependencies.jid, tracked.id, {
+          status: workerStatus,
+          reviewStatus: "pending",
+          error: reason,
+        });
+      }
+      debugError("agents.spawn", "worker_crashed", entry.reason, { taskId: task.record.id, index, agentType });
       return {
         agentType,
-        agentName: agentType,
+        agentName: request?.name || agentType,
         prompt: request?.prompt ?? "",
         runId: `${task.record.id}-${agentType}-${index + 1}`,
-        status: task.signal.aborted ? "cancelled" : "failed",
+        status: workerStatus,
         error: reason,
         toolsCalled: [],
       };
@@ -468,41 +560,36 @@ export async function executeSpawnAgentsTool(
         ? "completed"
         : completedCount > 0
           ? "partial"
-          : "failed";
+          : cancelledCount === uniqueReports.length
+            ? "cancelled"
+            : "failed";
 
-    dependencies.workspace.writeText(dependencies.jid, `${taskBase}/result.json`, `${JSON.stringify({
-      taskId: task.record.id,
-      status,
-      reports: uniqueReports,
-    }, null, 2)}\n`);
+    dependencies.workspace.writeText(dependencies.jid, `${taskBase}/result.json`, `${JSON.stringify({ taskId: task.record.id, status, reports: uniqueReports }, null, 2)}\n`);
     dependencies.tasks.update(dependencies.jid, task.record.id, {
       status,
+      reviewStatus: "pending",
       completedWorkers: uniqueReports.length,
-      error: status === "cancelled"
-        ? "Cancelada por el usuario."
-        : failedCount > 0
-          ? `${failedCount} subagente(s) no completaron la tarea.`
-          : undefined,
+      error: status === "cancelled" ? "Cancelada por el usuario." : failedCount > 0 ? `${failedCount} subagente(s) no completaron la tarea.` : undefined,
     });
-    await emit(dependencies.onProgress, { type: "task_completed", taskId: task.record.id, status });
-    debugInfo("agents.spawn", status === "cancelled" ? "task_cancelled" : "task_completed", {
-      taskId: task.record.id,
-      status,
-      completed: completedCount,
-      failed: failedCount,
-      cancelled: cancelledCount,
-    });
-
-    if (status === "cancelled") {
-      return `Error: la tarea ${task.record.id} fue cancelada por el usuario. No continúes, no reintentes y no lances otra tarea para completar la solicitud cancelada.`;
+    await emit(dependencies.onProgress, { type: "task_completed", taskId: task.record.id, status, background });
+    if (background && status !== "cancelled") {
+      try {
+        await dependencies.onBackgroundCompleted?.(task.record.id);
+      } catch (error) {
+        debugError("agents.spawn", "background_review_failed", error, { taskId: task.record.id });
+      }
     }
+    debugInfo("agents.spawn", status === "cancelled" ? "task_cancelled" : "task_completed", {
+      taskId: task.record.id, status, completed: completedCount, failed: failedCount, cancelled: cancelledCount,
+    });
 
+    if (status === "cancelled") return `Error: la tarea ${task.record.id} fue cancelada por el usuario.`;
     const resultBudget = parentReportBudget(reports.length);
     return JSON.stringify({
       task_id: task.record.id,
       status,
-      note: "Los informes completos de cada subagente están guardados en el workdir. Los textos siguientes son handoffs compactos para que el agente principal continúe sin saturar el proveedor LLM.",
-      reports: reports.map((report) => ({
+      reports: reports.map((report, index) => ({
+        agent_id: agentRecords[originalToUniqueIndex[index] ?? index]?.id,
         agent_type: report.agentType,
         agent_name: report.agentName,
         prompt: report.prompt.length > 500 ? `${report.prompt.slice(0, 500)}…` : report.prompt,
@@ -514,15 +601,76 @@ export async function executeSpawnAgentsTool(
   } catch (error) {
     const cancelled = task.signal.aborted;
     const reason = error instanceof Error ? error.message : String(error);
+    const status: "cancelled" | "failed" = cancelled ? "cancelled" : "failed";
     dependencies.tasks.update(dependencies.jid, task.record.id, {
-      status: cancelled ? "cancelled" : "failed",
+      status,
+      reviewStatus: "pending",
       error: reason,
     });
+    await emit(dependencies.onProgress, { type: "task_completed", taskId: task.record.id, status, background });
+    if (background && !cancelled) {
+      try {
+        await dependencies.onBackgroundCompleted?.(task.record.id);
+      } catch (reviewError) {
+        debugError("agents.spawn", "background_review_failed", reviewError, { taskId: task.record.id });
+      }
+    }
     debugError("agents.spawn", cancelled ? "task_cancelled" : "task_failed", error, { taskId: task.record.id });
-    return cancelled
-      ? `Error: la tarea ${task.record.id} fue cancelada.`
-      : `Error: la tarea ${task.record.id} falló: ${reason}`;
+    return cancelled ? `Error: la tarea ${task.record.id} fue cancelada.` : `Error: la tarea ${task.record.id} falló: ${reason}`;
   }
+}
+
+export async function executeSpawnAgentsTool(
+  args: Record<string, unknown>,
+  dependencies: SpawnAgentsDependencies,
+): Promise<string> {
+  let requested = parseRequests(args);
+  if (requested.length === 0) return "Error: agents debe contener al menos un subagente con agent_type y prompt.";
+  if (requested.length > MAX_AGENTS_PER_CALL) return `Error: solo se permiten ${MAX_AGENTS_PER_CALL} subagentes por llamada.`;
+  if (dependencies.filterRequests) requested = dependencies.filterRequests(requested);
+  if (requested.length === 0) return JSON.stringify({ status: "deduplicated", reports: [], message: "Las solicitudes equivalentes de subagentes ya se ejecutaron en esta ronda." });
+
+  for (const request of requested) {
+    const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
+    if (definition.id === "researcher-web" && (!dependencies.agentConfig.webSearchEnabled || !dependencies.agentConfig.researchSubagentEnabled)) {
+      return "Error: el investigador web está desactivado en la configuración actual.";
+    }
+  }
+
+  const { uniqueAgents, originalToUniqueIndex } = deduplicateSpawnAgentRequests(requested);
+  const title = typeof args.title === "string" && args.title.trim()
+    ? args.title.trim()
+    : uniqueAgents.length === 1
+      ? `${uniqueAgents[0]?.name || "Tarea"}: ${uniqueAgents[0]?.prompt?.slice(0, 70) ?? "subagente"}`
+      : `Tarea paralela con ${uniqueAgents.length} subagentes`;
+  const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length);
+  const background = args.background === true;
+
+  debugInfo("agents.spawn", "task_started", { taskId: task.record.id, jid: dependencies.jid, requested: requested.length, unique: uniqueAgents.length, title, background });
+  await emit(dependencies.onProgress, {
+    type: "task_registered",
+    taskId: task.record.id,
+    title: task.record.title,
+    total: uniqueAgents.length,
+    background,
+  });
+
+  if (background) {
+    void runSpawnTask(uniqueAgents, originalToUniqueIndex, task, dependencies, true).catch((error) => {
+      debugError("agents.spawn", "background_task_crashed", error, { taskId: task.record.id });
+    });
+    return JSON.stringify({
+      task_id: task.record.id,
+      title: task.record.title,
+      status: "queued",
+      background: true,
+      message: "La tarea quedó registrada y el supervisor confirmará cuando el agente comience realmente. Puedes seguir conversando. Usa task_list/agent_list para verla o task_cancel/agent_cancel para detenerla.",
+    }, null, 2);
+  }
+
+  const result = await runSpawnTask(uniqueAgents, originalToUniqueIndex, task, dependencies, false);
+  if (!result.startsWith("Error:")) dependencies.tasks.reviewTask(dependencies.jid, task.record.id);
+  return result;
 }
 
 export async function executeResearcherWebTool(
@@ -532,7 +680,7 @@ export async function executeResearcherWebTool(
   const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return "Error: prompt es obligatorio.";
   const raw = await executeSpawnAgentsTool(
-    { title: `Investigación web: ${prompt.slice(0, 70)}`, agents: [{ agent_type: "researcher-web", prompt }] },
+    { title: `Investigación web: ${prompt.slice(0, 70)}`, background: false, agents: [{ agent_type: "researcher-web", prompt }] },
     dependencies,
   );
   if (raw.startsWith("Error:")) return raw;
@@ -553,11 +701,17 @@ export async function executeBrowserWebTool(
   const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return "Error: prompt es obligatorio.";
   const credentialRef = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
+  const name = typeof args.name === "string" ? args.name.trim() : "";
+  const background = args.background !== false;
   const raw = await executeSpawnAgentsTool(
-    { title: `Navegación web: ${prompt.slice(0, 70)}`, agents: [{ agent_type: "browser-web", prompt, params: credentialRef ? { credential_ref: credentialRef } : undefined }] },
+    {
+      title: name || `Navegación web: ${prompt.slice(0, 70)}`,
+      background,
+      agents: [{ agent_type: "browser-web", name: name || undefined, prompt, params: credentialRef ? { credential_ref: credentialRef } : undefined }],
+    },
     dependencies,
   );
-  if (raw.startsWith("Error:")) return raw;
+  if (background || raw.startsWith("Error:")) return raw;
   try {
     const parsed = JSON.parse(raw) as { reports?: Array<{ result?: string; error?: string }>; task_id?: string };
     const report = parsed.reports?.[0];
@@ -620,23 +774,120 @@ export function executeBrowserCredentialControlTool(
 export function executeAgentTaskTool(
   name: string,
   args: Record<string, unknown>,
-  dependencies: Pick<SpawnAgentsDependencies, "jid" | "tasks">,
+  dependencies: Pick<SpawnAgentsDependencies, "jid" | "tasks" | "workspace">,
 ): string {
   if (name === "task_list") {
     const tasks = dependencies.tasks.list(dependencies.jid);
     if (tasks.length === 0) return "No hay tareas registradas.";
-    return tasks.map((task, index) => `${index + 1}. ${task.id} — ${task.status} — ${task.title} — ${task.completedWorkers}/${task.totalWorkers}`).join("\n");
+    return tasks.map((task, index) => `${index + 1}. ${task.id} — ${task.status}/${task.reviewStatus} — ${task.title} — ${task.completedWorkers}/${task.totalWorkers}`).join("\n");
   }
+  if (name === "agent_list") {
+    const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+    const agents = dependencies.tasks.listAgents(dependencies.jid, taskId || undefined);
+    if (agents.length === 0) return "No hay agentes registrados.";
+    return agents.map((agent, index) => {
+      const detail = agent.activity ? ` — ahora: ${agent.activity}` : "";
+      const waiting = agent.waitingFieldName ? ` — espera: ${agent.waitingFieldName}` : "";
+      return `${index + 1}. ${agent.id} — ${agent.status}/${agent.reviewStatus} — ${agent.name}${detail}${waiting} — tarea ${agent.taskId}`;
+    }).join("\n");
+  }
+  if (name === "task_cancel_all") {
+    const count = dependencies.tasks.cancelAll(dependencies.jid);
+    return count > 0 ? `✅ Se cancelaron ${count} tarea(s) de fondo.` : "No hay tareas activas que cancelar.";
+  }
+
   const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
-  if (!taskId) return "Error: task_id es obligatorio.";
+  const agentSelector = typeof args.agent === "string" ? args.agent.trim() : "";
+  if (name.startsWith("task_") && !taskId) return "Error: task_id es obligatorio.";
+  if (name.startsWith("agent_") && !agentSelector) return "Error: agent es obligatorio.";
+
   if (name === "task_status") {
     const task = dependencies.tasks.get(dependencies.jid, taskId);
-    return task ? JSON.stringify(task, null, 2) : `Error: no existe la tarea ${taskId}.`;
+    if (!task) return `Error: no existe la tarea ${taskId}.`;
+    return JSON.stringify({ task, agents: dependencies.tasks.listAgents(dependencies.jid, taskId) }, null, 2);
+  }
+  if (name === "task_inspect") {
+    const task = dependencies.tasks.get(dependencies.jid, taskId);
+    if (!task) return `Error: no existe la tarea ${taskId}.`;
+    const agents = dependencies.tasks.listAgents(dependencies.jid, taskId).map((agent) => {
+      let result: string | undefined;
+      if (agent.resultPath) {
+        try { result = dependencies.workspace.readText(dependencies.jid, agent.resultPath, 16_000); } catch { /* archivo ausente */ }
+      }
+      return { ...agent, result };
+    });
+    let files: string[] = [];
+    try { files = dependencies.workspace.listRecursive(dependencies.jid, task.taskPath, 400); } catch { /* carpeta ausente */ }
+    const artifacts = dependencies.workspace.listArtifacts(dependencies.jid).filter((item) => item.taskId === taskId);
+    return JSON.stringify({ task, agents, files, artifacts }, null, 2);
+  }
+  if (name === "task_review") {
+    const task = dependencies.tasks.get(dependencies.jid, taskId);
+    if (!task || ["queued", "running", "synthesizing"].includes(task.status)) {
+      return `Error: la tarea ${taskId} no existe o todavía no terminó.`;
+    }
+    const agents = dependencies.tasks.listAgents(dependencies.jid, taskId);
+    const reviewed = agents.map((agent) => {
+      let result: string | undefined;
+      if (agent.resultPath) {
+        try { result = dependencies.workspace.readText(dependencies.jid, agent.resultPath, 12_000); } catch { /* resultado faltante */ }
+      }
+      return {
+        agent_id: agent.id,
+        name: agent.name,
+        type: agent.agentType,
+        status: agent.status,
+        error: agent.error,
+        result_path: agent.resultPath,
+        result,
+      };
+    });
+    dependencies.tasks.reviewTask(dependencies.jid, taskId);
+    return JSON.stringify({
+      task_id: task.id,
+      title: task.title,
+      status: task.status,
+      review_status: "reviewed",
+      agents: reviewed,
+    }, null, 2);
   }
   if (name === "task_cancel") {
     return dependencies.tasks.cancel(dependencies.jid, taskId)
-      ? `✅ Tarea ${taskId} cancelada.`
+      ? `✅ Tarea ${taskId} cancelada. La conversación principal continúa activa.`
       : `Error: no se encontró una tarea activa con ID ${taskId}.`;
+  }
+  if (name === "agent_status") {
+    const agent = dependencies.tasks.findAgent(dependencies.jid, agentSelector);
+    return agent ? JSON.stringify(agent, null, 2) : `Error: no existe un agente que coincida con ${agentSelector}.`;
+  }
+  if (name === "agent_review") {
+    const agent = dependencies.tasks.findAgent(dependencies.jid, agentSelector);
+    if (!agent || ["queued", "running", "waiting_user"].includes(agent.status)) {
+      return "Error: el agente no existe o todavía no terminó.";
+    }
+    let result: string | undefined;
+    if (agent.resultPath) {
+      try { result = dependencies.workspace.readText(dependencies.jid, agent.resultPath, 16_000); } catch { /* resultado faltante */ }
+    }
+    dependencies.tasks.reviewAgent(dependencies.jid, agent.id);
+    return JSON.stringify({
+      agent_id: agent.id,
+      name: agent.name,
+      type: agent.agentType,
+      status: agent.status,
+      review_status: "reviewed",
+      error: agent.error,
+      result_path: agent.resultPath,
+      result,
+    }, null, 2);
+  }
+  if (name === "agent_cancel") {
+    const agent = dependencies.tasks.findAgent(dependencies.jid, agentSelector);
+    if (!agent) return `Error: no existe un agente que coincida con ${agentSelector}.`;
+    return dependencies.tasks.cancelAgent(dependencies.jid, agent.id)
+      ? `✅ Agente ${agent.id} (${agent.name}) cancelado. Los demás agentes y la conversación continúan.`
+      : `Error: el agente ${agent.id} ya terminó o no está activo.`;
   }
   return `Error: herramienta de tareas desconocida "${name}".`;
 }
+

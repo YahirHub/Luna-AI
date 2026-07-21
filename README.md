@@ -311,6 +311,18 @@ El modelo principal no recibe `web_search` ni `read_url` directamente. Para una 
 
 También existe `browser-web`, especializado en navegación interactiva mediante `agent-browser`. El agente trabaja sin visión: interpreta snapshots del árbol de accesibilidad y texto renderizado, navega con referencias `@eN`, puede iniciar sesión mediante una referencia de credencial segura, extraer métricas, tomar capturas y descargar archivos. El agente principal usa `browser_agent` para una tarea de navegador individual o `spawn_agents` con `agent_type=browser-web` cuando conviene combinar navegación con otros trabajos paralelos.
 
+### Supervisor de tareas y agentes
+
+Cada ejecución delegada queda registrada con una tarea (`task_id`) y uno o más agentes con ID corto (`A-XXXXXX`) y nombre legible. El estado de ejecución (`queued`, `running`, `waiting_user`, `completed`, `failed`, `cancelled` o `interrupted`) es independiente del estado de revisión (`pending` o `reviewed`). De este modo Luna distingue un trabajo que ya terminó de uno cuyo resultado ya fue inspeccionado por el orquestador.
+
+`browser_agent` se ejecuta en segundo plano por defecto. Registrar la tarea solo la deja en `queued`: Luna no anuncia que el agente está trabajando hasta recibir el evento autoritativo `agent_started` del runtime. Esto evita respuestas falsas cuando una ejecución quedó únicamente registrada, falló antes de arrancar o todavía esperaba recursos. El chat principal continúa disponible mientras los agentes navegan o esperan datos humanos.
+
+El orquestador dispone de `task_list`, `task_status`, `task_inspect`, `task_review`, `task_cancel`, `task_cancel_all`, `agent_list`, `agent_status`, `agent_review` y `agent_cancel`. Las preguntas naturales como «¿cómo va el proceso?» se responden directamente desde el registro persistente, mostrando ID, estado, actividad actual y antigüedad del último evento, sin depender de recuerdos o inferencias del modelo. `task_inspect` permite leer los resultados, eventos, carpeta y artefactos reales de una tarea.
+
+Cuando una tarea de fondo termina, el orquestador inicia automáticamente una revisión: inspecciona `result.json`, `result.md`, eventos, archivos y artefactos del directorio de la tarea; sintetiza el resultado con el agente principal; lo incorpora al contexto; y envía capturas, documentos o descargas relevantes mediante el transporte activo. Solo después marca la tarea y sus agentes como `reviewed`. Si la revisión o el envío falla, permanece `pending` y se vuelve a intentar en una interacción posterior. El usuario no necesita pedir manualmente «revisa la tarea».
+
+El runtime de `agent-browser` usa un namespace, HOME, perfil Chrome y directorio temporal exclusivos por ejecución bajo `persistent/browser/runs/<run-id>`. Varios agentes pueden navegar y esperar credenciales al mismo tiempo sin compartir un perfil vivo ni bloquearse entre sí. El estado autenticado portable se restaura desde `persistent/browser/users/<usuario>/session-state.json`; al finalizar cada ejecución se fusionan cookies y `localStorage` bajo un lease breve reservado únicamente para el guardado, evitando que agentes concurrentes sobrescriban sesiones de otros sitios. Después se ejecutan `close` y `close --all` dentro del namespace, se terminan los procesos CLI registrados y se elimina el runtime temporal. No se usa `killall`.
+
 Ejemplo:
 
 ```text
@@ -324,7 +336,9 @@ La clave de cifrado es compartida por el almacén de credenciales y el runtime d
 
 Cuando `browser-web` llega a una pantalla de login, primero puede consultar `browser_auth_profiles`. Si encuentra una cuenta compatible, `browser_auth_login` descifra la contraseña únicamente dentro del runtime, la entrega temporalmente a `agent-browser` por `stdin`, inicia sesión y vuelve a eliminar el perfil temporal del vault interno del CLI. Si la sesión web caduca, el agente puede repetir el login con el perfil cifrado sin volver a pedir la contraseña. Si la contraseña real cambió o dejó de ser válida, el agente solicita una nueva mediante `browser_request_user_input`; después de un login correcto la credencial cifrada de URL + usuario se reemplaza sin crear duplicados.
 
-Si durante la navegación falta información humana, `browser-web` dispone de `browser_request_user_input`. El sistema puede solicitar `username`, `password`, `otp` o texto adicional y reanudar la solicitud original cuando el usuario responda. Los valores no secretos pueden volver al contexto como datos de sistema; las contraseñas y OTP se capturan fuera del modelo. Las contraseñas se convierten en una `credential_ref` y los secretos de un solo uso en una `secret_ref`, que solo puede consumir `browser_fill_secret`. Los mensajes de contraseña/OTP se intentan borrar mediante el transporte activo después de capturarlos, cuando la plataforma lo permite.
+Si durante la navegación falta información humana, `browser-web` usa `browser_request_user_input` y **no aborta la tarea**. Antes de preguntar intenta guardar y enviar una captura anotada de la página para que el usuario vea el formulario o campo exacto. Puede solicitar y volver a solicitar `username`, correo, `password`, OTP o texto adicional, incluso corregir la identidad cuando el usuario indique que la cuenta mostrada es incorrecta. La misma sesión del navegador permanece pausada y continúa desde la página actual.
+
+Cada solicitud recibe un `requestId` y queda asociada al ID del agente. Si varios navegadores esperan datos simultáneamente, Luna muestra la lista y exige responder con un selector como `A-DB6807 fastuser` o `2 123456`; nunca asigna una contraseña ambigua al agente equivocado. Los mensajes normales siguen llegando al bot mientras existen solicitudes pendientes. Las contraseñas y OTP se capturan fuera del modelo, se convierten en referencias opacas y se intentan eliminar del chat cuando el transporte lo permite.
 
 Si el orquestador principal sabe desde el inicio que falta una contraseña, todavía puede llamar `browser_request_credential`; solo entonces Luna envía un mensaje marcado como `MENSAJE DEL SISTEMA`, indicando que por seguridad el agente no debe conocer la contraseña. El siguiente mensaje se captura fuera del modelo y la tarea se reanuda automáticamente.
 
@@ -343,7 +357,7 @@ persistent/contexts/<jid>/workdir/tasks/<task-id>/agents/01-browser-web/
     └── downloads/
 ```
 
-Las capturas y descargas se registran como artefactos del workdir. Si el usuario pide una captura, el agente de navegador crea el PNG y el agente principal lo envía con `message_send`. Si pide un informe, el agente principal recibe la síntesis y las rutas de artefactos, crea el Markdown/PDF y después lo envía. El contenido de páginas se trata como no confiable y `agent-browser` se ejecuta con content boundaries y límite de salida.
+Las capturas y descargas se registran como artefactos del workdir. El revisor automático puede recorrer recursivamente la carpeta del agente, distinguir capturas temporales de solicitud humana de los entregables finales y enviar hasta los artefactos relevantes mediante `message_send`. `browser_open` devuelve también un snapshot compacto inicial, por lo que el agente evita una llamada adicional; el prompt limita snapshots, esperas y clics repetidos, exige confirmar URL y estado final antes de declarar éxito y reduce el máximo de pasos para que las tareas simples sean más rápidas. El contenido de páginas se trata como no confiable y `agent-browser` mantiene content boundaries y límites de salida.
 
 La preparación de `agent-browser` es automática. `bun install` ejecuta `prepare:browser` mediante `postinstall`, y `bun run start`, `bun run dev` y `bun run build` vuelven a ejecutar esa preparación de forma idempotente. El script usa primero el binario nativo instalado en `node_modules`; si Bun no ejecutó el lifecycle del paquete, intenta el `postinstall` oficial y, como último fallback, descarga el binario exacto de la release configurada. `assets/runtime/agent-browser/manifest.json` registra versión, plataforma y arquitectura para impedir que un binario x64 conservado se reutilice en ARM64 o viceversa. `scripts/package-runtime.ts` copia tanto el binario como el manifest a `dist/runtime/agent-browser/`.
 
@@ -403,23 +417,25 @@ persistent/contexts/<jid>/workdir/tasks/<task-id>/
 
 `events.jsonl` registra inicio, herramientas usadas, finalización o fallo sin inyectar los cuerpos completos de las páginas al contexto principal. `result.md` conserva la respuesta completa del investigador y el resultado devuelto a Luna se limita cuando excede un tamaño seguro para el contexto.
 
-`task_list`, `task_status` y `task_cancel` siguen disponibles para consultar o cancelar tareas desde lenguaje natural.
+`task_list`, `task_status`, `task_inspect`, `task_cancel` y las herramientas equivalentes de agentes permiten consultar, inspeccionar o cancelar trabajos desde lenguaje natural.
 
 ### Progreso visible en el chat activo
 
-Luna muestra solo eventos importantes:
+Luna diferencia registro, arranque real y revisión:
 
 ```text
-🤖 Inicié 4 subagentes.
-Tarea: ...
+📌 Tarea registrada: Comparar proveedores
+ID: 1784...
+Estado: en cola; te confirmaré cuando el agente empiece realmente.
 
-🔎 Subagente 1/4 (researcher-web):
-Investiga los precios actuales de DeepSeek...
+🚀 Agente A-91C2F0 activo — Investigar precios de DeepSeek
+Misión: Investiga los precios actuales...
 
-✅ Subagente 1/4 (researcher-web): terminado.
+✅ Agente A-91C2F0 — Investigar precios de DeepSeek: terminó.
+🧠 Tarea 1784... terminó. Luna revisará automáticamente resultados, carpeta y archivos antes de responderte.
 ```
 
-El detalle completo de `web_search`, `read_url`, tiempos y errores permanece en el log debug de consola y en `events.jsonl`.
+La actividad detallada de `web_search`, `read_url`, navegador, tiempos y errores permanece en el registro persistente y en `events.jsonl`. Las consultas de estado muestran una descripción compacta de la herramienta o paso actual sin inundar el chat con cada evento.
 
 ## PDF, ZIP, gitzip y envío de artefactos
 
@@ -703,10 +719,7 @@ scripts/
 ├── prepare-agent-browser.ts # Prepara binario nativo y navegador compatible
 ├── prepare-media-assets.ts  # Descarga/verifica FFmpeg, whisper.cpp, modelo y assets OCR
 ├── package-runtime.ts       # Copia runtimes preparados a dist/
-├── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1 portable
-├── remove-legacy-research.py # Elimina el pipeline de investigación legado
-├── remove-context-noise.py  # Limpia registros duplicados/espurios de contexto
-└── remove-obsolete-ogg-opus.py # Elimina el parche del decoder OGG/Opus reemplazado por FFmpeg
+└── whisper-linux-libs.ts    # Preserva SONAME e incluye libgomp.so.1 portable
 
 src/
 ├── ai.ts                    # Chat completions, tools, timeout y catálogo LLM
@@ -805,14 +818,12 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 25. Repetir creación, entrega y reintento de alarmas y recordatorios antes y después de reiniciar.
 26. Crear un symlink/junction dentro del workdir que apunte fuera y verificar que una escritura nueva a través de ese directorio sea rechazada.
 27. Probar una copia con `persistent/browser/encryption.key` corrupta y confirmar que el archivo no sea reemplazado automáticamente.
-
-## Limpieza reproducible
-
-Los scripts de limpieza son Python puro y funcionan desde PowerShell, CMD, Linux o macOS. Antes de aplicar una limpieza de contexto se puede revisar el alcance exacto:
-
-```powershell
-python .\scripts\remove-context-noise.py --dry-run
-python .\scripts\remove-context-noise.py
-```
-
-`remove-context-noise.py` solo toca las rutas enumeradas dentro del propio script y no modifica `persistent/`, `assets/`, `dist/` ni `node_modules/`.
+28. Lanzar `browser_agent`, enviar otro mensaje mientras sigue `running` y confirmar que Luna responda sin esperar al navegador.
+29. Consultar `agent_list`, verificar estados `running`, `completed/pending` y después usar `agent_review` para comprobar que cambie a `reviewed`.
+30. Lanzar dos agentes, cancelar uno por ID/nombre con `agent_cancel` y confirmar que el otro continúe y que el chat principal no se aborte.
+31. Finalizar o cancelar un `browser-web` y confirmar que su sesión de `agent-browser` se cierre, que el daemon aislado desaparezca tras el idle timeout y que no queden procesos bloqueando una ejecución posterior.
+32. Reiniciar Luna con una tarea persistida como `running` y confirmar que reaparezca como `interrupted/pending`, no como una tarea eternamente activa.
+33. Lanzar dos navegadores que pidan datos simultáneamente; confirmar que cada solicitud incluya ID/captura y que `A-XXXXXX valor` reanude únicamente el agente correcto.
+34. Terminar una tarea con una captura final y comprobar que el orquestador revise automáticamente la carpeta, responda con el resultado y envíe el PNG sin pedir revisión manual.
+35. Preguntar «¿cómo va el proceso?» con tareas `queued`, `running`, `waiting_user` y terminadas; verificar que la respuesta muestre el estado real y la actividad registrada, sin inventar progreso.
+36. Forzar una credencial incorrecta, indicar que la cuenta no es la correcta y confirmar que el mismo agente vuelva a pedir usuario y contraseña sin abortar ni perder la página.

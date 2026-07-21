@@ -228,3 +228,45 @@ it("permite cancelar una espera viva del navegador", async () => {
   await expect(waiting).rejects.toThrow("cancelado");
   expect(store.getPendingInput("owner@lid")).toBeUndefined();
 });
+
+it("mantiene varias solicitudes simultáneas y resuelve cada respuesta por agente", async () => {
+  const store = new BrowserCredentialStore();
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+
+  const first = store.waitForInput({
+    jid: "multi@lid",
+    kind: "username",
+    fieldName: "usuario del primer panel",
+    originalText: "primer login",
+    requestId: "request-first",
+    agentId: "A-AAAAAA",
+    agentName: "Primer panel",
+  }, firstController.signal);
+  const second = store.waitForInput({
+    jid: "multi@lid",
+    kind: "otp",
+    fieldName: "código del segundo panel",
+    originalText: "segundo login",
+    requestId: "request-second",
+    agentId: "A-BBBBBB",
+    agentName: "Segundo panel",
+  }, secondController.signal);
+
+  expect(store.getPendingInputs("multi@lid").map((item) => item.agentId)).toEqual(["A-AAAAAA", "A-BBBBBB"]);
+  expect(store.resolvePendingInput("multi@lid", { kind: "otp", secretRef: "secret-2" }, "A-BBBBBB")).toBe(true);
+  expect(await second).toEqual({ kind: "otp", secretRef: "secret-2" });
+  expect(store.getPendingInputs("multi@lid").map((item) => item.agentId)).toEqual(["A-AAAAAA"]);
+
+  expect(store.resolvePendingInput("multi@lid", {
+    kind: "correction",
+    action: "retry_identity",
+    message: "esa no es la cuenta",
+  }, "A-AAAAAA")).toBe(true);
+  expect(await first).toEqual({
+    kind: "correction",
+    action: "retry_identity",
+    message: "esa no es la cuenta",
+  });
+  expect(store.getPendingInputs("multi@lid")).toEqual([]);
+});

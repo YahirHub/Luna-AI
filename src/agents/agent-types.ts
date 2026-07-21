@@ -25,6 +25,7 @@ export interface AgentDefinition {
 
 export interface SpawnAgentRequest {
   agent_type: string;
+  name?: string;
   prompt?: string;
   params?: Record<string, unknown>;
 }

@@ -1,4 +1,5 @@
 import type { MessagingTransport, TransportIncomingMessage } from "./transports/types.ts";
+import { debugError, debugInfo, debugWarn } from "./debug.ts";
 import {
   registerCommand,
   getCommands,
@@ -38,7 +39,7 @@ import type {
   LlmConfig,
   ProviderSetupStep,
 } from "./llm-config.ts";
-import { ContextManager } from "./context.ts";
+import { ContextManager, STATIC_SYSTEM_PROMPT_CONTENT } from "./context.ts";
 import { AuthManager } from "./auth.ts";
 import type { PendingAction } from "./auth.ts";
 import {
@@ -128,6 +129,7 @@ import { TaskRuntime } from "./orchestration/task-runtime.ts";
 import {
   MESSAGING_TOOLS,
   executeMessagingTool,
+  sendWorkspacePath,
 } from "./tools/messaging-tools.ts";
 import {
   executeAgentTaskTool,
@@ -148,6 +150,7 @@ import {
   browserCredentialStore,
   extractBrowserLoginIntent,
   sanitizeBrowserCredentialText,
+  type PendingBrowserInputRequest,
 } from "./browser/browser-credentials.ts";
 import { getActiveTransport } from "./transports/active.ts";
 
@@ -197,6 +200,9 @@ const compactingJids = new Set<string>();
  * no solo al subagente, para impedir que el modelo lance tareas de seguimiento
  * después de que el usuario ya canceló la solicitud. */
 const activeAiRuns = new Map<string, AbortController>();
+
+/** Serializa revisiones automáticas por chat para no mezclar resultados simultáneos. */
+const backgroundReviewChains = new Map<string, Promise<void>>();
 
 /** Tools base y herramientas opcionales según /config. */
 const BASE_TOOLS = [
@@ -622,50 +628,242 @@ function formatCommandName(name: string): string {
   return `${SLASH_COMMANDS.has(name) ? "/" : "!"}${name}`;
 }
 
-const MESSAGE_PROGRESS_CHUNK_LENGTH = 3500;
-
-function splitProgressText(value: string, maxLength = MESSAGE_PROGRESS_CHUNK_LENGTH): string[] {
-  const text = value.trim();
-  if (!text) return [];
-  if (text.length <= maxLength) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > maxLength) {
-    let splitAt = remaining.lastIndexOf("\n", maxLength);
-    if (splitAt < Math.floor(maxLength * 0.5)) splitAt = remaining.lastIndexOf(" ", maxLength);
-    if (splitAt < Math.floor(maxLength * 0.5)) splitAt = maxLength;
-    const chunk = remaining.slice(0, splitAt).trimEnd();
-    if (chunk) chunks.push(chunk);
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks;
-}
-
 function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
   switch (event.type) {
-    case "task_started":
-      return [`🤖 Inicié ${event.total} subagente${event.total === 1 ? "" : "s"}.\nTarea: ${event.taskId}`];
+    case "task_registered":
+      return [`📌 Tarea registrada: ${event.title}\nID: ${event.taskId}\nEstado: en cola; te confirmaré cuando el agente empiece realmente.`];
     case "agent_started": {
-      const prefix = `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}):`;
-      const promptChunks = splitProgressText(event.prompt);
-      if (promptChunks.length === 0) return [prefix];
-      return promptChunks.map((chunk, chunkIndex) =>
-        chunkIndex === 0
-          ? `${prefix}\n${chunk}`
-          : `🔎 Subagente ${event.index + 1}/${event.total} (${event.agentType}) — instrucción ${chunkIndex + 1}/${promptChunks.length}:\n${chunk}`
-      );
+      const prefix = `🚀 Agente ${event.agentId} activo — ${event.agentName}`;
+      const prompt = event.prompt.replace(/\s+/g, " ").trim();
+      return [prompt ? `${prefix}\nMisión: ${prompt.slice(0, 700)}` : prefix];
     }
+    case "agent_activity":
+      return [];
     case "agent_completed": {
-      const icon = event.status === "completed" ? "✅" : event.status === "cancelled" ? "⛔" : "❌";
-      const label = event.status === "completed" ? "terminado" : event.status === "cancelled" ? "cancelado" : "falló";
-      return [`${icon} Subagente ${event.index + 1}/${event.total} (${event.agentType}): ${label}.`];
+      if (event.status === "cancelled") return [];
+      const icon = event.status === "completed" ? "✅" : "❌";
+      const label = event.status === "completed" ? "terminó" : "falló";
+      return [`${icon} Agente ${event.agentId} — ${event.agentName}: ${label}.`];
     }
-    case "task_completed":
-      if (event.status === "cancelled") return [`⛔ Tarea de subagentes ${event.taskId} cancelada.`];
-      if (event.status === "failed") return [`❌ Tarea de subagentes ${event.taskId} fallida.`];
-      return [`✅ Tarea de subagentes ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : "completada"}.`];
+    case "task_completed": {
+      if (event.status === "cancelled") return [];
+      if (event.background) {
+        return [`🧠 Tarea ${event.taskId} ${event.status === "partial" ? "terminó parcialmente" : event.status === "failed" ? "terminó con errores" : "terminó"}. Luna revisará automáticamente resultados, carpeta y archivos antes de responderte.`];
+      }
+      return [`✅ Tarea ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : event.status === "failed" ? "fallida" : "completada"}.`];
+    }
+  }
+}
+
+function compactReviewText(value: string, maxChars = 18_000): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.floor(maxChars * 0.7))}\n\n[...contenido intermedio omitido...]\n\n${value.slice(-Math.floor(maxChars * 0.3))}`;
+}
+
+function buildDeterministicTaskSummary(taskId: string, title: string, status: string, agents: Array<{ name: string; status: string; result?: string; error?: string }>): string {
+  const lines = [
+    `📋 Revisión automática: ${title}`,
+    "",
+    `Estado de la tarea: ${status}`,
+  ];
+  for (const agent of agents) {
+    lines.push("", `- ${agent.name}: ${agent.status}`);
+    if (agent.error) lines.push(`  Error: ${agent.error}`);
+    if (agent.result) lines.push(`  Resultado: ${agent.result.replace(/\s+/g, " ").slice(0, 800)}`);
+  }
+  lines.push("", `ID: ${taskId}`);
+  return lines.join("\n");
+}
+
+async function reviewBackgroundTask(
+  transport: MessagingTransport,
+  jid: string,
+  taskId: string,
+): Promise<void> {
+  const previous = backgroundReviewChains.get(jid) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(async () => {
+    const cm = contextManager;
+    const cfg = llmConfig;
+    if (!cm || !cfg) return;
+
+    const task = taskRuntime.get(jid, taskId);
+    if (!task || task.reviewStatus === "reviewed" || task.status === "cancelled") return;
+    if (["queued", "running", "synthesizing"].includes(task.status)) return;
+
+    const finalStatus = task.status;
+    taskRuntime.update(jid, taskId, { status: "synthesizing" });
+    let reviewDelivered = false;
+    try {
+      const agents = taskRuntime.listAgents(jid, taskId).map((agent) => {
+        let result: string | undefined;
+        if (agent.resultPath) {
+          try { result = workspaceManager.readText(jid, agent.resultPath, 18_000); } catch { /* resultado ausente */ }
+        }
+        return {
+          id: agent.id,
+          name: agent.name,
+          type: agent.agentType,
+          status: agent.status,
+          activity: agent.activity,
+          error: agent.error,
+          resultPath: agent.resultPath,
+          result,
+        };
+      });
+      let files: string[] = [];
+      try { files = workspaceManager.listRecursive(jid, task.taskPath, 400); } catch { /* carpeta ausente */ }
+      const artifacts = workspaceManager.listArtifacts(jid)
+        .filter((artifact) => artifact.taskId === taskId && artifact.createdBy !== "browser-web-input")
+        .slice(0, 8);
+
+      const payload = compactReviewText(JSON.stringify({
+        task: { id: task.id, title: task.title, status: finalStatus, taskPath: task.taskPath },
+        agents,
+        files,
+        artifacts,
+      }, null, 2), 45_000);
+
+      let summary = "";
+      try {
+        summary = (await chatCompletion([
+          {
+            role: "system",
+            content: `${STATIC_SYSTEM_PROMPT_CONTENT}\n\nREVISIÓN AUTOMÁTICA DE TAREA:\n- Estás revisando una tarea de fondo que ya terminó.\n- Analiza realmente resultados, errores, carpeta y artefactos incluidos.\n- No afirmes que sigue activa si el estado es terminal.\n- Explica exactamente qué logró cada agente y qué faltó.\n- Si hay capturas o archivos, indica que el sistema los enviará después de tu mensaje.\n- No lances nuevas tareas ni pidas permiso para revisar: esta revisión ya fue solicitada por el sistema.\n- No inventes contenido que no aparezca en el paquete.`,
+          },
+          {
+            role: "user",
+            content: `[Resultado de tarea de fondo confirmado por el sistema]\n\n${payload}`,
+          },
+        ], cm.getModel(jid), cfg, 3, 3500)).trim();
+      } catch (error) {
+        debugError("agents.review", "llm_review_failed", error, { jid, taskId });
+      }
+
+      if (!summary) {
+        summary = buildDeterministicTaskSummary(task.id, task.title, finalStatus, agents);
+      }
+
+      // El análisis LLM y el envío de artefactos no deben monopolizar el lock del
+      // chat. Solo serializamos la escritura breve del resultado en el contexto,
+      // de modo que el usuario pueda seguir conversando mientras Luna revisa.
+      await cm.withLock(jid, async () => {
+        cm.addMessage(jid, {
+          role: "user",
+          content: `[Resultado de tarea de fondo confirmado por el sistema]\nTarea ${task.id} (${task.title}) terminó con estado ${finalStatus}.`,
+        });
+        cm.addMessage(jid, { role: "assistant", content: summary });
+      });
+
+      await sendTextHumanized(transport, jid, summary, 1_000, 2_000);
+
+      for (const artifact of artifacts) {
+        try {
+          await sendWorkspacePath(
+            transport,
+            jid,
+            workspaceManager,
+            artifact.path,
+            `Resultado de ${task.title}`,
+          );
+        } catch (error) {
+          debugError("agents.review", "artifact_send_failed", error, { jid, taskId, path: artifact.path });
+        }
+      }
+
+      taskRuntime.update(jid, taskId, { status: finalStatus });
+      taskRuntime.reviewTask(jid, taskId);
+      reviewDelivered = true;
+      debugInfo("agents.review", "completed", { jid, taskId, artifactsSent: artifacts.length });
+    } catch (error) {
+      debugError("agents.review", "automatic_review_failed", error, { jid, taskId });
+    } finally {
+      taskRuntime.update(jid, taskId, { status: finalStatus });
+      if (!reviewDelivered) {
+        debugWarn("agents.review", "left_pending_for_retry", { jid, taskId, finalStatus });
+      }
+    }
+  }).finally(() => {
+    if (backgroundReviewChains.get(jid) === current) backgroundReviewChains.delete(jid);
+  });
+  backgroundReviewChains.set(jid, current);
+  await current;
+}
+
+function formatAgentEventAge(timestamp?: string): string {
+  if (!timestamp) return "sin eventos registrados";
+  const elapsed = Math.max(0, Date.now() - Date.parse(timestamp));
+  if (!Number.isFinite(elapsed)) return "hora desconocida";
+  if (elapsed < 60_000) return "hace menos de un minuto";
+  if (elapsed < 3_600_000) return `hace ${Math.floor(elapsed / 60_000)} min`;
+  return `hace ${Math.floor(elapsed / 3_600_000)} h`;
+}
+
+function isTaskProgressQuestion(value: string): boolean {
+  const normalized = normalizeNaturalText(value);
+  return /(?:como|cómo|estado|avance|progreso|que tal|qué tal).{0,35}(?:tarea|tareas|proceso|procesos|agente|agentes)/iu.test(normalized)
+    || /(?:tarea|tareas|proceso|procesos|agente|agentes).{0,35}(?:como va|cómo va|como van|cómo van|estado|avance|progreso)/iu.test(normalized)
+    || /^(?:como|cómo) va(?:n)?(?: el| la| los| las)? (?:proceso|procesos|tarea|tareas|agente|agentes)/iu.test(normalized);
+}
+
+function formatTaskProgressForUser(jid: string): string {
+  const tasks = taskRuntime.list(jid);
+  const agents = taskRuntime.listAgents(jid);
+  const activeAgents = agents.filter((agent) => ["queued", "running", "waiting_user"].includes(agent.status));
+  const activeTasks = tasks.filter((task) => ["queued", "running", "synthesizing"].includes(task.status));
+  const recentTerminal = tasks.filter((task) => ["completed", "partial", "failed", "cancelled", "interrupted"].includes(task.status)).slice(0, 6);
+  const lines = ["📋 ESTADO REAL DE TAREAS"];
+
+  if (activeAgents.length === 0 && activeTasks.length === 0) {
+    lines.push("", "No hay agentes ejecutándose en este momento.");
+  } else {
+    if (activeAgents.length > 0) {
+      lines.push("", "Activos:");
+      for (const agent of activeAgents.slice(0, 12)) {
+        const task = tasks.find((item) => item.id === agent.taskId);
+        const state = agent.status === "waiting_user"
+          ? `esperando ${agent.waitingFieldName ?? "un dato"}`
+          : agent.status === "queued"
+            ? "en cola"
+            : "en ejecución";
+        lines.push(
+          `• ${agent.id} — ${agent.name}`,
+          `  Estado: ${state}`,
+          `  Ahora: ${agent.activity ?? "Preparando el siguiente paso"}`,
+          `  Último evento: ${formatAgentEventAge(agent.lastEventAt)}`,
+          `  Tarea: ${task?.title ?? agent.taskId}`,
+        );
+      }
+    }
+    const representedTaskIds = new Set(activeAgents.map((agent) => agent.taskId));
+    for (const task of activeTasks.filter((item) => !representedTaskIds.has(item.id))) {
+      if (task.status === "queued") {
+        lines.push("", `⏳ ${task.title}: registrada y en cola; todavía no hay un agente confirmado como iniciado.`);
+      } else if (task.status === "synthesizing") {
+        lines.push("", `🧠 ${task.title}: Luna está revisando resultados, carpeta y artefactos.`);
+      } else {
+        lines.push("", `🔄 ${task.title}: el supervisor está conciliando sus agentes activos.`);
+      }
+    }
+  }
+
+  if (recentTerminal.length > 0) {
+    lines.push("", "Recientes:");
+    for (const task of recentTerminal) {
+      const review = task.reviewStatus === "reviewed" ? "revisada" : "pendiente de revisión/reintento";
+      lines.push(`• ${task.title}: ${task.status}, ${review} — ${task.id}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function retryPendingBackgroundReviews(transport: MessagingTransport, jid: string): void {
+  const pending = taskRuntime.list(jid)
+    .filter((task) => task.reviewStatus === "pending" && ["completed", "partial", "failed", "interrupted"].includes(task.status))
+    .slice(0, 3);
+  for (const task of pending) {
+    void reviewBackgroundTask(transport, jid, task.id).catch((error) => {
+      debugError("agents.review", "retry_failed", error, { jid, taskId: task.id });
+    });
   }
 }
 
@@ -1843,6 +2041,33 @@ function normalizeNaturalText(text: string): string {
  * Esta extracción conserva símbolos de contraseña como !@#$ y solo elimina una
  * aclaración humana entre paréntesis escrita después del secreto.
  */
+function isLikelyUnprefixedBrowserInput(value: string, pending: PendingBrowserInputRequest): boolean {
+  const raw = value.trim();
+  if (!raw || raw.length > 300) return false;
+  const normalized = normalizeNaturalText(raw);
+  const controls = new Set(["cancelalo", "cancela", "detenlo", "deten", "dejalo", "olvidalo", "aborta", "continua", "continuar", "sigue", "seguir", "corregir usuario"]);
+  if (controls.has(normalized)) return true;
+  if (/(?:no es|incorrect|equivoc|cambi|corrig).{0,30}(?:usuario|cuenta|correo|email)/iu.test(raw)) return true;
+
+  if (pending.kind === "otp") return /^\d{4,10}$/u.test(raw.replace(/[\s-]+/g, ""));
+  if (pending.kind === "username") {
+    if (/\s/u.test(raw)) return false;
+    if (["hola", "gracias", "ok", "si", "no", "oye", "continua", "sigue"].includes(normalized)) return false;
+    return /^[\p{L}\p{N}._+@-]{2,160}$/u.test(raw);
+  }
+  if (pending.kind === "password") {
+    if (/\s/u.test(raw) || raw.length < 4) return false;
+    if (/^https?:\/\//iu.test(raw)) return false;
+    if (["hola", "gracias", "como", "estado", "continua", "sigue"].includes(normalized)) return false;
+    const hasDigit = /\d/u.test(raw);
+    const hasSymbol = /[^\p{L}\p{N}]/u.test(raw);
+    const hasCaseMix = /[a-záéíóúñ]/u.test(raw) && /[A-ZÁÉÍÓÚÑ]/u.test(raw);
+    return hasDigit || hasSymbol || hasCaseMix;
+  }
+  // Un dato libre puede ser indistinguible de una conversación normal; exige ID.
+  return false;
+}
+
 function extractPendingBrowserSecret(text: string): string {
   let value = text.trim();
   if (!value) return "";
@@ -1999,11 +2224,14 @@ function parseNaturalLocalCommand(text: string, jid: string): ParsedCommand | nu
     .replace(/\s+/g, " ")
     .trim();
 
-  const cancelPhrases = new Set([
-    "cancelar", "cancela", "cancelalo", "cancelar esto", "salir", "sal",
-    "olvidalo", "dejalo", "abortar", "aborta", "detener", "detenlo",
+  // Las cancelaciones ambiguas ("cancélalo", "deténlo") se dejan al
+  // orquestador cuando ya hay sesión: así puede elegir una tarea/agente concreto.
+  // Solo las peticiones inequívocamente globales se resuelven aquí.
+  const cancelAllPhrases = new Set([
+    "cancelar todo", "cancela todo", "deten todo", "detener todo",
+    "aborta todo", "abortar todo", "para todo",
   ]);
-  if (cancelPhrases.has(normalized)) {
+  if (cancelAllPhrases.has(normalized)) {
     return { name: "cancelar", args: [], body: "" };
   }
 
@@ -2114,6 +2342,14 @@ export async function handleMessage(
     }
   }
 
+  if (authManager.isLoggedIn(remoteJid)) {
+    retryPendingBackgroundReviews(transport, remoteJid);
+    if (isTaskProgressQuestion(text)) {
+      await sendTextHumanized(transport, remoteJid, formatTaskProgressForUser(remoteJid));
+      return;
+    }
+  }
+
   // ── Credenciales y contraseña incluidas directamente en lenguaje natural ──
   // Se procesan antes del LLM y antes de cualquier menú pendiente para evitar
   // pedir de nuevo secretos que el usuario ya proporcionó en el mismo mensaje.
@@ -2121,54 +2357,125 @@ export async function handleMessage(
   // Una contraseña de un sitio web nunca se envía al LLM. Si viene en el
   // mismo mensaje se reemplaza por una referencia opaca; si falta, el sistema
   // la solicita directamente y reanuda la instrucción original al recibirla.
-  const pendingBrowserInput = browserCredentialStore.getPendingInput(remoteJid);
-  if (pendingBrowserInput) {
+  const allPendingBrowserInputs = browserCredentialStore.getPendingInputs(remoteJid);
+  const directAgentMatch = /^\s*(A-[A-Z0-9]{6})\s*(?::|-)?\s+([\s\S]+)$/iu.exec(text);
+  const numericMatch = /^\s*(\d+)\s*(?::|-)?\s+([\s\S]+)$/u.exec(text);
+  const cancelNamedMatch = /(?:cancela|cancelar|deten|detener|aborta|abortar).{0,30}(A-[A-Z0-9]{6})/iu.exec(text);
+  const singlePending = allPendingBrowserInputs.length === 1 ? allPendingBrowserInputs[0] : undefined;
+  const looksLikePendingValue = allPendingBrowserInputs.some((pending) => isLikelyUnprefixedBrowserInput(text, pending));
+  const shouldHandlePending = Boolean(
+    directAgentMatch
+    || numericMatch
+    || cancelNamedMatch
+    || (singlePending && isLikelyUnprefixedBrowserInput(text, singlePending))
+    || (allPendingBrowserInputs.length > 1 && looksLikePendingValue),
+  );
+  const pendingBrowserInputs = shouldHandlePending ? allPendingBrowserInputs : [];
+
+  if (pendingBrowserInputs.length > 0) {
     if (command && command.name === "cancelar") {
       await sendTextHumanized(transport, remoteJid, cancelCurrentOperation(remoteJid));
       return;
     }
+    if (cancelNamedMatch) {
+      const selector = cancelNamedMatch[1]!;
+      const target = browserCredentialStore.getPendingInput(remoteJid, selector);
+      browserCredentialStore.cancelPendingInput(remoteJid, new Error("Solicitud cancelada por el usuario."), selector);
+      taskRuntime.cancelAgent(remoteJid, selector);
+      await sendTextHumanized(transport, remoteJid, target
+        ? `✅ Agente ${target.agentId ?? selector} (${target.agentName ?? "navegador"}) cancelado.`
+        : `No encontré una espera activa para ${selector}.`);
+      return;
+    }
 
-    const normalizedPendingText = normalizeNaturalText(text);
+    const selectedPending = directAgentMatch
+      ? browserCredentialStore.getPendingInput(remoteJid, directAgentMatch[1])
+      : numericMatch
+        ? pendingBrowserInputs[Number(numericMatch[1]) - 1]
+        : pendingBrowserInputs.length === 1
+          ? pendingBrowserInputs[0]
+          : undefined;
+    const pendingValue = directAgentMatch?.[2] ?? numericMatch?.[2] ?? text;
+
+    if (!selectedPending) {
+      const lines = [
+        "🧩 Hay varias tareas esperando datos.",
+        "",
+        ...pendingBrowserInputs.map((pending, index) =>
+          `${index + 1}. ${pending.agentId ?? pending.requestId} — ${pending.agentName ?? "Navegador"} — espera ${pending.fieldName}`),
+        "",
+        "Responde con el ID del agente y el dato.",
+        "Ejemplo: A-DB6807 fastuser",
+        "También puedes usar: 2 fastuser",
+      ];
+      await sendTextHumanized(transport, remoteJid, lines.join("\n"));
+      return;
+    }
+
+    const selector = selectedPending.requestId ?? selectedPending.agentId;
+    const normalizedPendingText = normalizeNaturalText(pendingValue);
+    if (["cancelalo", "cancela", "detenlo", "deten", "dejalo", "olvidalo", "aborta"].includes(normalizedPendingText)) {
+      browserCredentialStore.cancelPendingInput(remoteJid, new Error("Solicitud cancelada por el usuario."), selector);
+      if (selectedPending.agentId) taskRuntime.cancelAgent(remoteJid, selectedPending.agentId);
+      await sendTextHumanized(
+        transport,
+        remoteJid,
+        selectedPending.agentId
+          ? `✅ Agente ${selectedPending.agentId} (${selectedPending.agentName ?? "navegador"}) cancelado.`
+          : "✅ Solicitud pendiente del navegador cancelada.",
+      );
+      return;
+    }
+
     if (["continua", "continuar", "sigue", "seguir"].includes(normalizedPendingText)) {
-      const secret = pendingBrowserInput.kind === "password" || pendingBrowserInput.kind === "otp";
+      const secret = selectedPending.kind === "password" || selectedPending.kind === "otp";
       const targetLines = [
         secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA",
         "",
-        secret
-          ? `Este es el mensaje seguro del sistema: envía ahora ${pendingBrowserInput.fieldName}.`
-          : `La misma tarea del navegador está pausada esperando ${pendingBrowserInput.fieldName}.`,
+        `El agente ${selectedPending.agentId ?? "del navegador"} sigue esperando ${selectedPending.fieldName}.`,
       ];
-      if (pendingBrowserInput.url) targetLines.push(`Sitio: ${pendingBrowserInput.url}`);
-      if (pendingBrowserInput.username) targetLines.push(`Cuenta: ${pendingBrowserInput.username}`);
-      targetLines.push(
-        "",
-        secret
-          ? "El agente no verá el valor. Tu respuesta se capturará fuera del modelo y se inyectará únicamente en la misma tarea del navegador, que continuará sin reiniciar la sesión."
-          : "Responde con el dato solicitado y la misma tarea continuará desde la página actual.",
-      );
+      if (selectedPending.url) targetLines.push(`Sitio: ${selectedPending.url}`);
+      if (selectedPending.username) targetLines.push(`Cuenta: ${selectedPending.username}`);
+      targetLines.push("", `Responde con: ${selectedPending.agentId ?? "1"} <dato>`);
       await sendTextHumanized(transport, remoteJid, targetLines.join("\n"));
       return;
     }
 
-    // Una espera creada por browser-web tiene requestId. En este caso NO se
-    // vuelve a invocar handleAiChat: resolvemos la Promise de la ejecución viva
-    // y el mismo subagente continúa con la misma sesión del navegador.
-    if (pendingBrowserInput.requestId) {
-      if (pendingBrowserInput.kind === "password") {
-        const password = extractPendingBrowserSecret(text);
-        if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
+    const identityCorrection = selectedPending.kind === "password"
+      && /(?:no\s+es|incorrect|equivoc|cambi|corrig|pide|solicita).{0,40}(?:usuario|cuenta|correo|email)|(?:usuario|cuenta|correo|email).{0,40}(?:incorrect|equivoc|otra|nuevo)/iu.test(pendingValue);
+    if (identityCorrection && selectedPending.agentId) {
+      const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
+        kind: "correction",
+        action: "retry_identity",
+        message: pendingValue.trim(),
+      }, selector);
+      if (resumed) {
+        await sendText(transport, remoteJid, [
+          "🧩 MENSAJE DEL SISTEMA",
+          "",
+          `Entendido. El agente ${selectedPending.agentId} volverá a pedir primero el usuario/correo y después la contraseña, sin cerrar la página actual.`,
+        ].join("\n"), { waitForDelivery: false });
+      }
+      return;
+    }
+
+    // Espera viva de un agente: se resuelve la Promise exacta mediante requestId.
+    if (selectedPending.agentId && selectedPending.requestId) {
+      if (selectedPending.kind === "password") {
+        const password = extractPendingBrowserSecret(pendingValue);
+        if (!password || !selectedPending.url || !selectedPending.username) {
           await sendTextHumanized(transport, remoteJid, [
             "🔐 MENSAJE DEL SISTEMA",
             "",
             "No pude asociar la contraseña con una cuenta concreta.",
-            "La tarea sigue pausada; primero debe conocerse el sitio y el correo/usuario.",
+            `El agente ${selectedPending.agentId} sigue pausado. Escribe \"corregir usuario\" para volver a pedir la cuenta.`,
           ].join("\n"));
           return;
         }
         const credential = browserCredentialStore.create({
           jid: remoteJid,
-          url: pendingBrowserInput.url,
-          username: pendingBrowserInput.username,
+          url: selectedPending.url,
+          username: selectedPending.username,
           password,
         });
         await deleteSensitiveIncomingMessage(transport, message);
@@ -2177,104 +2484,95 @@ export async function handleMessage(
           credentialRef: credential.ref,
           url: credential.url,
           username: credential.username,
-        });
+        }, selector);
         if (!resumed) {
           browserCredentialStore.delete(credential.ref);
-          await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa. Vuelve a solicitar la navegación.");
+          await sendTextHumanized(transport, remoteJid, "⚠️ Esa espera ya no estaba activa.");
           return;
         }
-        await sendText(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nContraseña recibida de forma segura. La misma tarea del navegador continúa ahora desde la sesión que estaba abierta.", { waitForDelivery: false });
+        await sendText(transport, remoteJid, `🔐 MENSAJE DEL SISTEMA\n\nContraseña recibida para ${selectedPending.agentId}. La misma sesión continúa.`, { waitForDelivery: false });
         return;
       }
 
-      if (pendingBrowserInput.kind === "otp") {
-        const value = extractPendingBrowserSecret(text);
+      if (selectedPending.kind === "otp") {
+        const value = extractPendingBrowserSecret(pendingValue);
         if (!value) {
-          await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el código solicitado. La misma tarea permanece pausada.");
+          await sendTextHumanized(transport, remoteJid, `🔐 MENSAJE DEL SISTEMA\n\nEnvía el código para ${selectedPending.agentId}.`);
           return;
         }
         const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
         await deleteSensitiveIncomingMessage(transport, message);
-        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: "otp", secretRef: secret.ref });
+        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: "otp", secretRef: secret.ref }, selector);
         if (!resumed) {
           browserCredentialStore.delete(secret.ref);
-          await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+          await sendTextHumanized(transport, remoteJid, "⚠️ Esa espera ya no estaba activa.");
           return;
         }
-        await sendText(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido de forma segura. La misma tarea del navegador continúa ahora.", { waitForDelivery: false });
+        await sendText(transport, remoteJid, `🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido para ${selectedPending.agentId}. La tarea continúa.`, { waitForDelivery: false });
         return;
       }
 
-      const value = pendingBrowserInput.kind === "username"
-        ? extractPendingBrowserUsername(text)
-        : text.trim();
+      const value = selectedPending.kind === "username"
+        ? extractPendingBrowserUsername(pendingValue)
+        : pendingValue.trim();
       if (!value) {
-        await sendTextHumanized(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName}. La misma tarea permanece pausada.`);
+        await sendTextHumanized(transport, remoteJid, `🧩 Envía ${selectedPending.fieldName} para ${selectedPending.agentId}.`);
         return;
       }
       const resumed = browserCredentialStore.resolvePendingInput(remoteJid, {
-        kind: pendingBrowserInput.kind,
+        kind: selectedPending.kind,
         value,
-      });
+      }, selector);
       if (!resumed) {
-        await sendTextHumanized(transport, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
+        await sendTextHumanized(transport, remoteJid, "⚠️ Esa espera ya no estaba activa.");
         return;
       }
-      await sendText(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nDato recibido. La misma tarea del navegador continúa ahora desde la página actual.`, { waitForDelivery: false });
+      await sendText(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nDato recibido para ${selectedPending.agentId}. La misma página continúa abierta.`, { waitForDelivery: false });
       return;
     }
 
-    // Compatibilidad con el flujo del agente principal browser_request_credential:
-    // ese flujo todavía reinyecta la misión al orquestador porque aún no existe
-    // una ejecución browser-web viva que pueda reanudarse.
-    if (pendingBrowserInput.kind === "password") {
-      const password = extractPendingBrowserSecret(text);
-      if (!password || !pendingBrowserInput.url || !pendingBrowserInput.username) {
-        await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nNo pude asociar la contraseña con una cuenta concreta. Indica primero el sitio y el correo/usuario.");
+    // Compatibilidad con browser_request_credential del orquestador principal.
+    if (selectedPending.kind === "password") {
+      const password = extractPendingBrowserSecret(pendingValue);
+      if (!password || !selectedPending.url || !selectedPending.username) {
+        await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nNo pude asociar la contraseña con una cuenta concreta.");
         return;
       }
       const credential = browserCredentialStore.create({
         jid: remoteJid,
-        url: pendingBrowserInput.url,
-        username: pendingBrowserInput.username,
+        url: selectedPending.url,
+        username: selectedPending.username,
         password,
       });
-      browserCredentialStore.clearPendingInput(remoteJid);
+      browserCredentialStore.clearPendingInput(remoteJid, selector);
       await deleteSensitiveIncomingMessage(transport, message);
-      const resumedText = sanitizeBrowserCredentialText(pendingBrowserInput.originalText, credential);
-      await handleAiChat(transport, remoteJid, resumedText);
+      await handleAiChat(transport, remoteJid, sanitizeBrowserCredentialText(selectedPending.originalText, credential));
       return;
     }
 
-    if (pendingBrowserInput.kind === "otp") {
-      const value = extractPendingBrowserSecret(text);
-      if (!value) {
-        await sendTextHumanized(transport, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía el código o secreto solicitado para continuar.");
-        return;
-      }
+    if (selectedPending.kind === "otp") {
+      const value = extractPendingBrowserSecret(pendingValue);
+      if (!value) return;
       const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
-      browserCredentialStore.clearPendingInput(remoteJid);
+      browserCredentialStore.clearPendingInput(remoteJid, selector);
       await deleteSensitiveIncomingMessage(transport, message);
       await handleAiChat(
         transport,
         remoteJid,
-        `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario respondió al dato secreto ${pendingBrowserInput.fieldName}. El valor fue retirado antes del LLM. Usa secret_ref=${secret.ref} únicamente con browser_fill_secret. Nunca pidas, repitas ni muestres el valor.]`,
+        `${selectedPending.originalText}\n\n[SISTEMA: El valor secreto fue retirado. Usa secret_ref=${secret.ref} únicamente con browser_fill_secret.]`,
       );
       return;
     }
 
-    const value = pendingBrowserInput.kind === "username"
-      ? extractPendingBrowserUsername(text)
-      : text.trim();
-    if (!value) {
-      await sendTextHumanized(transport, remoteJid, `🧩 MENSAJE DEL SISTEMA\n\nEnvía ${pendingBrowserInput.fieldName} para continuar.`);
-      return;
-    }
-    browserCredentialStore.clearPendingInput(remoteJid);
+    const value = selectedPending.kind === "username"
+      ? extractPendingBrowserUsername(pendingValue)
+      : pendingValue.trim();
+    if (!value) return;
+    browserCredentialStore.clearPendingInput(remoteJid, selector);
     await handleAiChat(
       transport,
       remoteJid,
-      `${pendingBrowserInput.originalText}\n\n[SISTEMA: El usuario proporcionó ${pendingBrowserInput.fieldName}: ${value}. Usa este dato únicamente para continuar la tarea solicitada.]`,
+      `${selectedPending.originalText}\n\n[SISTEMA: El usuario proporcionó ${selectedPending.fieldName}: ${value}.]`,
     );
     return;
   }
@@ -2537,7 +2835,9 @@ async function handleAiChat(
 
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
   // usando shallow clone para no contaminar el contexto persistido
-  const dynamicCtx = cm.buildDynamicContext(remoteJid);
+  const dynamicCtx = `${cm.buildDynamicContext(remoteJid)}
+
+${taskRuntime.buildContextSummary(remoteJid)}`;
   const apiMessages = messages.map((m) => ({ ...m }));
   const lastMsg = apiMessages[apiMessages.length - 1];
   if (lastMsg && lastMsg.role === "user") {
@@ -2650,7 +2950,7 @@ async function handleAiChat(
       if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
         if (name === "workspace_clear") {
           const hasActiveTask = taskRuntime.list(remoteJid).some(
-            (task) => task.status === "running" || task.status === "synthesizing",
+            (task) => task.status === "queued" || task.status === "running" || task.status === "synthesizing",
           );
           if (hasActiveTask) {
             result = "Error: no se puede limpiar el workdir mientras hay una tarea de subagentes activa. Cancélala o espera a que termine.";
@@ -2683,6 +2983,12 @@ async function handleAiChat(
             await sendText(transport, remoteJid, text, { waitForDelivery: false });
             await activitySession.refresh();
           },
+          onSystemArtifact: async (path, caption) => {
+            await sendWorkspacePath(transport, remoteJid, workspaceManager, path, caption);
+          },
+          onBackgroundCompleted: async (taskId) => {
+            await reviewBackgroundTask(transport, remoteJid, taskId);
+          },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressMessages = formatSpawnAgentsProgress(event);
@@ -2709,6 +3015,12 @@ async function handleAiChat(
           onSystemMessage: async (text) => {
             await sendText(transport, remoteJid, text, { waitForDelivery: false });
             await activitySession.refresh();
+          },
+          onSystemArtifact: async (path, caption) => {
+            await sendWorkspacePath(transport, remoteJid, workspaceManager, path, caption);
+          },
+          onBackgroundCompleted: async (taskId) => {
+            await reviewBackgroundTask(transport, remoteJid, taskId);
           },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
@@ -2768,6 +3080,12 @@ async function handleAiChat(
             await sendText(transport, remoteJid, text, { waitForDelivery: false });
             await activitySession.refresh();
           },
+          onSystemArtifact: async (path, caption) => {
+            await sendWorkspacePath(transport, remoteJid, workspaceManager, path, caption);
+          },
+          onBackgroundCompleted: async (taskId) => {
+            await reviewBackgroundTask(transport, remoteJid, taskId);
+          },
           filterRequests: spawnDeduper.filter,
           onProgress: async (event) => {
             const progressMessages = formatSpawnAgentsProgress(event);
@@ -2781,12 +3099,9 @@ async function handleAiChat(
         return result;
       }
 
-      if (["task_list", "task_status", "task_cancel"].includes(name)) {
-        result = executeAgentTaskTool(name, args, { jid: remoteJid, tasks: taskRuntime });
+      if (["task_list", "task_status", "task_inspect", "task_review", "task_cancel", "task_cancel_all", "agent_list", "agent_status", "agent_review", "agent_cancel"].includes(name)) {
+        result = executeAgentTaskTool(name, args, { jid: remoteJid, tasks: taskRuntime, workspace: workspaceManager });
         toolResults.push({ name, result });
-        if (name === "task_cancel" && result.startsWith("✅")) {
-          runController.abort(new Error("user-cancelled-current-operation"));
-        }
         return result;
       }
 

@@ -57,13 +57,18 @@ export interface PendingBrowserInputRequest {
   message?: string;
   /** Identifica una espera viva de browser-web. Si no existe, es un flujo legado del agente principal. */
   requestId?: string;
+  taskId?: string;
+  agentId?: string;
+  agentName?: string;
+  screenshotPath?: string;
   createdAt: number;
 }
 
 export type BrowserInputResolution =
   | { kind: "username" | "text"; value: string }
   | { kind: "password"; credentialRef: string; url: string; username: string }
-  | { kind: "otp"; secretRef: string };
+  | { kind: "otp"; secretRef: string }
+  | { kind: "correction"; action: "retry_identity" | "retry_field"; message: string };
 
 interface PendingBrowserInputWaiter {
   requestId: string;
@@ -193,28 +198,41 @@ export class BrowserCredentialStore {
     return secret;
   }
 
-  setPendingInput(request: Omit<PendingBrowserInputRequest, "createdAt">): void {
+  setPendingInput(request: Omit<PendingBrowserInputRequest, "createdAt">): PendingBrowserInputRequest {
     cleanupMap(this.pending, PENDING_TTL_MS);
-    this.pending.set(request.jid, { ...request, createdAt: Date.now() });
+    const requestId = request.requestId || `browser-input-${randomUUID()}`;
+    const stored: PendingBrowserInputRequest = { ...request, requestId, createdAt: Date.now() };
+    this.pending.set(requestId, stored);
+    return stored;
   }
 
-  getPendingInput(jid: string): PendingBrowserInputRequest | undefined {
+  getPendingInputs(jid: string): PendingBrowserInputRequest[] {
     cleanupMap(this.pending, PENDING_TTL_MS);
-    return this.pending.get(jid);
+    return [...this.pending.values()]
+      .filter((request) => request.jid === jid)
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  getPendingInput(jid: string, selector?: string): PendingBrowserInputRequest | undefined {
+    const pending = this.getPendingInputs(jid);
+    if (!selector) return pending.length === 1 ? pending[0] : pending.at(-1);
+    const normalized = selector.trim().toLowerCase();
+    return pending.find((request) => request.requestId?.toLowerCase() === normalized)
+      ?? pending.find((request) => request.agentId?.toLowerCase() === normalized)
+      ?? pending.find((request) => request.agentName?.toLowerCase().includes(normalized));
   }
 
   /**
    * Pausa una ejecución viva de browser-web hasta que el usuario responda.
-   * La Promise se resuelve desde el manejador de mensajes sin crear otra tarea ni
-   * reiniciar el navegador, por lo que se conserva la misma sesión y runId.
+   * Varias ejecuciones del mismo chat pueden esperar simultáneamente: cada una
+   * conserva requestId/agentId propios y ninguna reemplaza a las demás.
    */
   waitForInput(
-    request: Omit<PendingBrowserInputRequest, "createdAt" | "requestId">,
+    request: Omit<PendingBrowserInputRequest, "createdAt">,
     signal?: AbortSignal,
   ): Promise<BrowserInputResolution> {
-    this.cancelPendingInput(request.jid, new Error("browser-input-replaced"));
-    const requestId = `browser-input-${randomUUID()}`;
-    this.setPendingInput({ ...request, requestId });
+    const stored = this.setPendingInput(request);
+    const requestId = stored.requestId!;
 
     return new Promise<BrowserInputResolution>((resolve, reject) => {
       const cleanup = (): void => {
@@ -223,8 +241,7 @@ export class BrowserCredentialStore {
         clearTimeout(waiter.timeout);
         if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
         this.pendingWaiters.delete(requestId);
-        const current = this.pending.get(request.jid);
-        if (current?.requestId === requestId) this.pending.delete(request.jid);
+        this.pending.delete(requestId);
       };
 
       const timeout = setTimeout(() => {
@@ -253,8 +270,8 @@ export class BrowserCredentialStore {
     });
   }
 
-  resolvePendingInput(jid: string, value: BrowserInputResolution): boolean {
-    const pending = this.getPendingInput(jid);
+  resolvePendingInput(jid: string, value: BrowserInputResolution, selector?: string): boolean {
+    const pending = this.getPendingInput(jid, selector);
     if (!pending?.requestId) return false;
     const waiter = this.pendingWaiters.get(pending.requestId);
     if (!waiter || waiter.jid !== jid) return false;
@@ -262,22 +279,28 @@ export class BrowserCredentialStore {
     return true;
   }
 
-  cancelPendingInput(jid: string, reason: unknown = new Error("browser-input-cancelled")): boolean {
-    const pending = this.pending.get(jid);
-    if (!pending) return false;
-    if (pending.requestId) {
-      const waiter = this.pendingWaiters.get(pending.requestId);
-      if (waiter) {
-        waiter.reject(reason);
-        return true;
+  cancelPendingInput(jid: string, reason: unknown = new Error("browser-input-cancelled"), selector?: string): boolean {
+    const targets = selector
+      ? [this.getPendingInput(jid, selector)].filter((item): item is PendingBrowserInputRequest => Boolean(item))
+      : this.getPendingInputs(jid);
+    if (targets.length === 0) return false;
+    for (const pending of targets) {
+      if (pending.requestId) {
+        const waiter = this.pendingWaiters.get(pending.requestId);
+        if (waiter) waiter.reject(reason);
+        else this.pending.delete(pending.requestId);
       }
     }
-    this.pending.delete(jid);
     return true;
   }
 
-  clearPendingInput(jid: string): void {
-    this.pending.delete(jid);
+  clearPendingInput(jid: string, selector?: string): void {
+    const targets = selector
+      ? [this.getPendingInput(jid, selector)].filter((item): item is PendingBrowserInputRequest => Boolean(item))
+      : this.getPendingInputs(jid);
+    for (const pending of targets) {
+      if (pending.requestId) this.pending.delete(pending.requestId);
+    }
   }
 
   /** Compatibilidad con browser_request_credential anterior. */
@@ -289,12 +312,13 @@ export class BrowserCredentialStore {
       originalText: request.originalText,
       url: request.url,
       username: request.username,
+      requestId: `browser-legacy-${randomUUID()}`,
     });
   }
 
   getPending(jid: string): PendingBrowserCredentialRequest | undefined {
-    const pending = this.getPendingInput(jid);
-    if (!pending || pending.kind !== "password" || !pending.url || !pending.username) return undefined;
+    const pending = this.getPendingInputs(jid).find((request) => request.kind === "password" && request.url && request.username);
+    if (!pending || !pending.url || !pending.username) return undefined;
     return {
       jid: pending.jid,
       originalText: pending.originalText,

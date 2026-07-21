@@ -33,7 +33,7 @@ describe("integración agéntica", () => {
     expect(bot).not.toContain('name === "parallel_research_report"');
     expect(bot).toContain("executeArtifactTool");
     expect(bot).toContain("executeMessagingTool");
-    expect(context).toContain("spawn_agents NO genera informes ni PDFs y NO es terminal");
+    expect(context).toContain("spawn_agents puede ejecutarse en segundo plano");
     expect(source("src/artifacts/artifact-tools.ts")).toContain('name: "gitzip"');
   });
 
@@ -82,6 +82,8 @@ describe("integración agéntica", () => {
     expect(spawn).toContain("Promise.allSettled");
     expect(spawn).toContain("events.jsonl");
     expect(spawn).toContain("result.md");
-    expect(spawn).toContain("parentSignal: task.signal");
+    expect(spawn).toContain("parentSignal: tracked.signal");
+    expect(spawn).toContain("registerAgentTerminator");
+    expect(bot).toContain("taskRuntime.buildContextSummary(remoteJid)");
   });
 });

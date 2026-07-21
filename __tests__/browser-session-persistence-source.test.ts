@@ -8,18 +8,25 @@ const spawnRuntime = readFileSync(join(root, "src/agents/spawn-agents-tool.ts"),
 const bot = readFileSync(join(root, "src/bot.ts"), "utf8");
 
 describe("persistencia de navegador y cancelación jerárquica", () => {
-  it("guarda cookies y datos del perfil bajo persistent/browser por usuario", () => {
+  it("aísla el perfil por ejecución y fusiona el estado persistente por usuario", () => {
     expect(browserRuntime).toContain('"persistent", "browser", "users"');
+    expect(browserRuntime).toContain('"session-state.json"');
     expect(browserRuntime).toContain("AGENT_BROWSER_PROFILE: this.profileDir");
     expect(browserRuntime).toContain("AGENT_BROWSER_SESSION_NAME: this.restoreName");
     expect(browserRuntime).toContain("AGENT_BROWSER_STATE");
-    expect(browserRuntime).toContain('["state", "save", this.stateFile, "--json"]');
+    expect(browserRuntime).toContain('["state", "save", this.runStateFile, "--json"]');
+    expect(browserRuntime).toContain("mergeBrowserStorageStates(base, incoming)");
+    expect(browserRuntime).toContain('this.profileLeaseKey = `${userState}:state-save`');
   });
 
-  it("finaliza browser-web guardando estado antes de cerrar la instancia", () => {
+  it("finaliza browser-web guardando estado y cerrando su daemon aislado", () => {
     expect(spawnRuntime).toContain("if (browserExecution) await browserExecution.finalize()");
     expect(browserRuntime).toContain("persistent_state_saved");
     expect(browserRuntime).toContain('await this.run(["close"]');
+    expect(browserRuntime).toContain('["close", "--all"]');
+    expect(browserRuntime).toContain("AGENT_BROWSER_IDLE_TIMEOUT_MS");
+    expect(browserRuntime).toContain("luna-run-");
+    expect(browserRuntime).toContain("this.runRuntimeDir");
   });
 
   it("!cancelar aborta también el orquestador principal y evita seguimientos", () => {

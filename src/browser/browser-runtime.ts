@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAppDir } from "../utils.ts";
 import {
@@ -14,6 +14,7 @@ import type { BrowserCredentialStore, BrowserInputKind } from "./browser-credent
 import { debugInfo, debugLog, debugWarn } from "../debug.ts";
 import { createProcessOutputCollector } from "./process-output.ts";
 import { loadOrCreateBrowserEncryptionKey } from "./browser-encryption.ts";
+import { writeJsonFileAtomically } from "../storage.ts";
 
 export function resolveAgentBrowserBinary(): string {
   const appDir = getAppDir();
@@ -53,6 +54,8 @@ export interface BrowserExecutionOptions {
   jid: string;
   runId: string;
   taskId: string;
+  agentId: string;
+  agentName: string;
   agentDir: string;
   workspace: WorkspaceManager;
   credentials: BrowserCredentialStore;
@@ -65,7 +68,11 @@ export interface BrowserExecutionOptions {
     url?: string;
     username?: string;
     message?: string;
+    requestId: string;
+    screenshotPath?: string;
   }) => void | Promise<void>;
+  /** Notifica al supervisor cuando el navegador espera un recurso, al usuario o reanuda. */
+  onStateChange?: (state: "queued" | "running" | "waiting_user") => void | Promise<void>;
 }
 
 class BrowserCommandTimeoutError extends Error {
@@ -102,15 +109,134 @@ function extractCurrentUrl(output: string): string | undefined {
   return output.match(/https?:\/\/[^\s"}]+/i)?.[0];
 }
 
+
+interface BrowserStorageCookie extends Record<string, unknown> {
+  name?: unknown;
+  domain?: unknown;
+  path?: unknown;
+  partitionKey?: unknown;
+}
+
+interface BrowserStorageOrigin extends Record<string, unknown> {
+  origin?: unknown;
+  localStorage?: unknown;
+}
+
+interface BrowserStorageState extends Record<string, unknown> {
+  cookies?: unknown;
+  origins?: unknown;
+}
+
+function stableStorageKey(value: unknown, fallback: string): string {
+  if (!value || typeof value !== "object") return `${fallback}:${JSON.stringify(value)}`;
+  return JSON.stringify(value);
+}
+
+/**
+ * Combina estados Playwright/agent-browser producidos por ejecuciones paralelas.
+ * El estado más reciente gana para la misma cookie/origen, pero no elimina las
+ * sesiones de otros sitios que haya guardado otro agente concurrente.
+ */
+export function mergeBrowserStorageStates(baseValue: unknown, incomingValue: unknown): BrowserStorageState {
+  const base = baseValue && typeof baseValue === "object" && !Array.isArray(baseValue)
+    ? baseValue as BrowserStorageState
+    : {};
+  const incoming = incomingValue && typeof incomingValue === "object" && !Array.isArray(incomingValue)
+    ? incomingValue as BrowserStorageState
+    : {};
+
+  const cookieMap = new Map<string, unknown>();
+  const addCookies = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const cookie = item && typeof item === "object" ? item as BrowserStorageCookie : undefined;
+      const key = cookie
+        ? `${String(cookie.name ?? "")}|${String(cookie.domain ?? "")}|${String(cookie.path ?? "")}|${String(cookie.partitionKey ?? "")}`
+        : stableStorageKey(item, "cookie");
+      cookieMap.set(key, item);
+    }
+  };
+  addCookies(base.cookies);
+  addCookies(incoming.cookies);
+
+  const originMap = new Map<string, BrowserStorageOrigin>();
+  const addOrigins = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const origin = item as BrowserStorageOrigin;
+      const key = typeof origin.origin === "string" && origin.origin
+        ? origin.origin
+        : stableStorageKey(origin, "origin");
+      const previous = originMap.get(key);
+      const localStorage = new Map<string, unknown>();
+      const addLocal = (entries: unknown): void => {
+        if (!Array.isArray(entries)) return;
+        for (const entry of entries) {
+          const record = entry && typeof entry === "object" ? entry as Record<string, unknown> : undefined;
+          const entryKey = record && typeof record.name === "string"
+            ? record.name
+            : stableStorageKey(entry, "local");
+          localStorage.set(entryKey, entry);
+        }
+      };
+      addLocal(previous?.localStorage);
+      addLocal(origin.localStorage);
+      originMap.set(key, {
+        ...(previous ?? {}),
+        ...origin,
+        ...(localStorage.size > 0 ? { localStorage: [...localStorage.values()] } : {}),
+      });
+    }
+  };
+  addOrigins(base.origins);
+  addOrigins(incoming.origins);
+
+  return {
+    ...base,
+    ...incoming,
+    cookies: [...cookieMap.values()],
+    origins: [...originMap.values()],
+  };
+}
+
 const browserProfileQueues = new Map<string, Promise<void>>();
 
-async function acquireBrowserProfileLease(key: string): Promise<() => void> {
+/**
+ * Lease FIFO cancelable para operaciones persistentes breves. Actualmente se
+ * usa únicamente al fusionar el estado autenticado de navegadores concurrentes;
+ * la navegación y los perfiles físicos ya no se serializan.
+ */
+export async function acquireBrowserProfileLease(key: string, signal?: AbortSignal): Promise<() => void> {
   const previous = browserProfileQueues.get(key) ?? Promise.resolve();
   let releaseCurrent!: () => void;
   const current = new Promise<void>((resolve) => { releaseCurrent = resolve; });
   const tail = previous.then(() => current);
   browserProfileQueues.set(key, tail);
-  await previous;
+
+  let abortHandler: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    if (!signal) return;
+    abortHandler = () => reject(signal.reason ?? new Error("browser-profile-lease-cancelled"));
+    if (signal.aborted) abortHandler();
+    else signal.addEventListener("abort", abortHandler, { once: true });
+  });
+
+  try {
+    await (signal ? Promise.race([previous, aborted]) : previous);
+  } catch (error) {
+    // Nuestra entrada ya fue añadida a la cola. Aunque el consumidor haya sido
+    // cancelado, debemos resolverla cuando llegue su turno para que el siguiente
+    // agente no quede esperando una promesa que nadie liberará.
+    void previous.finally(() => {
+      releaseCurrent();
+      if (browserProfileQueues.get(key) === tail) browserProfileQueues.delete(key);
+    });
+    throw error;
+  } finally {
+    if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+  }
+
   let released = false;
   return () => {
     if (released) return;
@@ -126,33 +252,50 @@ export class BrowserAgentExecution {
   private readonly restoreName: string;
   private readonly binary: string;
   private readonly runtimeCwd: string;
+  private readonly runRuntimeDir: string;
   private readonly persistentHome: string;
   private readonly profileDir: string;
   private readonly stateFile: string;
-  private readonly profileLease: Promise<() => void>;
+  private readonly runStateFile: string;
+  private readonly profileLeaseKey: string;
   private releaseProfileLease?: () => void;
   private recoveryCounter = 0;
   private screenshotCounter = 0;
   private downloadCounter = 0;
   private snapshotCounter = 0;
   private readCounter = 0;
+  private inputRequestCounter = 0;
+  private readonly activeChildren = new Set<any>();
+  private commandTail: Promise<void> = Promise.resolve();
+  private keepAliveTimer?: ReturnType<typeof setInterval>;
+  private keepAliveController?: AbortController;
+  private finalizePromise?: Promise<void>;
+  private sessionTouched = false;
+  private cancelled = false;
+  private finalizing = false;
 
   constructor(private readonly options: BrowserExecutionOptions) {
     const id = stableHash(`${options.jid}:${options.runId}`);
     const userState = stableHash(options.jid);
     this.sessionBase = `luna-${id}`;
     this.session = this.sessionBase;
-    this.restoreName = `luna-${userState}`;
+    this.restoreName = this.sessionBase;
     this.binary = resolveAgentBrowserBinary();
-    this.runtimeCwd = join(getAppDir(), "persistent", "browser", "runtime");
-    this.persistentHome = join(getAppDir(), "persistent", "browser", "users", userState, "home");
-    this.profileDir = join(getAppDir(), "persistent", "browser", "users", userState, "profile");
+    this.runRuntimeDir = join(getAppDir(), "persistent", "browser", "runs", safeName(options.runId));
+    this.runtimeCwd = this.runRuntimeDir;
+    // Cada agente obtiene HOME y perfil propios. Compartir el directorio físico de
+    // Chrome impedía la concurrencia real y hacía que un agente esperando datos
+    // bloqueara a todos los demás. El estado autenticado portable se comparte
+    // mediante stateFile y solo su escritura final se serializa.
+    this.persistentHome = join(this.runRuntimeDir, "home");
+    this.profileDir = join(this.runRuntimeDir, "profile");
     this.stateFile = join(getAppDir(), "persistent", "browser", "users", userState, "session-state.json");
+    this.runStateFile = join(this.runRuntimeDir, "session-state-export.json");
+    this.profileLeaseKey = `${userState}:state-save`;
     mkdirSync(this.runtimeCwd, { recursive: true });
     mkdirSync(this.persistentHome, { recursive: true });
     mkdirSync(this.profileDir, { recursive: true });
     mkdirSync(dirname(this.stateFile), { recursive: true });
-    this.profileLease = acquireBrowserProfileLease(userState);
   }
 
   private env(): Record<string, string> {
@@ -169,11 +312,13 @@ export class BrowserAgentExecution {
     return {
       ...process.env,
       AGENT_BROWSER_SESSION: this.session,
-      // `session-name` mantiene cookies/localStorage entre reinicios del daemon.
-      // Además usamos un state file explícito dentro de persistent/ para que la
-      // sesión autenticada sobreviva a reinicios de Luna, Docker y cambios de cwd.
+      // El nombre pertenece únicamente a esta ejecución. La persistencia real
+      // entre ejecuciones se restaura desde AGENT_BROWSER_STATE.
       AGENT_BROWSER_SESSION_NAME: this.restoreName,
-      AGENT_BROWSER_NAMESPACE: `luna-${stableHash(this.options.jid)}`,
+      // Un namespace por ejecución evita compartir el daemon persistente entre tareas.
+      // Así close --all e idle-timeout solo afectan a este agente.
+      AGENT_BROWSER_NAMESPACE: `luna-run-${stableHash(`${this.options.jid}:${this.options.runId}`)}`,
+      // Perfil físico aislado para permitir varios browser-web en paralelo.
       AGENT_BROWSER_PROFILE: this.profileDir,
       ...(existsSync(this.stateFile) ? { AGENT_BROWSER_STATE: this.stateFile } : {}),
       AGENT_BROWSER_CONTENT_BOUNDARIES: "true",
@@ -181,10 +326,13 @@ export class BrowserAgentExecution {
       // Debe quedar por debajo del timeout IPC del CLI (30 s). Así el daemon
       // devuelve un error controlado antes de que el cliente quede esperando.
       AGENT_BROWSER_DEFAULT_TIMEOUT: process.env.AGENT_BROWSER_DEFAULT_TIMEOUT?.trim() || "20000",
+      // El daemon pertenece exclusivamente a esta ejecución. Un keepalive interno
+      // evita que expire mientras el agente sigue razonando o espera datos del usuario;
+      // al finalizar dejamos de enviar keepalives y el daemon aislado se apaga solo.
+      AGENT_BROWSER_IDLE_TIMEOUT_MS: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS?.trim() || "10000",
       AGENT_BROWSER_ENCRYPTION_KEY: encryptionKey(),
-      // agent-browser guarda por defecto sus sesiones bajo el home del proceso.
-      // Lo redirigimos al árbol persistente de Luna para no depender del usuario
-      // del host ni perder cookies al recrear un contenedor.
+      // El HOME temporal evita que daemons/sesiones concurrentes se pisen. Se
+      // elimina al terminar; cookies/localStorage duraderos viven en stateFile.
       HOME: this.persistentHome,
       USERPROFILE: this.persistentHome,
       XDG_CACHE_HOME: join(this.persistentHome, ".cache"),
@@ -194,16 +342,30 @@ export class BrowserAgentExecution {
     } as Record<string, string>;
   }
 
+  private async withCommandLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.commandTail;
+    let release!: () => void;
+    this.commandTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private async run(
     args: string[],
     signal: AbortSignal,
     stdinText?: string,
     timeoutMs: number = BROWSER_COMMAND_TIMEOUT_MS.action,
   ): Promise<string> {
-    if (!this.releaseProfileLease) this.releaseProfileLease = await this.profileLease;
     if (signal.aborted) throw signal.reason ?? new Error("browser-cancelled");
+    return await this.withCommandLock(async () => {
+      if (signal.aborted) throw signal.reason ?? new Error("browser-cancelled");
+      if (!["state", "close", "doctor"].includes(args[0] ?? "")) this.sessionTouched = true;
 
-    const command = args.slice(0, 2).join(" ") || "unknown";
+      const command = args.slice(0, 2).join(" ") || "unknown";
     const startedAt = Date.now();
     const env = this.env();
     debugLog("browser.runtime", "command_started", {
@@ -228,6 +390,9 @@ export class BrowserAgentExecution {
       cwd: this.runtimeCwd,
       env,
     });
+
+    this.activeChildren.add(child);
+    void child.exited.finally(() => this.activeChildren.delete(child));
 
     let timedOut = false;
     const onAbort = () => {
@@ -326,6 +491,25 @@ export class BrowserAgentExecution {
         void stderrCollector.done;
       }
     }
+    });
+  }
+
+  private startKeepAlive(): void {
+    if (this.keepAliveTimer || this.finalizing || this.cancelled) return;
+    const controller = new AbortController();
+    this.keepAliveController = controller;
+    this.keepAliveTimer = setInterval(() => {
+      if (this.finalizing || this.cancelled || controller.signal.aborted) return;
+      void this.run(["get", "url", "--json"], controller.signal, undefined, 5_000).catch(() => undefined);
+    }, 4_000);
+    this.keepAliveTimer.unref?.();
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = undefined;
+    this.keepAliveController?.abort(new Error("browser-keepalive-stopped"));
+    this.keepAliveController = undefined;
   }
 
   private rotateSessionAfterHang(): void {
@@ -338,9 +522,35 @@ export class BrowserAgentExecution {
     });
   }
 
+
+  private async appendInitialSnapshot(opened: string, signal: AbortSignal): Promise<string> {
+    try {
+      const snapshot = await this.run(["snapshot", "-i", "-c", "-d", "4", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+      this.snapshotCounter += 1;
+      const path = `${this.options.agentDir}/browser/snapshots/${String(this.snapshotCounter).padStart(3, "0")}-initial.json`;
+      this.options.workspace.writeText(this.options.jid, path, `${snapshot}
+`);
+      return `${opened}
+
+[SISTEMA: browser_open ya incluyó el snapshot interactivo inicial. No llames browser_snapshot otra vez hasta que la página cambie.]
+${snapshot}
+
+[SISTEMA: snapshot físico guardado en ${path}]`;
+    } catch (error) {
+      debugWarn("browser.runtime", "initial_snapshot_failed", {
+        runId: this.options.runId,
+        agentId: this.options.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return opened;
+    }
+  }
+
   private async openWithRecovery(url: string, signal: AbortSignal): Promise<string> {
     try {
-      return await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
+      const opened = await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
+      this.startKeepAlive();
+      return await this.appendInitialSnapshot(opened, signal);
     } catch (error) {
       if (!(error instanceof BrowserCommandTimeoutError) || signal.aborted) throw error;
 
@@ -355,10 +565,11 @@ export class BrowserAgentExecution {
             requestedUrl: url,
             currentUrl,
           });
-          return JSON.stringify({
+          this.startKeepAlive();
+          return await this.appendInitialSnapshot(JSON.stringify({
             success: true,
             data: { url: currentUrl, recoveredFromOpenTimeout: true },
-          });
+          }), signal);
         }
       } catch {
         // Continuamos con una sesión limpia.
@@ -372,7 +583,9 @@ export class BrowserAgentExecution {
         url,
         session: this.session,
       });
-      return await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
+      const reopened = await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
+      this.startKeepAlive();
+      return await this.appendInitialSnapshot(reopened, signal);
     }
   }
 
@@ -384,45 +597,138 @@ export class BrowserAgentExecution {
     return { absolute, relative: rel };
   }
 
+
+  private async captureInputRequestScreenshot(signal: AbortSignal): Promise<string | undefined> {
+    this.inputRequestCounter += 1;
+    const file = this.resolveArtifact(
+      "screenshots",
+      `input-request-${String(this.inputRequestCounter).padStart(3, "0")}.png`,
+      `input-request-${this.inputRequestCounter}.png`,
+    );
+    try {
+      await this.run(["screenshot", file.absolute, "--annotate"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.screenshot);
+      this.options.workspace.registerArtifact(this.options.jid, file.relative, "browser-web-input", {
+        taskId: this.options.taskId,
+        temporary: false,
+      });
+      return file.relative;
+    } catch (error) {
+      debugWarn("browser.runtime", "input_request_screenshot_failed", {
+        runId: this.options.runId,
+        agentId: this.options.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  private async terminateActiveProcesses(): Promise<void> {
+    for (const child of [...this.activeChildren]) {
+      try { child.kill("SIGTERM"); } catch { /* proceso ya cerrado */ }
+    }
+    await Promise.race([
+      Promise.allSettled([...this.activeChildren].map((child) => child.exited.catch(() => -1))),
+      new Promise((resolve) => setTimeout(resolve, 1_500)),
+    ]);
+    for (const child of [...this.activeChildren]) {
+      try { child.kill("SIGKILL"); } catch { /* best effort */ }
+    }
+  }
+
+  /** Interrumpe inmediatamente comandos CLI activos y cierra el navegador de esta ejecución. */
+  async cancel(reason = new Error("browser-agent-cancelled")): Promise<void> {
+    this.cancelled = true;
+    this.stopKeepAlive();
+    await this.terminateActiveProcesses();
+    debugWarn("browser.runtime", "execution_cancelled", {
+      runId: this.options.runId,
+      session: this.session,
+      reason: reason.message,
+    });
+    // No esperamos a que el runner/LLM reaccione al AbortSignal para liberar el
+    // navegador: la cancelación del supervisor debe cerrar recursos de inmediato.
+    await this.finalize();
+  }
+
   /**
    * Persiste el estado autenticado y cierra únicamente la instancia de esta
-   * ejecución. Se llama desde el runtime del subagente incluso si la misión
-   * falla o es cancelada. El state file queda cifrado por agent-browser usando
-   * AGENT_BROWSER_ENCRYPTION_KEY y se vuelve a cargar en la siguiente tarea.
+   * ejecución. Es idempotente: cancelación, error y finally pueden invocarla a
+   * la vez sin lanzar dos secuencias de cierre sobre el mismo daemon.
    */
   async finalize(): Promise<void> {
+    if (this.finalizePromise) return await this.finalizePromise;
+    this.finalizing = true;
+    this.stopKeepAlive();
+    this.finalizePromise = this.finalizeInternal();
+    return await this.finalizePromise;
+  }
+
+  private mergePersistentState(): void {
+    const incoming = JSON.parse(readFileSync(this.runStateFile, "utf8")) as unknown;
+    let base: unknown = {};
+    if (existsSync(this.stateFile)) {
+      try { base = JSON.parse(readFileSync(this.stateFile, "utf8")) as unknown; } catch { base = {}; }
+    }
+    writeJsonFileAtomically(this.stateFile, mergeBrowserStorageStates(base, incoming));
+  }
+
+  private async finalizeInternal(): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("browser-finalize-timeout")), 20_000);
     try {
-      try {
-        await this.run(["state", "save", this.stateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
-        debugInfo("browser.runtime", "persistent_state_saved", {
-          runId: this.options.runId,
-          session: this.session,
-          stateFile: this.stateFile,
-        });
-      } catch (error) {
-        debugWarn("browser.runtime", "persistent_state_save_failed", {
-          runId: this.options.runId,
-          session: this.session,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      if (this.sessionTouched) {
+        // Durante una cancelación priorizamos liberar el navegador/perfil cuanto
+        // antes. agent-browser ya persiste automáticamente la sesión nombrada;
+        // intentar state save tras matar el CLI podía consumir ~15 s adicionales
+        // con un daemon ya inaccesible y mantener bloqueados agentes en cola.
+        if (!this.cancelled) {
+          try {
+            await this.run(["state", "save", this.runStateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+            this.releaseProfileLease = await acquireBrowserProfileLease(this.profileLeaseKey, controller.signal);
+            this.mergePersistentState();
+            debugInfo("browser.runtime", "persistent_state_saved", {
+              runId: this.options.runId,
+              session: this.session,
+              stateFile: this.stateFile,
+              strategy: "merge",
+            });
+          } catch (error) {
+            debugWarn("browser.runtime", "persistent_state_save_failed", {
+              runId: this.options.runId,
+              session: this.session,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          } finally {
+            this.releaseProfileLease?.();
+            this.releaseProfileLease = undefined;
+          }
+        }
 
-      try {
-        await this.run(["close"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
-      } catch {
-        // Best effort: una sesión ya cerrada no debe convertir una tarea exitosa
-        // en fallida. El state save anterior es lo importante.
+        try {
+          await this.run(["close"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+        } catch {
+          // Best effort: una sesión ya cerrada no debe convertir una tarea exitosa
+          // en fallida. El state save anterior es lo importante.
+        }
+        try {
+          // El namespace es exclusivo del run, por lo que close --all no toca
+          // navegadores de otros agentes ni procesos manuales del operador.
+          await this.run(["close", "--all"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+        } catch {
+          /* best effort */
+        }
       }
+      await this.terminateActiveProcesses();
     } finally {
       clearTimeout(timer);
       this.releaseProfileLease?.();
       this.releaseProfileLease = undefined;
+      try { rmSync(this.runRuntimeDir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   }
 
   async executeTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    if (this.cancelled || this.finalizing) throw new Error("browser-agent-cancelled");
     switch (name) {
       case "browser_open": {
         const url = typeof args.url === "string" ? args.url.trim() : "";
@@ -523,9 +829,13 @@ export class BrowserAgentExecution {
           return "Error: para solicitar una contraseña debes indicar url y username. Si falta o quieres confirmar el usuario, solicítalo primero con kind=username.";
         }
 
+        const requestId = `browser-input-${crypto.randomUUID()}`;
+        const screenshotPath = await this.captureInputRequestScreenshot(signal);
+
         // Registrar la espera ANTES de emitir el mensaje evita una carrera si el
-        // usuario responde inmediatamente. La Promise mantiene viva esta misma
-        // ejecución de browser-web y, por tanto, la misma sesión de agent-browser.
+        // usuario responde inmediatamente. Cada agente conserva su requestId para
+        // soportar varias solicitudes simultáneas dentro del mismo chat.
+        await this.options.onStateChange?.("waiting_user");
         const pending = this.options.credentials.waitForInput({
           jid: this.options.jid,
           kind,
@@ -534,6 +844,11 @@ export class BrowserAgentExecution {
           url: url || undefined,
           username: username || undefined,
           message: message || undefined,
+          requestId,
+          taskId: this.options.taskId,
+          agentId: this.options.agentId,
+          agentName: this.options.agentName,
+          screenshotPath,
         }, signal);
 
         try {
@@ -543,9 +858,11 @@ export class BrowserAgentExecution {
             url: url || undefined,
             username: username || undefined,
             message: message || undefined,
+            requestId,
+            screenshotPath,
           });
         } catch (error) {
-          this.options.credentials.cancelPendingInput(this.options.jid, error);
+          this.options.credentials.cancelPendingInput(this.options.jid, error, requestId);
           throw error;
         }
 
@@ -559,12 +876,21 @@ export class BrowserAgentExecution {
         });
 
         const resolution = await pending;
+        await this.options.onStateChange?.("running");
         debugInfo("browser.runtime", "user_input_resumed", {
           runId: this.options.runId,
           session: this.session,
           kind: resolution.kind,
         });
 
+        if (resolution.kind === "correction") {
+          return JSON.stringify({
+            status: "correction_requested",
+            action: resolution.action,
+            message: resolution.message,
+            instruction: "El usuario corrigió el dato solicitado. No abortes: vuelve a inspeccionar el formulario y solicita nuevamente usuario/correo y después contraseña según corresponda, conservando esta misma sesión.",
+          });
+        }
         if (resolution.kind === "password") {
           return JSON.stringify({
             status: "received",
@@ -693,6 +1019,15 @@ export class BrowserAgentExecution {
             username: credential.username,
             url: credential.url,
             note: "La contraseña permaneció fuera del LLM. El perfil cifrado puede reutilizarse si la sesión web expira.",
+          });
+        } catch (error) {
+          return JSON.stringify({
+            ok: false,
+            recoverable: true,
+            username: credential.username,
+            url: credential.url,
+            error: error instanceof Error ? error.message : String(error),
+            instruction: "El inicio de sesión no se confirmó. No termines la tarea. Conserva la página, inspecciona el formulario y usa browser_request_user_input para confirmar/corregir primero usuario o correo y después solicitar una nueva contraseña u OTP.",
           });
         } finally {
           // agent-browser recibe la contraseña solo mediante stdin para completar el

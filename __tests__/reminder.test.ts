@@ -197,20 +197,6 @@ describe("ReminderManager — reintentos", () => {
   });
 });
 
-describe("ReminderManager — setSock / getSock", () => {
-  it("setSock y getSock funcionan", () => {
-    const rm = createIsolatedReminder();
-    expect(rm.getSock()).toBeNull();
-
-    const fakeSock = {} as any;
-    rm.setSock(fakeSock);
-    expect(rm.getSock()).toBe(fakeSock);
-
-    rm.setSock(null);
-    expect(rm.getSock()).toBeNull();
-  });
-});
-
 describe("REMINDER_TOOLS — definiciones", () => {
   it("exporta exactamente 3 tools", () => {
     expect(REMINDER_TOOLS).toHaveLength(3);

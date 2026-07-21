@@ -78,7 +78,7 @@ describe("TaskRuntime", () => {
     const { workspace } = createWorkspace();
     const runtime = new TaskRuntime(workspace);
     const created = runtime.create("user", "comparar APIs", 4);
-    expect(created.record.status).toBe("running");
+    expect(created.record.status).toBe("queued");
     expect(existsSync(workspace.resolvePath("user", created.record.taskPath, { mustExist: true, allowDirectory: true }))).toBe(true);
 
     runtime.update("user", created.record.id, { completedWorkers: 2, status: "synthesizing" });

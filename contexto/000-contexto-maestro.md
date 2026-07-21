@@ -25,13 +25,14 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - OpenCode Free es el proveedor LLM integrado predeterminado; se admite proveedor OpenAI-compatible personalizado.
 - La configuración de proveedores LLM personalizados solicita una sola URL base OpenAI-compatible y la API key; Luna deriva automáticamente `/models` y `/chat/completions`, consulta el catálogo y obliga a elegir por número el modelo global antes de guardar.
 - El agente principal es el orquestador y delega investigación a `researcher-web` y navegación interactiva a `browser-web`.
-- `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales.
+- `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales; puede ejecutarse en segundo plano cuando se solicita. `browser_agent` trabaja en segundo plano por defecto.
 - Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
 - Workdir privado por usuario con tareas, inbox, exports y registro de artefactos.
 - Generación local de PDF/ZIP, envío por el transporte activo mediante `message_send` y registro de artefactos.
 - Procesamiento multimedia local con FFmpeg administrado para decodificación/normalización, whisper.cpp para transcripción y OCR WASM.
 - Alarmas, recordatorios, memoria y contexto persistentes por usuario.
 - Credenciales web persistentes cifradas con AES-256-GCM y clave local compartida con el runtime de `agent-browser`.
+- Supervisor persistente de tareas/agentes con IDs, nombres, estados de ejecución, revisión `pending/reviewed`, cancelación granular y recuperación `interrupted` tras reinicios.
 - Docker multi-arquitectura basado en Debian Bookworm, Chromium del sistema y runtimes portables de FFmpeg y Whisper/libgomp.
 
 # Estado técnico vigente
@@ -48,6 +49,10 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 - El modelo LLM es global: los campos `model` heredados de contextos por JID se ignoran y eliminan al cargarse. Cambiar de proveedor o seleccionar un modelo con `!modelos` actualiza inmediatamente todos los chats, tareas y subagentes; la selección global se persiste en `persistent/llm.model.json` ligada al catálogo del provider para impedir cruces entre proveedores.
 - La mensajería está desacoplada mediante `MessagingTransport`, `TransportIncomingMessage` y `TransportRunner`. Baileys queda aislado en `src/transports/baileys/`; el núcleo no importa tipos del SDK. Presencia/escritura y cola son responsabilidad del adaptador. `message_send` es genérica y delega el formato de archivo al transporte.
 - Actualmente se ejecuta un transporte activo por proceso, seleccionado por `--transport` o `LUNA_TRANSPORT`; la factoría solo incluye Baileys por ahora, pero permite registrar otro cliente de WhatsApp o Telegram sin modificar `bot.ts`.
+- Cada ejecución `browser-web` usa namespace, HOME, perfil Chrome y runtime temporal propios, permitiendo navegadores concurrentes. El estado autenticado portable por usuario se restaura al iniciar y se fusiona bajo un lease breve únicamente al guardar cookies/localStorage; no se serializa toda la navegación. Al finalizar o cancelar se cierran sesiones y procesos registrados sin usar `killall`.
+- Una tarea solo se anuncia como realmente iniciada después del evento `agent_started`; las consultas de progreso leen el registro autoritativo con actividad y último evento.
+- El orquestador revisa automáticamente las tareas de fondo terminadas, inspecciona sus carpetas y artefactos, envía los entregables y reintenta revisiones pendientes.
+- Las solicitudes humanas del navegador incluyen ID y captura anotada, admiten correcciones/reintentos y pueden coexistir entre varios agentes sin capturar mensajes ambiguos.
 
 # Archivos y módulos clave
 
@@ -73,9 +78,9 @@ Ser la entrada canónica para retomar Luna AI sin depender del historial del cha
 
 # Pendientes
 
-- Ejecutar `bun run typecheck`, `bun test` y `bun run build` en un entorno con Bun 1.3.14 y dependencias instaladas.
+- Probar en el entorno real de WhatsApp la entrega automática de capturas y varias solicitudes de credenciales simultáneas.
 - Mantener los registros futuros con títulos y numeración coherentes y sin duplicar documentación ya existente.
 
 # Último registro
 
-- `contexto/73-arquitectura-multitransporte-y-adaptador-baileys.md`
+- `contexto/76-autonomia-revision-y-concurrencia-de-agentes.md`
