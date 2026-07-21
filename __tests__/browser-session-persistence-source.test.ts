@@ -35,5 +35,11 @@ describe("persistencia de navegador y cancelación jerárquica", () => {
     expect(bot).toContain('activeRun.abort(new Error("user-cancelled-current-operation"))');
     expect(bot).toContain("signal: runController.signal");
     expect(bot).toContain("No reanudar, reintentar ni lanzar tareas de seguimiento");
+    const priorityCancel = bot.indexOf('if (command?.name === "cancelar"');
+    const pendingAuth = bot.indexOf("const pendingAction = authManager.getPendingAction");
+    expect(priorityCancel).toBeGreaterThan(-1);
+    expect(priorityCancel).toBeLessThan(pendingAuth);
+    expect(spawnRuntime).toContain("const background = args.background !== false");
+    expect(spawnRuntime.slice(spawnRuntime.indexOf("executeResearcherWebTool"))).toContain("const background = args.background !== false;");
   });
 });

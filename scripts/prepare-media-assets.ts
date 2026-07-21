@@ -358,26 +358,19 @@ async function fetchFfmpegRelease(): Promise<GitHubRelease> {
     "User-Agent": `Luna-AI-media-assets/Bun-${Bun.version}`,
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-
   try {
     const response = await fetch(FFMPEG_RELEASE_API, { headers, signal: controller.signal });
     if (!response.ok) throw new Error(`GitHub API respondió HTTP ${response.status}.`);
     const value = await response.json() as Partial<GitHubRelease>;
-    if (!value.tag_name || !Array.isArray(value.assets)) {
-      throw new Error("GitHub devolvió una release de FFmpeg inválida.");
-    }
+    if (!value.tag_name || !Array.isArray(value.assets)) throw new Error("GitHub devolvió una release de FFmpeg inválida.");
     return value as GitHubRelease;
-  } finally {
-    clearTimeout(timer);
-  }
+  } finally { clearTimeout(timer); }
 }
 
 function ffmpegAssetName(platform = process.platform, arch = process.arch): string {
   const supported = (platform === "linux" && ["x64", "arm64", "arm", "ia32"].includes(arch))
     || (platform === "win32" && arch === "x64");
-  if (!supported) {
-    throw new Error(`No existe un FFmpeg estático configurado para ${platform}/${arch}.`);
-  }
+  if (!supported) throw new Error(`No existe un FFmpeg estático configurado para ${platform}/${arch}.`);
   return `ffmpeg-${platform}-${arch}.gz`;
 }
 
@@ -385,96 +378,63 @@ function readFfmpegManifest(): FfmpegRuntimeManifest | null {
   try {
     const parsed = JSON.parse(readFileSync(FFMPEG_MANIFEST_PATH, "utf8")) as FfmpegRuntimeManifest;
     return parsed?.schemaVersion === 1 ? parsed : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function ffmpegManifestIsUsable(manifest: FfmpegRuntimeManifest | null): manifest is FfmpegRuntimeManifest {
-  if (!manifest) return false;
-  if (manifest.platform !== process.platform || manifest.arch !== process.arch) return false;
-  return existsSync(join(FFMPEG_DIR, manifest.executable));
+  return Boolean(manifest && manifest.platform === process.platform && manifest.arch === process.arch && existsSync(join(FFMPEG_DIR, manifest.executable)));
 }
 
 async function validateFfmpegRuntime(manifest: FfmpegRuntimeManifest): Promise<void> {
   const executable = join(FFMPEG_DIR, manifest.executable);
-  const child = Bun.spawn([executable, "-hide_banner", "-version"], {
-    cwd: FFMPEG_DIR,
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  });
+  const child = Bun.spawn([executable, "-hide_banner", "-version"], { cwd: FFMPEG_DIR, stdout: "pipe", stderr: "pipe", windowsHide: true });
   const stdoutPromise = child.stdout ? new Response(child.stdout).text() : Promise.resolve("");
   const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
   const exitCode = await child.exited;
   const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-  if (exitCode !== 0) {
-    const detail = stderr.trim() || stdout.trim() || `código ${exitCode}`;
-    throw new Error(`El runtime de FFmpeg no puede iniciar: ${detail.slice(-1_500)}`);
-  }
+  if (exitCode !== 0) throw new Error(`El runtime de FFmpeg no puede iniciar: ${(stderr || stdout || `código ${exitCode}`).trim().slice(-1500)}`);
 }
 
 async function prepareFfmpegBinary(): Promise<void> {
   const assetName = ffmpegAssetName();
-  const cachedManifest = readFfmpegManifest();
+  const cached = readFfmpegManifest();
   let release: GitHubRelease;
-
-  try {
-    release = await fetchFfmpegRelease();
-  } catch (error) {
-    if (ffmpegManifestIsUsable(cachedManifest)) {
-      if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cachedManifest.executable), 0o755);
-      await validateFfmpegRuntime(cachedManifest);
-      console.warn(`[media-assets] No se pudo consultar FFmpeg ${FFMPEG_RELEASE_TAG}; reutilizando runtime local: ${String(error)}`);
+  try { release = await fetchFfmpegRelease(); }
+  catch (error) {
+    if (ffmpegManifestIsUsable(cached)) {
+      if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cached.executable), 0o755);
+      await validateFfmpegRuntime(cached);
+      console.warn(`[media-assets] No se pudo consultar FFmpeg; reutilizando runtime local: ${String(error)}`);
       return;
     }
     throw error;
   }
-
   const asset = release.assets.find((candidate) => candidate.name === assetName);
   if (!asset) throw new Error(`La release ${release.tag_name} no contiene ${assetName}.`);
-  const assetSha256 = parseSha256Digest(asset.digest, asset.name);
-
-  if (
-    ffmpegManifestIsUsable(cachedManifest)
-    && cachedManifest.version === release.tag_name
-    && cachedManifest.assetName === asset.name
-    && cachedManifest.assetDigest === assetSha256
-  ) {
-    if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cachedManifest.executable), 0o755);
-    await validateFfmpegRuntime(cachedManifest);
+  const digest = parseSha256Digest(asset.digest, asset.name);
+  if (ffmpegManifestIsUsable(cached) && cached.version === release.tag_name && cached.assetName === asset.name && cached.assetDigest === digest) {
+    if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, cached.executable), 0o755);
+    await validateFfmpegRuntime(cached);
     console.log(`[media-assets] Reutilizando FFmpeg ${release.tag_name} (${asset.name}).`);
     return;
   }
-
   ensureDir(FFMPEG_DOWNLOAD_DIR);
-  const archivePath = join(FFMPEG_DOWNLOAD_DIR, asset.name);
-  const localArchive = process.env.FFMPEG_STATIC_ARCHIVE_PATH?.trim();
-  if (localArchive) {
-    const source = resolve(localArchive);
-    if (!(await isVerifiedFile(source, assetSha256))) {
-      throw new Error(`FFMPEG_STATIC_ARCHIVE_PATH no coincide con el digest de ${release.tag_name}.`);
-    }
-    copyFileSync(source, archivePath);
+  const archive = join(FFMPEG_DOWNLOAD_DIR, asset.name);
+  const local = process.env.FFMPEG_STATIC_ARCHIVE_PATH?.trim();
+  if (local) {
+    const source = resolve(local);
+    if (!(await isVerifiedFile(source, digest))) throw new Error(`FFMPEG_STATIC_ARCHIVE_PATH no coincide con ${release.tag_name}.`);
+    copyFileSync(source, archive);
   } else {
-    await downloadVerified([asset.browser_download_url], archivePath, assetSha256, asset.name);
+    await downloadVerified([asset.browser_download_url], archive, digest, asset.name);
   }
-
   const executableName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
-  const executable = join(FFMPEG_DIR, executableName);
   ensureDir(FFMPEG_DIR);
-  writeFileSync(executable, gunzipSync(readFileSync(archivePath)));
-  if (process.platform !== "win32") chmodSync(executable, 0o755);
-
+  writeFileSync(join(FFMPEG_DIR, executableName), gunzipSync(readFileSync(archive)));
+  if (process.platform !== "win32") chmodSync(join(FFMPEG_DIR, executableName), 0o755);
   const manifest: FfmpegRuntimeManifest = {
-    schemaVersion: 1,
-    version: release.tag_name,
-    platform: process.platform,
-    arch: process.arch,
-    assetName: asset.name,
-    assetDigest: assetSha256,
-    executable: executableName,
-    preparedAt: new Date().toISOString(),
+    schemaVersion: 1, version: release.tag_name, platform: process.platform, arch: process.arch,
+    assetName: asset.name, assetDigest: digest, executable: executableName, preparedAt: new Date().toISOString(),
   };
   writeFileSync(FFMPEG_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await validateFfmpegRuntime(manifest);

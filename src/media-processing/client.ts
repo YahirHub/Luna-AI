@@ -101,7 +101,7 @@ export class MediaProcessorClient {
       type,
       mimeType,
       // Copia defensiva: el mensaje IPC se serializa, pero no debe depender del
-      // buffer que el adaptador de transporte pueda liberar o reutilizar después de este método.
+      // buffer que Baileys pueda liberar o reutilizar después de este método.
       bytes: Uint8Array.from(bytes),
     };
 

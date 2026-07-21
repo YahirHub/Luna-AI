@@ -4,11 +4,9 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { writeJsonFileAtomically } from "../storage.ts";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { getAppDir } from "../utils.ts";
-import { loadOrCreateBrowserEncryptionKey } from "./browser-encryption.ts";
 
 export interface BrowserCredential {
   ref: string;
@@ -355,7 +353,15 @@ export class BrowserCredentialStore {
       // Solo se usa en stores persistentes; esta rama mantiene tipos sencillos.
       return Buffer.alloc(32);
     }
-    return Buffer.from(loadOrCreateBrowserEncryptionKey(this.keyPath), "hex");
+    mkdirSync(dirname(this.keyPath), { recursive: true });
+    let keyHex = "";
+    if (existsSync(this.keyPath)) keyHex = readFileSync(this.keyPath, "utf8").trim();
+    if (!/^[a-f0-9]{64}$/i.test(keyHex)) {
+      keyHex = randomBytes(32).toString("hex");
+      writeFileSync(this.keyPath, `${keyHex}\n`, { mode: 0o600 });
+      ensureMode600(this.keyPath);
+    }
+    return Buffer.from(keyHex, "hex");
   }
 
   private encryptPassword(password: string): string {
@@ -379,8 +385,9 @@ export class BrowserCredentialStore {
 
   private persistProfiles(): void {
     if (!this.persistent) return;
+    mkdirSync(dirname(this.profilesPath), { recursive: true });
     const ordered = [...this.profiles.values()].sort((a, b) => a.createdAt - b.createdAt);
-    writeJsonFileAtomically(this.profilesPath, ordered);
+    writeFileSync(this.profilesPath, `${JSON.stringify(ordered, null, 2)}\n`, { mode: 0o600 });
     ensureMode600(this.profilesPath);
   }
 

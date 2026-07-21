@@ -50,7 +50,7 @@ export interface CommandResult {
   text: string;
 }
 
-/** Firma de un manejador de comandos. Incluye el transporte para acciones avanzadas. */
+/** Firma de un manejador de comandos. Incluye sock para acciones avanzadas. */
 export type CommandHandler = (
   command: ParsedCommand,
   senderJid: string,

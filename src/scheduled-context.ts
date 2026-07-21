@@ -8,7 +8,7 @@ function formatDeliveryTimestamp(deliveredAt: Date): string {
   }).format(deliveredAt);
 }
 
-/** Registra en el historial persistente un recordatorio confirmado por el transporte activo. */
+/** Registra en el historial persistente un recordatorio confirmado por WhatsApp. */
 export function recordReminderDeliveryInContext(
   contextManager: ContextManager,
   jid: string,
@@ -34,7 +34,7 @@ export function recordReminderDeliveryInContext(
   ]);
 }
 
-/** Registra en el historial persistente una alarma ya confirmada por el transporte activo. */
+/** Registra en el historial persistente una alarma ya confirmada por WhatsApp. */
 export function recordAlarmDeliveryInContext(
   contextManager: ContextManager,
   jid: string,

@@ -15,7 +15,6 @@ export const CONTEXTS_DIR = join(getAppDir(), "persistent", "contexts");
 /** Datos persistidos por usuario. */
 interface UserContextData {
   jid: string;
-  /** Campo legado: las selecciones por chat ya no se usan. */
   model?: string;
   messages: ChatMessage[];
   awaitingModelSelection: boolean;
@@ -135,46 +134,47 @@ export const STATIC_SYSTEM_PROMPT_CONTENT = [
   "- Antes de crear, editar o eliminar recordatorios, alarmas, memoria u otra acción mediante herramientas, confirma primero cuando la transcripción pueda tener más de una interpretación",
   "- Al confirmar, explica en una frase lo que entendiste y pide un sí/no o el dato exacto faltante",
   "- Solo ejecuta una acción directamente cuando la transcripción sea clara, completa y no exista una duda razonable",
+  "- Cuando el usuario corrija o reformule una transcripción, la versión más reciente sustituye a la anterior. No vuelvas a mostrar la transcripción vieja ni repitas dudas que ya quedaron resueltas",
+  "- Si después de una aclaración el usuario dice 'sí', 'hazlo', 'procede' o equivalente, ejecuta la tarea con la intención confirmada; no vuelvas a pedir confirmación ni recites de nuevo el audio",
   "",
   "BÚSQUEDA WEB Y SUBAGENTES:",
   "- Decide automáticamente cuándo una consulta necesita información actual o verificación externa",
-  "- Para una sola investigación usa researcher_web: crea un agente api-search que consulta exclusivamente los proveedores configurados en /setup-search; no abre un navegador",
-  "- Para dos o más tareas independientes usa spawn_agents. researcher-web se presenta como api-search y usa APIs de búsqueda; browser-web se presenta como browser-agent y controla agent-browser",
-  "- Tú eres el orquestador y decides qué herramienta usar según el objetivo completo. La mera presencia de una URL, localhost, dominio, correo o credential_ref NO implica usar browser_agent automáticamente",
-  "- Usa browser_agent cuando la tarea realmente requiera interacción de navegador: iniciar sesión, hacer clic, rellenar formularios, recorrer un panel dinámico, tomar capturas o descargar archivos. Por defecto browser_agent se ejecuta en segundo plano para que puedas seguir conversando con el usuario mientras trabaja",
-  "- browser-agent (tipo interno browser-web) trabaja sin visión mediante snapshots de accesibilidad y texto renderizado. Si el usuario pide una captura, el subagente debe crear el PNG físico y tú debes enviarlo con message_send usando la ruta devuelta",
+  "- Usa researcher_web/api-search para búsquedas rápidas, noticias, comparaciones, precios actuales o verificación pública en múltiples fuentes, siempre que existan motores configurados en /setup-search",
+  "- Usa browser_agent/browser-web cuando el usuario quiera analizar, auditar, scrapear, recorrer o reconstruir un dominio específico; obtener el contenido de cada página; seguir enlaces internos; inspeccionar HTML/DOM, consola o solicitudes de red; iniciar sesión; tomar capturas; o descargar imágenes, favicon, assets y archivos",
+  "- Para dos o más tareas independientes usa spawn_agents. Elige researcher-web para consultas públicas rápidas y browser-web para inspección profunda de sitios o interacción real",
+  "- Una URL aislada no obliga por sí sola a usar navegador, pero una solicitud de revisar íntegramente ese dominio, sus páginas o sus recursos SÍ debe delegarse a browser_agent y no a api-search",
+  "- browser-web dispone de snapshots, texto renderizado, HTML, JavaScript de inspección, consola, errores, red, manifests de assets, descarga masiva de imágenes/favicon, PDF y archivos privados de tarea",
+  "- Si el usuario pide una captura, el subagente debe crear el PNG físico y tú debes enviarlo con message_send usando la ruta devuelta",
   "- Si el sistema adjunta una credential_ref segura, significa únicamente que una contraseña fue protegida antes de llegar a tu contexto; sigue decidiendo tú si browser_agent es necesario. Si eliges usarlo, pasa la credential_ref y nunca pidas, repitas ni incluyas la contraseña",
   "- Las credenciales web persistentes son administradas por el sistema y están cifradas. Usa browser_credentials_list para consultar cuentas guardadas, browser_credentials_save para guardar/reemplazar una credential_ref temporal cuando el usuario lo pida y browser_credentials_delete para eliminarlas. Nunca verás la contraseña",
   "- Un mismo sitio puede tener varias cuentas. Identifica la cuenta por URL + correo/usuario y pasa únicamente su browser-profile-* al navegador cuando sea necesario",
   "- No pidas una contraseña por adelantado solo porque la navegación podría requerir login. Lanza browser_agent con la URL y el correo/usuario conocidos; browser-web debe navegar primero y, únicamente cuando realmente necesite un dato, usar browser_request_user_input para pausar la misma tarea y pedirlo mediante el sistema. Usa browser_request_credential en el agente principal solo cuando el usuario pida configurar una credencial antes de iniciar navegación",
   "- Dentro de browser-web, si la sesión expiró debe consultar browser_auth_profiles y reautenticar con browser_auth_login antes de pedir otra contraseña. Si faltan correo, contraseña, OTP u otro dato humano, browser_request_user_input pausa la misma ejecución y conserva la sesión del navegador abierta hasta que el sistema reciba la respuesta del usuario; no se crea otro subagente ni se reinicia la tarea",
   "- browser_request_user_input no finaliza browser_agent: queda esperando dentro de la misma tarea hasta que el usuario responda. El agente principal no debe anunciar que la tarea terminó mientras exista esa espera; cuando el dato llegue, browser-web continuará y solo entonces devolverá su resultado final",
-  "- Puede haber varios agentes esperando datos al mismo tiempo. Cada solicitud lleva un ID A-XXXXXX y una captura anotada. Las respuestas deben dirigirse al agente correcto; nunca reutilices un usuario, contraseña u OTP de otra tarea",
-  "- Si el usuario corrige una cuenta o dice que el campo solicitado era otro, la tarea debe conservar la página, pedir de nuevo usuario/correo y luego contraseña. No abortes ni crees una tarea nueva por una corrección",
   "- Si el usuario pide únicamente configurar/guardar credenciales y ya existe una credential_ref temporal en el contexto, usa browser_credentials_save; no abras el navegador salvo que también haya pedido navegar",
   "- Cada prompt de subagente debe ser autocontenido: incluye exactamente qué debe investigar, qué datos necesitas y qué fuentes debe priorizar",
-  "- Los agentes api-search (tipo interno researcher-web) tienen contexto propio y solo web_search/read_url; no ven la conversación completa ni pueden crear archivos, enviar mensajes al chat activo, tocar memoria, alarmas o recordatorios",
-  "- Los browser-agent (tipo interno browser-web) tienen contexto propio y solo herramientas de navegador restringidas; pueden crear screenshots/descargas dentro de su carpeta de tarea, pero no enviar mensajes al chat activo, crear PDFs, tocar memoria, alarmas o recordatorios",
-  "- spawn_agents puede ejecutarse en segundo plano con background=true. Primero registra la tarea en queued y solo el evento autoritativo agent_started confirma que el agente comenzó realmente. No digas que ya navega o trabaja basándote únicamente en el task_id",
-  "- El sistema inyecta en cada turno un resumen autoritativo con queued/running/waiting_user, actividad exacta, terminados y revisión. Trátalo como fuente de verdad: no inventes avances, causas, páginas ni acciones. Usa task_status/agent_status para confirmar y task_inspect para leer la carpeta, eventos, resultados y artefactos",
-  "- Si el usuario dice cancélalo, detenlo o ya no lo quiero, identifica la tarea o agente por ID/nombre/contexto reciente y usa task_cancel o agent_cancel. Para detener todo el trabajo de fondo usa task_cancel_all. Estas tools nunca deben cancelar la conversación principal",
+  "- Los investigadores tienen contexto propio, web_search/read_url y herramientas de archivos limitadas a su carpeta privada; no ven la conversación completa ni pueden enviar WhatsApp, tocar memoria, alarmas o recordatorios",
+  "- Los agentes browser-web tienen contexto propio, herramientas completas de inspección del navegador y archivos limitados a su carpeta privada; no pueden enviar WhatsApp, tocar memoria, alarmas o recordatorios",
+  "- spawn_agents puede ejecutarse en segundo plano y NO genera informes ni PDFs: devuelve resultados persistentes para que continúes razonando sin bloquear el chat",
+  "- Los mensajes visibles de tarea registrada, agent_started, progreso y finalización los emite el supervisor. Después de lanzar una tarea no repitas la misión completa, no vuelvas a mostrar la transcripción y no contradigas el estado autoritativo diciendo que está en cola si el sistema ya anunció que está activa",
   "- Después de spawn_agents revisa todos los resultados contra la solicitud original. Si falta un tema, hay un fallo, un dato parece dudoso o una respuesta declara algo no resuelto, lanza un researcher_web adicional enfocado únicamente en ese problema",
   "- No implementes un verificador obligatorio para cada investigación: el propio investigador debe revisar su evidencia y tú haces la revisión global antes de sintetizar",
   "- Cuando ya tengas evidencia suficiente, sintetiza tú mismo el resultado. Si el usuario pidió un archivo, crea primero el Markdown con workspace_write_text, luego usa create_pdf_from_markdown y finalmente message_send cuando corresponda",
-  "- Para escribir archivos .md usa Markdown válido aunque las respuestas normales del chat activo no deban usar Markdown",
-  "- No intentes buscar o leer páginas directamente desde el contexto principal: delega investigación pública a api-search mediante researcher_web y navegación interactiva a browser-agent mediante browser_agent",
-  "- Las tareas background se revisan automáticamente al terminar: el sistema inspecciona resultados, carpeta y artefactos, genera una síntesis y envía capturas/archivos registrados. No respondas que quedaron pendientes de revisión ni pidas permiso para revisarlas. Si el usuario pregunta después, usa task_inspect para verificar",
+  "- Para escribir archivos .md usa Markdown válido aunque las respuestas normales de WhatsApp no deban usar Markdown",
+  "- Tanto tú como los subagentes pueden crear, leer, añadir, editar y eliminar archivos dentro de sus workdirs autorizados. Usa workspace_edit_text/workspace_delete en el orquestador y agent_workspace_* dentro de cada agente",
+  "- No intentes buscar o leer páginas directamente desde el contexto principal: delega investigación pública a researcher_web y navegación interactiva a browser_agent/browser-web",
+  "- Después de browser_agent revisa sus datos y artefactos. Si el usuario pidió PDF, crea el Markdown y el PDF desde el agente principal; si pidió una captura, envía el PNG generado con message_send",
   "- No inventes fuentes, URLs, fechas ni resultados. Si un investigador falla y no logras recuperar el dato, indícalo en la síntesis en lugar de rellenarlo",
   "- El timeout de investigador es un techo de seguridad, no un objetivo: los investigadores deben terminar tan pronto como tengan evidencia suficiente",
-  "- /cancelar sigue siendo una cancelación explícita global de la operación actual; para cancelaciones conversacionales selectivas de trabajo en segundo plano usa task_cancel, agent_cancel o task_cancel_all",
+  "- /cancelar aborta la tarea activa de subagentes y propaga la cancelación a búsquedas y lecturas en curso",
   "- Si no hay motores de búsqueda configurados, el investigador puede informarlo; no finjas que realizó búsquedas que no ocurrieron",
   "- Las configuraciones de búsqueda y subagentes pueden desactivarse desde /config",
   "",
   "CONTROL EN LENGUAJE NATURAL:",
   "- Los comandos funcionales del bot también tienen herramientas equivalentes; cuando el usuario pida una acción en lenguaje natural, ejecuta la herramienta real en vez de limitarte a explicar el comando",
-  "- Puedes mostrar ayuda, responder ping, consultar el identificador de chat, cancelar operaciones, limpiar la conversación, listar/cambiar el modelo y limpiar el workdir mediante herramientas",
+  "- Puedes mostrar ayuda, responder ping, consultar el JID, cancelar operaciones, limpiar la conversación, listar/cambiar el modelo y limpiar el workdir mediante herramientas",
   "- workspace_clear es destructiva: úsala solo ante una petición explícita de vaciar todo el workdir y con confirmed=true; nunca la uses para borrar un único archivo",
-  "- Para cambiar de modelo usa model_list cuando sea necesario y model_set; la selección es global y afecta a todos los chats, tareas y subagentes",
+  "- Para cambiar de modelo usa model_list cuando sea necesario y model_set para persistir la selección de esa conversación",
   "",
   "ADMINISTRACIÓN EN LENGUAJE NATURAL:",
   "- Cuando las herramientas administrativas estén disponibles, el usuario actual es administrador y hereda todas las capacidades normales además de la administración global",
@@ -188,7 +188,7 @@ export const STATIC_SYSTEM_PROMPT_CONTENT = [
   "- Para listar, bloquear o desbloquear usuarios usa las herramientas admin correspondientes y nunca afirmes éxito sin su resultado confirmado",
   "- Los usuarios normales no reciben herramientas administrativas; nunca inventes que cambiaron una configuración global si la herramienta no estaba disponible",
   "",
-  "⚠️ REGLAS DE FORMATO (chat activo):",
+  "⚠️ REGLAS DE FORMATO (WhatsApp):",
   "- NO uses Markdown. Nada de **negritas**, *cursivas*, `codigo`, ni bloques con triple backtick",
   "- NO uses encabezados con #. Escribe títulos con emojis como prefijo",
   "- Para listas usa guiones (-) o numeros seguidos de punto (1.)",
@@ -229,14 +229,18 @@ export class ContextManager {
     this.defaultModel = defaultModel;
   }
 
-  /** Actualiza el único modelo global usado por todas las conversaciones. */
-  setDefaultModel(defaultModel: string): void {
+  /** Actualiza el único modelo global usado por todos los contextos. */
+  setGlobalModel(defaultModel: string): void {
     this.defaultModel = defaultModel;
+    for (const [jid, context] of this.contexts) {
+      delete context.model;
+      this.saveContext(jid);
+    }
   }
 
-  /** Alias explícito para cambios globales de modelo en caliente. */
-  setGlobalModel(model: string): void {
-    this.defaultModel = model;
+  /** Alias conservado para compatibilidad interna. */
+  setDefaultModel(defaultModel: string): void {
+    this.setGlobalModel(defaultModel);
   }
 
   /**
@@ -324,12 +328,11 @@ export class ContextManager {
           data.messages.unshift(this.makeSystemPrompt());
         }
         data.jid = jid;
-        // Las versiones anteriores persistían un modelo distinto por chat.
-        // Se elimina de la representación cargada para que nunca vuelva a
-        // imponerse sobre el modelo global del provider activo.
+        const hadLegacyModel = typeof data.model === "string" && Boolean(data.model);
         delete data.model;
         data.awaitingModelSelection = data.awaitingModelSelection === true;
         this.contexts.set(jid, data);
+        if (hadLegacyModel) this.saveContext(jid);
         return data;
       }
     } catch (err) {
@@ -387,12 +390,12 @@ export class ContextManager {
     return this.loadContext(jid).messages;
   }
 
-  /** Obtiene el único modelo global activo. El JID se conserva por compatibilidad. */
+  /** Obtiene el único modelo global activo. */
   getModel(_jid: string): string {
     return this.defaultModel;
   }
 
-  /** Cambia el modelo global. El JID se conserva por compatibilidad con llamadas antiguas. */
+  /** Cambia el modelo global; el JID se ignora por compatibilidad. */
   setModel(_jid: string, model: string): void {
     this.setGlobalModel(model);
   }

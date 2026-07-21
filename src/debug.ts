@@ -1,3 +1,4 @@
+import { getAgentExecutionContext } from "./agents/execution-context.ts";
 const REDACTED = "[REDACTED]";
 
 const ANSI = {
@@ -110,7 +111,11 @@ function write(level: "DEBUG" | "INFO" | "WARN" | "ERROR", scope: string, event:
     scope,
     event,
   };
-  if (data !== undefined) record.data = sanitize(data);
+  const agentContext = getAgentExecutionContext();
+  const enriched = agentContext
+    ? { ...(data && typeof data === "object" ? data as Record<string, unknown> : data === undefined ? {} : { value: data }), ...agentContext }
+    : data;
+  if (enriched !== undefined) record.data = sanitize(enriched);
 
   const json = JSON.stringify(record);
   const prefix = `[LUNA ${level}]`;

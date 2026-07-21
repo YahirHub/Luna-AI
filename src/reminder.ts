@@ -7,6 +7,7 @@ import {
   sanitizePathSegment,
   writeJsonFileAtomically,
 } from "./storage.ts";
+import type { MessagingTransport } from "./transports/types.ts";
 import {
   buildReminderDeliveryMessage,
   normalizePreparedScheduledMessage,
@@ -47,6 +48,7 @@ export class ReminderManager {
   private reminders: Reminder[] = [];
   private readonly baseDir: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private transport: MessagingTransport | null = null;
   private checking = false;
 
   constructor(testBaseDir?: string) {
@@ -123,6 +125,17 @@ export class ReminderManager {
       this.reminders = snapshot;
       throw err;
     }
+  }
+
+  // ── Socket ───────────────────────────────────────────────────
+
+  /** Actualiza la referencia al socket activo (cambia en reconexiones). */
+  setTransport(transport: MessagingTransport | null): void {
+    this.transport = transport;
+  }
+
+  getTransport(): MessagingTransport | null {
+    return this.transport;
   }
 
   // ── CRUD ─────────────────────────────────────────────────────
@@ -260,7 +273,7 @@ export class ReminderManager {
    * Llama onDue por cada recordatorio que deba dispararse.
    */
   startChecker(
-    onDue: (reminder: Reminder) => Promise<void>,
+    onDue: (reminder: Reminder, transport: MessagingTransport | null) => Promise<void>,
   ): void {
     if (this.intervalId !== null) return; // ya iniciado
 
@@ -272,7 +285,7 @@ export class ReminderManager {
         for (const reminder of due) {
           try {
             this.markDeliveryPending(reminder.id);
-            await onDue(reminder);
+            await onDue(reminder, this.transport);
             this.markFired(reminder.id);
           } catch (err) {
             console.error(

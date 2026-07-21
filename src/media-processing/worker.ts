@@ -7,9 +7,9 @@ import tesseractFallbackPath from "../../assets/runtime/tesseract/tesseract-core
 import spanishModelPath from "../../assets/runtime/ocr/spa.traineddata.gz" with { type: "file" };
 import type { MediaWorkerRequest, MediaWorkerResponse } from "./protocol.ts";
 import { estimateOggDurationSeconds } from "./audio-utils.ts";
+import { decodeOggOpusToMono16k } from "./ffmpeg-native.ts";
 import { readImageDimensions } from "./image-utils.ts";
 import { transcribeWithWhisperCli } from "./whisper-native.ts";
-import { decodeAudioWithFfmpeg } from "./ffmpeg-native.ts";
 import { loadWhisperConfig } from "../whisper-config.ts";
 
 const MAX_IMAGE_PIXELS = 16_000_000;
@@ -58,29 +58,15 @@ async function transcribeAudio(request: MediaWorkerRequest): Promise<{ text: str
     throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
   }
 
-  const mono = await decodeAudioWithFfmpeg(encodedBytes, request.mimeType);
-  const durationSeconds = mono.length / 16_000;
-  if (durationSeconds <= 0) throw new Error("El audio no contiene muestras válidas.");
-  if (durationSeconds > config.maxAudioSeconds) {
+  const decoded = await decodeOggOpusToMono16k(encodedBytes, {
+    timeoutMs: Math.min(config.timeoutSeconds * 1000, 5 * 60_000),
+    expectedDurationSeconds: estimatedDuration,
+  });
+  if (decoded.durationSeconds > config.maxAudioSeconds) {
     throw new Error(`El audio supera el límite de ${config.maxAudioSeconds} segundos.`);
   }
-
-  if (estimatedDuration !== null) {
-    const toleranceSeconds = Math.max(1.5, estimatedDuration * 0.03);
-    if (durationSeconds + toleranceSeconds < estimatedDuration) {
-      throw new Error(
-        `La decodificación de audio quedó incompleta: OGG≈${estimatedDuration.toFixed(1)} s, ` +
-          `PCM=${durationSeconds.toFixed(1)} s.`,
-      );
-    }
-  }
-
-  console.log(
-    `[media] Audio decodificado con FFmpeg: ${durationSeconds.toFixed(2)} s` +
-      (estimatedDuration === null ? "" : ` (OGG estimado ${estimatedDuration.toFixed(2)} s)`),
-  );
-  const text = await transcribeWithWhisperCli(mono, { config });
-  return { text, durationSeconds };
+  const text = await transcribeWithWhisperCli(decoded.samples, { config });
+  return { text, durationSeconds: decoded.durationSeconds };
 }
 
 type RawImageData = { width: number; height: number; data: Uint8ClampedArray };
@@ -148,7 +134,7 @@ function isMediaRequest(value: unknown): value is MediaWorkerRequest {
 
 /**
  * Ejecuta el procesador multimedia como un subproceso persistente del mismo
- * binario. El aislamiento conserva el transporte principal responsivo y evita depender de
+ * binario. El aislamiento conserva WhatsApp responsivo y evita depender de
  * rutas de Worker que Bun 1.3.14 resuelve contra src/ en Windows standalone.
  */
 export async function runMediaProcessorChild(): Promise<void> {

@@ -68,6 +68,7 @@ describe("spawn_agents", () => {
 
     const raw = await executeSpawnAgentsTool({
       title: "Comparar proveedores",
+      background: false,
       agents: [
         { agent_type: "researcher-web", prompt: "Investiga DeepSeek" },
         { agent_type: "researcher-web", prompt: "Investiga MiniMax" },
@@ -103,6 +104,7 @@ describe("spawn_agents", () => {
   it("mantiene resultados parciales cuando un subagente falla", async () => {
     const { workspace, tasks } = setup();
     const raw = await executeSpawnAgentsTool({
+      background: false,
       agents: [
         { agent_type: "researcher-web", prompt: "Tema bueno" },
         { agent_type: "researcher-web", prompt: "Tema malo" },
@@ -149,6 +151,7 @@ describe("spawn_agents", () => {
     const { workspace, tasks } = setup();
     const longResult = (label: string) => `${label}\n${"dato-".repeat(2500)}\nFUENTES: https://example.com/${label}`;
     const raw = await executeSpawnAgentsTool({
+      background: false,
       agents: [
         { agent_type: "researcher-web", prompt: "Proveedor A" },
         { agent_type: "researcher-web", prompt: "Proveedor B" },
@@ -181,6 +184,50 @@ describe("spawn_agents", () => {
     const stored = workspace.readText("compact-user", `${task?.taskPath}/agents/01-researcher-web/result.md`);
     expect(stored.length).toBeGreaterThan(10_000);
     expect(stored).toContain("FUENTES:");
+  });
+
+  it("ejecuta api-search en segundo plano por defecto y permite cancelarlo sin esperar", async () => {
+    const { workspace, tasks } = setup();
+    let started = false;
+    const raw = await executeSpawnAgentsTool({
+      title: "Investigación cancelable",
+      agents: [{ agent_type: "researcher-web", prompt: "Investiga algo lentamente" }],
+    }, {
+      jid: "background-user",
+      model: "model",
+      llmConfig,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      workspace,
+      tasks,
+      agentRunner: async (options) => {
+        started = true;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 10_000);
+          options.parentSignal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(options.parentSignal?.reason ?? new Error("cancelled"));
+          }, { once: true });
+        });
+        return {
+          agentType: options.definition.id,
+          agentName: options.definition.displayName,
+          prompt: options.prompt,
+          runId: options.runId,
+          status: "completed" as const,
+          result: "no debería completar",
+          toolsCalled: [],
+        };
+      },
+    });
+
+    const parsed = JSON.parse(raw) as { task_id: string; background: boolean; status: string };
+    expect(parsed.background).toBe(true);
+    expect(parsed.status).toBe("queued");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toBe(true);
+    expect(tasks.cancelAll("background-user")).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(tasks.get("background-user", parsed.task_id)?.status).toBe("cancelled");
   });
 
 });

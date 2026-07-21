@@ -27,7 +27,7 @@ describe("flujo autoritativo de tools", () => {
 
   it("borra mensajes de contraseña en flujos pendientes", () => {
     expect(botSource).toContain('action.step === "awaiting-password"');
-    expect(botSource).toContain("deleteSensitiveIncomingMessage(transport, message)");
+    expect(botSource).toContain("deleteSensitiveIncomingMessage(sock, message)");
   });
 
   it("el prompt reconoce solo resultados confirmados como evidencia", () => {

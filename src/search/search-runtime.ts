@@ -8,7 +8,6 @@ import {
 } from "./search-config.ts"
 import { loadWebSearchAuth, loadWebSearchSettings } from "./search-storage.ts"
 import { debugError, debugInfo, debugLog, debugWarn } from "../debug.ts"
-import type { AgentExecutionLogContext } from "../agents/agent-types.ts"
 
 export const DEFAULT_SEARCH_TIMEOUT_MS = 20_000
 
@@ -349,7 +348,7 @@ async function runWithProviderSpacing<T>(
   try {
     const nextAllowedAt = providerNextAllowedAt.get(provider) ?? 0
     const waitMs = Math.max(0, nextAllowedAt - Date.now())
-    debugLog("search.provider_queue", "ready", {
+    debugLog("api-search.provider-queue", "ready", {
       provider,
       waitMs,
       minimumIntervalMs: SEARCH_PROVIDER_MIN_INTERVAL_MS[provider],
@@ -425,7 +424,7 @@ async function fetchJson(
         SEARCH_PROVIDER_MIN_INTERVAL_MS[provider],
         1_000,
       )
-      debugWarn("search.provider", "rate_limited", {
+      debugWarn("api-search.provider", "rate_limited", {
         provider,
         attempt: attempt + 1,
         retryDelay,
@@ -1088,17 +1087,13 @@ export async function runWebSearchWithFallback(
   config?: WebSearchRuntimeConfig,
   signal?: AbortSignal,
   fetchImpl: FetchLike = fetch,
-  executionContext?: AgentExecutionLogContext,
 ): Promise<WebSearchRuntimeResult> {
   const request = normalizeWebSearchRequest(input)
   const attempts: SearchAttempt[] = []
   const settings = config?.settings ?? loadWebSearchSettings()
   const auth = config?.auth ?? loadWebSearchAuth()
   const order = getSearchProviderOrder(settings, auth)
-  const logContext = { backend: "api-search" as const, ...executionContext }
   debugInfo("api-search.runtime", "started", {
-    ...logContext,
-    action: "Iniciando búsqueda mediante proveedores API",
     query: request.query,
     type: request.type,
     numResults: request.numResults,
@@ -1115,8 +1110,6 @@ export async function runWebSearchWithFallback(
     const state = resolveSearchProviderState(provider, settings, auth)
     if (!state.apiKey || !state.enabled) {
       debugLog("api-search.runtime", "provider_skipped", {
-        ...logContext,
-        action: "Omitiendo proveedor API no disponible",
         provider,
         enabled: state.enabled,
         hasApiKey: Boolean(state.apiKey),
@@ -1124,7 +1117,7 @@ export async function runWebSearchWithFallback(
       continue
     }
     try {
-      debugLog("api-search.runtime", "provider_attempt", { ...logContext, action: `Consultando ${SEARCH_PROVIDER_LABELS[provider]}`, provider, providerLabel: SEARCH_PROVIDER_LABELS[provider], query: request.query })
+      debugLog("api-search.runtime", "provider_attempt", { provider, query: request.query })
       const response = await runProviderSearch(
         provider,
         request,
@@ -1143,8 +1136,6 @@ export async function runWebSearchWithFallback(
         message: `${response.results.length} resultado(s).`,
       })
       debugInfo("api-search.runtime", "provider_success", {
-        ...logContext,
-        action: `Resultados recibidos desde ${SEARCH_PROVIDER_LABELS[provider]}`,
         provider,
         query: request.query,
         resultCount: response.results.length,
@@ -1171,8 +1162,6 @@ export async function runWebSearchWithFallback(
         message: error instanceof Error ? error.message : String(error),
       })
       debugWarn("api-search.runtime", "provider_failed_fallback", {
-        ...logContext,
-        action: `Falló ${SEARCH_PROVIDER_LABELS[provider]}; probando respaldo`,
         provider,
         query: request.query,
         message: error instanceof Error ? error.message : String(error),
@@ -1194,8 +1183,6 @@ export async function runWebSearchWithFallback(
     `No fue posible completar la búsqueda con ningún motor configurado.${suffix}`,
   )
   debugError("api-search.runtime", "all_providers_failed", finalError, {
-    ...logContext,
-    action: "Todos los proveedores API fallaron",
     query: request.query,
     attempts,
   })

@@ -61,9 +61,11 @@ jobs:
           chmod +x release/luna-ai-linux-amd64/luna-ai
           find release/luna-ai-linux-amd64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
           find release/luna-ai-linux-amd64/runtime/ffmpeg -type f -name ffmpeg -exec chmod +x {} +
+          find release/luna-ai-linux-amd64/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
           test -f release/luna-ai-linux-amd64/runtime/whisper/system-libs/libgomp.so.1
           test -f release/luna-ai-linux-amd64/runtime/ffmpeg/ffmpeg
           test -f release/luna-ai-linux-amd64/runtime/ffmpeg/manifest.json
+          test -f release/luna-ai-linux-amd64/runtime/agent-browser/agent-browser
           tar -czf release/luna-ai-linux-amd64.tar.gz -C release luna-ai-linux-amd64
 
       - uses: actions/upload-artifact@v4
@@ -99,9 +101,11 @@ jobs:
           chmod +x release/luna-ai-linux-arm64/luna-ai
           find release/luna-ai-linux-arm64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
           find release/luna-ai-linux-arm64/runtime/ffmpeg -type f -name ffmpeg -exec chmod +x {} +
+          find release/luna-ai-linux-arm64/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
           test -f release/luna-ai-linux-arm64/runtime/whisper/system-libs/libgomp.so.1
           test -f release/luna-ai-linux-arm64/runtime/ffmpeg/ffmpeg
           test -f release/luna-ai-linux-arm64/runtime/ffmpeg/manifest.json
+          test -f release/luna-ai-linux-arm64/runtime/agent-browser/agent-browser
           tar -czf release/luna-ai-linux-arm64.tar.gz -C release luna-ai-linux-arm64
 
       - uses: actions/upload-artifact@v4
@@ -138,6 +142,7 @@ jobs:
           Copy-Item README.md release/luna-ai-windows-amd64/README.md
           if (-not (Test-Path release/luna-ai-windows-amd64/runtime/ffmpeg/ffmpeg.exe)) { throw "Falta FFmpeg en el runtime Windows" }
           if (-not (Test-Path release/luna-ai-windows-amd64/runtime/ffmpeg/manifest.json)) { throw "Falta manifest de FFmpeg" }
+          if (-not (Test-Path release/luna-ai-windows-amd64/runtime/agent-browser/agent-browser.exe)) { throw "Falta agent-browser en el runtime Windows" }
           Compress-Archive -Path release/luna-ai-windows-amd64 -DestinationPath release/luna-ai-windows-amd64.zip -Force
 
       - uses: actions/upload-artifact@v4

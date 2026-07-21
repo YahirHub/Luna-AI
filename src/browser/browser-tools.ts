@@ -4,6 +4,14 @@ export const BROWSER_AGENT_TOOL_NAMES = [
   "browser_open",
   "browser_snapshot",
   "browser_read",
+  "browser_get_html",
+  "browser_eval",
+  "browser_console",
+  "browser_errors",
+  "browser_network_requests",
+  "browser_network_request",
+  "browser_extract_assets",
+  "browser_download_assets",
   "browser_click",
   "browser_fill",
   "browser_type",
@@ -12,6 +20,7 @@ export const BROWSER_AGENT_TOOL_NAMES = [
   "browser_get_text",
   "browser_get_url",
   "browser_screenshot",
+  "browser_pdf",
   "browser_download",
   "browser_auth_profiles",
   "browser_request_user_input",
@@ -33,6 +42,100 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "browser_get_html",
+      description: "Obtiene y guarda el HTML renderizado de toda la página o de un selector. Úsalo para auditorías DOM, scraping estructural y reconstrucción de sitios.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "Selector o referencia. Predeterminado: html." },
+          filename: { type: "string", description: "Nombre .html opcional dentro de la carpeta del agente." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_eval",
+      description: "Ejecuta JavaScript en la página activa para inspeccionar DOM, estado o datos que no aparezcan en accesibilidad. No debe leer contraseñas, cookies ni secretos.",
+      parameters: {
+        type: "object",
+        properties: { script: { type: "string" }, filename: { type: "string", description: "Archivo .json/.txt opcional donde guardar la salida completa." } },
+        required: ["script"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_console",
+      description: "Lee o limpia los mensajes de consola de la página para detectar errores y comportamiento JavaScript.",
+      parameters: { type: "object", properties: { clear: { type: "boolean" } }, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_errors",
+      description: "Lee o limpia los errores de página y excepciones JavaScript.",
+      parameters: { type: "object", properties: { clear: { type: "boolean" } }, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_network_requests",
+      description: "Lista solicitudes de red observadas por el navegador, con filtros opcionales. Útil para descubrir APIs, recursos, imágenes y errores HTTP.",
+      parameters: {
+        type: "object",
+        properties: {
+          filter: { type: "string" },
+          resource_types: { type: "string", description: "Tipos separados por coma, por ejemplo xhr,fetch,img." },
+          method: { type: "string" },
+          status: { type: "string" },
+          clear: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_network_request",
+      description: "Obtiene el detalle completo de una solicitud de red por su requestId.",
+      parameters: { type: "object", properties: { request_id: { type: "string" } }, required: ["request_id"], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_extract_assets",
+      description: "Extrae del DOM todas las imágenes, srcset, favicons, estilos, scripts y enlaces internos y guarda un manifest JSON en el workdir.",
+      parameters: { type: "object", properties: { filename: { type: "string" } }, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_download_assets",
+      description: "Descarga al workdir imágenes y favicons públicos encontrados en la página actual. Devuelve un manifest con éxitos y errores.",
+      parameters: {
+        type: "object",
+        properties: {
+          max_files: { type: "integer", minimum: 1, maximum: 150 },
+          include_external: { type: "boolean", description: "Permite CDNs/hosts externos públicos. Predeterminado true." },
+          folder: { type: "string", description: "Subcarpeta de descarga. Predeterminado browser/downloads/assets." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "browser_snapshot",
       description: "Obtiene el árbol de accesibilidad de la página con referencias @eN. Úsalo después de navegar o cuando cambie la página.",
       parameters: {
@@ -44,6 +147,14 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
         },
         additionalProperties: false,
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_pdf",
+      description: "Guarda la página actual completa como PDF dentro del workdir del agente.",
+      parameters: { type: "object", properties: { filename: { type: "string" } }, additionalProperties: false },
     },
   },
   {
@@ -124,7 +235,7 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_screenshot",
-      description: "Guarda una captura PNG en el workdir del agente y devuelve su ruta relativa para que el agente principal pueda enviarla por el chat activo.",
+      description: "Guarda una captura PNG en el workdir del agente y devuelve su ruta relativa para que el agente principal pueda enviarla por WhatsApp.",
       parameters: {
         type: "object",
         properties: {

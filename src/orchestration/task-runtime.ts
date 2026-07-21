@@ -1,8 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
-import type { AgentExecutionBackend } from "../agents/agent-types.ts";
-import { backendForAgentType } from "../agents/agent-backend.ts";
 import { writeJsonFileAtomically } from "../storage.ts";
 
 export type TaskStatus = "queued" | "running" | "synthesizing" | "completed" | "partial" | "failed" | "cancelled" | "interrupted";
@@ -30,7 +28,6 @@ export interface AgentRunRecord {
   jid: string;
   name: string;
   agentType: string;
-  backend: AgentExecutionBackend;
   runId: string;
   status: AgentExecutionStatus;
   reviewStatus: ReviewStatus;
@@ -102,9 +99,7 @@ export class TaskRuntime {
             reviewStatus: task.reviewStatus ?? (isTerminalTask(task.status) ? "reviewed" : "pending"),
           }))
         : [];
-      const agents = Array.isArray(parsed.agents)
-        ? parsed.agents.map((agent) => ({ ...agent, backend: agent.backend ?? backendForAgentType(agent.agentType) }))
-        : [];
+      const agents = Array.isArray(parsed.agents) ? parsed.agents : [];
       return { version: 2, tasks, agents };
     } catch {
       return { version: 2, tasks: [], agents: [] };
@@ -135,12 +130,11 @@ export class TaskRuntime {
             return { ...task, reviewStatus: task.reviewStatus ?? (isTerminalTask(task.status) ? "reviewed" as const : "pending" as const) };
           });
           const agents = (Array.isArray(parsed.agents) ? parsed.agents : []).map((agent) => {
-            const normalized = { ...agent, backend: agent.backend ?? backendForAgentType(agent.agentType) };
             if (agent.status === "queued" || agent.status === "running" || agent.status === "waiting_user") {
               changed = true;
-              return { ...normalized, status: "interrupted" as const, reviewStatus: "pending" as const, updatedAt: now, completedAt: now, error: "Luna se reinició mientras el agente estaba activo." };
+              return { ...agent, status: "interrupted" as const, reviewStatus: "pending" as const, updatedAt: now, completedAt: now, error: "Luna se reinició mientras el agente estaba activo." };
             }
-            return normalized;
+            return agent;
           });
           if (changed) writeJsonFileAtomically(filePath, { version: 2, tasks, agents });
         } catch {
@@ -179,7 +173,6 @@ export class TaskRuntime {
   createAgent(jid: string, taskId: string, input: {
     name: string;
     agentType: string;
-    backend?: AgentExecutionBackend;
     runId: string;
     agentPath: string;
     prompt: string;
@@ -191,7 +184,6 @@ export class TaskRuntime {
       jid,
       name: input.name.trim() || input.agentType,
       agentType: input.agentType,
-      backend: input.backend ?? backendForAgentType(input.agentType),
       runId: input.runId,
       status: "queued",
       reviewStatus: "pending",
@@ -214,6 +206,18 @@ export class TaskRuntime {
     return () => {
       if (this.agentTerminators.get(key) === terminator) this.agentTerminators.delete(key);
     };
+  }
+
+  /** Libera controladores y terminadores efímeros cuando un agente ya terminó. */
+  releaseAgentRuntime(jid: string, agentId: string): void {
+    const key = this.key(jid, agentId);
+    this.activeAgents.delete(key);
+    this.agentTerminators.delete(key);
+  }
+
+  /** Libera el controlador efímero de una tarea terminal. Los resultados persistentes se conservan. */
+  releaseTaskRuntime(jid: string, taskId: string): void {
+    this.activeTasks.delete(this.key(jid, taskId));
   }
 
   update(jid: string, taskId: string, patch: Partial<Omit<AgentTaskRecord, "id" | "jid" | "createdAt">>): AgentTaskRecord | null {
@@ -350,19 +354,19 @@ export class TaskRuntime {
         const task = tasks.find((item) => item.id === agent.taskId);
         const detail = agent.activity ? ` | ahora: ${agent.activity}` : agent.currentTool ? ` | tool: ${agent.currentTool}` : "";
         const waiting = agent.waitingFieldName ? ` | espera: ${agent.waitingFieldName}` : "";
-        lines.push(`- ${agent.id} \"${agent.name}\" | ${agent.backend} (${agent.agentType}) | ${agent.status}${detail}${waiting} | tarea ${task?.id ?? agent.taskId}: ${task?.title ?? "sin título"}`);
+        lines.push(`- ${agent.id} \"${agent.name}\" | ${agent.agentType} | ${agent.status}${detail}${waiting} | tarea ${task?.id ?? agent.taskId}: ${task?.title ?? "sin título"}`);
       }
     }
     if (pending.length > 0) {
       lines.push("Terminados pendientes de revisión:");
       for (const agent of pending) {
-        lines.push(`- ${agent.id} "${agent.name}" | ${agent.backend} | ${agent.status} | tarea ${agent.taskId} | resultado: ${agent.resultPath ?? "registrado en la tarea"}`);
+        lines.push(`- ${agent.id} "${agent.name}" | ${agent.status} | tarea ${agent.taskId} | resultado: ${agent.resultPath ?? "registrado en la tarea"}`);
       }
     }
     if (reviewed.length > 0) {
       lines.push("Revisados recientemente:");
       for (const agent of reviewed) {
-        lines.push(`- ${agent.id} "${agent.name}" | ${agent.backend} | ${agent.status}/reviewed | tarea ${agent.taskId}`);
+        lines.push(`- ${agent.id} "${agent.name}" | ${agent.status}/reviewed | tarea ${agent.taskId}`);
       }
     }
     lines.push("Usa task_status para estado exacto y task_inspect para leer resultados, eventos, carpeta y artefactos. También están task_cancel/task_cancel_all y agent_status/agent_cancel. El sistema revisa automáticamente las tareas al terminar; no afirmes que siguen activas si aquí aparecen terminales.");

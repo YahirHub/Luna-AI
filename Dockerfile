@@ -16,6 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock ./
+COPY patches ./patches
 # El postinstall del proyecto necesita scripts/ y src/. Se omiten lifecycle
 # scripts en esta capa para conservar el cache de dependencias y la preparación
 # real se ejecuta después mediante bun run build.
@@ -54,7 +55,6 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh /data/bot \
     && chmod -R a+rX /data/runtime \
     && find /data/runtime/whisper -type f -name whisper-cli -exec chmod +x {} + \
-    && find /data/runtime/ffmpeg -type f -name ffmpeg -exec chmod +x {} + \
     && find /data/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
 
 WORKDIR /data

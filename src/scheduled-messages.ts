@@ -3,7 +3,7 @@ import { chatCompletion } from "./ai.ts";
 import type { ChatMessage } from "./ai.ts";
 import type { LlmConfig } from "./llm-config.ts";
 import { STATIC_SYSTEM_PROMPT_CONTENT } from "./context.ts";
-import { sendTextHumanized } from "./messaging.ts";
+import { sendWithTyping } from "./messaging.ts";
 import { normalizePreparedScheduledMessage } from "./scheduled-copy.ts";
 
 export interface ScheduledMessageOptions {
@@ -49,7 +49,7 @@ export function selectScheduledMessageBody(
 /**
  * Genera y entrega una notificación programada. El cuerpo persistido es la
  * fuente de verdad: si no hay proveedor, modelo o respuesta útil, se envía tal
- * cual. Solo resuelve cuando el transporte confirmó el envío.
+ * cual. Solo resuelve cuando WhatsApp confirmó el envío.
  */
 export async function deliverScheduledMessage(
   options: ScheduledMessageOptions,
@@ -96,7 +96,7 @@ export async function deliverScheduledMessage(
   }
 
   const deliveredText = `${options.title}\n\n${body}`;
-  await sendTextHumanized(
+  await sendWithTyping(
     options.transport,
     options.jid,
     deliveredText,

@@ -7,9 +7,6 @@ describe("empaquetado del runtime multimedia", () => {
       trustedDependencies?: string[];
     };
     const source = await Bun.file(new URL("../scripts/package-runtime.ts", import.meta.url)).text();
-    const mediaPrepareSource = await Bun.file(
-      new URL("../scripts/prepare-media-assets.ts", import.meta.url),
-    ).text();
     const linuxRuntimeSource = await Bun.file(
       new URL("../scripts/whisper-linux-libs.ts", import.meta.url),
     ).text();
@@ -27,20 +24,12 @@ describe("empaquetado del runtime multimedia", () => {
 
     expect(packageJson.scripts.build).toContain("prepare:browser");
     expect(packageJson.scripts.build).toContain("package:runtime");
-    expect(packageJson.scripts.build).toContain("prepare:media");
     expect(packageJson.scripts.dev).toContain("prepare:browser");
-    expect(packageJson.scripts.dev).toContain("prepare:media");
     expect(packageJson.scripts.start).toContain("prepare:browser");
-    expect(packageJson.scripts.start).toContain("prepare:media");
     expect(packageJson.scripts.postinstall).toContain("prepare:browser");
     expect(packageJson.trustedDependencies).toContain("agent-browser");
-    expect(mediaPrepareSource).toContain("ffmpeg-${platform}-${arch}.gz");
-    expect(mediaPrepareSource).toContain("parseSha256Digest");
-    expect(mediaPrepareSource).toContain("prepareFfmpegBinary");
     expect(source).toContain('"dist", "runtime", "whisper"');
-    expect(source).toContain('"dist", "runtime", "ffmpeg"');
     expect(source).toContain('"dist", "runtime", "twemoji"');
-    expect(source).toContain("Runtime de FFmpeg copiado");
     expect(source).toContain("Assets Twemoji copiados");
     expect(source).toContain("agent-browser nativo copiado");
     expect(source).toContain('"assets", "runtime", "agent-browser"');
@@ -56,7 +45,6 @@ describe("empaquetado del runtime multimedia", () => {
     expect(dockerfileSource).toContain("--ignore-scripts");
     expect(dockerfileSource).toContain("chromium");
     expect(dockerfileSource).toContain("LUNA_AGENT_BROWSER_SKIP_INSTALL=1");
-    expect(dockerfileSource).toContain("runtime/ffmpeg");
     expect(entrypointSource).toContain("XDG_RUNTIME_DIR");
     expect(entrypointSource).toContain("runtime-home");
     expect(browserRuntimeSource).toContain('"assets", "runtime", "agent-browser"');

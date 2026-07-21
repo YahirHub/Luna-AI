@@ -1,87 +1,43 @@
-# 000 — Contexto maestro del proyecto
+# 000 — Contexto maestro de Luna AI
 
 # Fecha
 
 2026-07-21
 
-# Objetivo
+# Fuente de verdad
 
-Ser la entrada canónica para retomar Luna AI sin depender del historial del chat. Este archivo resume el estado vigente; los registros numerados conservan el detalle de cada cambio importante.
+Este archivo es la entrada canónica. Después deben leerse los registros numerados recientes y comprobar el código fuente antes de modificarlo.
 
-# Reglas de trabajo
+# Reglas de entrega
 
-- Leer primero este archivo y después los registros recientes relacionados con el área que se vaya a modificar.
-- Verificar siempre el código fuente actual antes de asumir que un registro histórico sigue vigente.
-- `contexto/` es la memoria persistente técnica del proyecto; evitar registros genéricos, duplicados o de tipo `actualizar nul`.
-- No eliminar ni reemplazar innecesariamente `node_modules`, `assets`, `persistent` ni `dist`.
-- Las eliminaciones intencionales deben quedar reproducibles mediante un script Python seguro desde la raíz del proyecto, salvo que el usuario indique explícitamente que la entrega será un reemplazo completo y que no desea scripts de eliminación.
-- Mantener aislados los datos por JID. Ninguna herramienta debe poder leer o escribir fuera del `workdir` privado del usuario.
-- Mientras no exista un modelo seguro de identidad multiusuario, ignorar por completo los mensajes de grupos de WhatsApp (`@g.us`); nunca autenticar ni restaurar sesiones de grupo.
-- Contraseñas, OTP y otras credenciales sensibles no deben exponerse al LLM.
+- Entregar siempre el proyecto completo en ZIP, preservando estructura y contenido salvo cambios solicitados.
+- No incluir node_modules, artefactos temporales ni scripts Python para eliminar archivos.
+- Conservar persistent/ al reemplazar una instalación para no perder sesiones, usuarios, memoria, credenciales y tareas.
+- Ejecutar typecheck, pruebas y build cuando el entorno permita descargar runtimes.
 
-# Arquitectura actual
+# Arquitectura vigente
 
-- Runtime principal en TypeScript/Bun con núcleo de mensajería independiente del cliente; actualmente se incluye el transporte WhatsApp mediante Baileys.
-- OpenCode Free es el proveedor LLM integrado predeterminado; se admite proveedor OpenAI-compatible personalizado.
-- La configuración de proveedores LLM personalizados solicita una sola URL base OpenAI-compatible y la API key; Luna deriva automáticamente `/models` y `/chat/completions`, consulta el catálogo y obliga a elegir por número el modelo global antes de guardar.
-- El agente principal es el orquestador. `researcher-web` se presenta como `api-search` y usa los proveedores configurados en `/setup-search`; `browser-web` se presenta como `browser-agent` y controla el ejecutable `agent-browser`.
-- `spawn_agents` ejecuta subagentes aislados en paralelo y conserva resultados parciales ante fallos individuales; puede ejecutarse en segundo plano cuando se solicita. `browser_agent` trabaja en segundo plano por defecto.
-- Búsqueda web multiproveedor con cola global, fallback y lectura de URLs protegida contra SSRF.
-- Workdir privado por usuario con tareas, inbox, exports y registro de artefactos.
-- Generación local de PDF/ZIP, envío por el transporte activo mediante `message_send` y registro de artefactos.
-- Procesamiento multimedia local con FFmpeg administrado para decodificación/normalización, whisper.cpp para transcripción y OCR WASM.
-- Alarmas, recordatorios, memoria y contexto persistentes por usuario.
-- Credenciales web persistentes cifradas con AES-256-GCM y clave local compartida con el runtime de `agent-browser`.
-- Supervisor persistente de tareas/agentes con IDs, nombres, estados de ejecución, revisión `pending/reviewed`, cancelación granular y recuperación `interrupted` tras reinicios.
-- Docker multi-arquitectura basado en Debian Bookworm, Chromium del sistema y runtimes portables de FFmpeg y Whisper/libgomp.
+- El modelo LLM es global. /setup-provider pide URL base y API key, deriva endpoints, consulta /models y obliga a seleccionar un modelo por número.
+- La mensajería usa MessagingTransport. Baileys está aislado en src/transports/baileys y administra presencia, simulación de escritura y cola. --transport o LUNA_TRANSPORT seleccionan el runner.
+- Los grupos de WhatsApp se ignoran antes de autenticación, comandos, multimedia o LLM.
+- El audio OGG/Opus se normaliza con FFmpeg administrado y se transcribe con whisper.cpp.
+- El agente principal delega navegación/auditoría de dominios específicos a browser-agent y búsquedas públicas rápidas/multiproveedor a api-search. Las misiones de scraping con URL se redirigen automáticamente al navegador.
+- Tareas y agentes tienen IDs, nombres, estado de ejecución y estado de revisión pending/reviewed.
+- browser-agent y api-search se ejecutan en segundo plano por defecto, por lo que el chat sigue disponible.
+- La cancelación se procesa por una ruta prioritaria antes del lock de conversación. El AbortSignal llega a cola, reintentos, búsquedas, read_url y navegador.
+- El orquestador revisa automáticamente resultados, eventos, carpetas y artefactos de tareas terminadas; las misiones largas se envían completas por WhatsApp en bloques numerados.
+- agent-browser usa HOME, perfil, namespace y runtime aislados por ejecución; puede inspeccionar HTML/DOM, consola, errores, red, assets y PDF, y el estado autenticado portable se fusiona al finalizar.
+- Los logs distinguen agent.browser-agent, browser-agent.runtime, agent.api-search, api-search.queue, api-search.retry, api-search.runtime y api-search.read-url, e incluyen contexto de tarea/agente. Los runtimes efímeros de búsquedas terminadas se liberan explícitamente.
 
-# Estado técnico vigente
+- Orquestador y subagentes pueden crear, leer, añadir, editar y eliminar archivos dentro de sus workdirs autorizados; la eliminación global exige confirmación y los agentes quedan confinados a su carpeta.
 
-- `Dockerfile` usa `debian:bookworm-slim`; el arreglo definitivo de Whisper evita copiar una `libgomp` incompatible desde la imagen de build.
-- `entrypoint.sh` mantiene `/data/bot` y `/data/runtime` fuera de escritura de `appuser`; HOME/XDG mutables viven bajo `persistent/`.
-- Linux ARM64 usa Chromium del sistema porque Chrome for Testing no publica binarios para esa plataforma.
-- El runtime de `agent-browser` se valida por plataforma, arquitectura y versión mediante manifest.
-- El workdir valida tanto la ruta léxica como el destino real del ancestro existente más cercano, bloqueando escrituras nuevas a través de symlinks externos.
-- La clave `persistent/browser/encryption.key` no se regenera si ya existe pero está corrupta, evitando invalidar silenciosamente credenciales cifradas previas.
-- `credential-profiles.json` se persiste mediante reemplazo atómico.
-- Los mensajes de grupos de WhatsApp se descartan antes del procesamiento y `AuthManager` rechaza/purga JIDs `@g.us`, evitando que un login grupal reemplace la sesión privada.
-- Las notas OGG/Opus se decodifican con un runtime FFmpeg estático preparado por plataforma/arquitectura; se verifica su SHA-256, se empaqueta junto al binario y se compara la duración estimada del OGG con el PCM para detectar truncamientos. Whisper ya no usa `--no-timestamps` en audios largos.
-- El modelo LLM es global: los campos `model` heredados de contextos por JID se ignoran y eliminan al cargarse. Cambiar de proveedor o seleccionar un modelo con `!modelos` actualiza inmediatamente todos los chats, tareas y subagentes; la selección global se persiste en `persistent/llm.model.json` ligada al catálogo del provider para impedir cruces entre proveedores.
-- La mensajería está desacoplada mediante `MessagingTransport`, `TransportIncomingMessage` y `TransportRunner`. Baileys queda aislado en `src/transports/baileys/`; el núcleo no importa tipos del SDK. Presencia/escritura y cola son responsabilidad del adaptador. `message_send` es genérica y delega el formato de archivo al transporte.
-- Actualmente se ejecuta un transporte activo por proceso, seleccionado por `--transport` o `LUNA_TRANSPORT`; la factoría solo incluye Baileys por ahora, pero permite registrar otro cliente de WhatsApp o Telegram sin modificar `bot.ts`.
-- Cada ejecución `browser-web` usa namespace, HOME, perfil Chrome y runtime temporal propios, permitiendo navegadores concurrentes. El estado autenticado portable por usuario se restaura al iniciar y se fusiona bajo un lease breve únicamente al guardar cookies/localStorage; no se serializa toda la navegación. Al finalizar o cancelar se cierran sesiones y procesos registrados sin usar `killall`.
-- Una tarea solo se anuncia como realmente iniciada después del evento `agent_started`; las consultas de progreso leen el registro autoritativo con actividad y último evento.
-- El orquestador revisa automáticamente las tareas de fondo terminadas, inspecciona sus carpetas y artefactos, envía los entregables y reintenta revisiones pendientes.
-- Las solicitudes humanas del navegador incluyen ID y captura anotada, admiten correcciones/reintentos y pueden coexistir entre varios agentes sin capturar mensajes ambiguos.
-- Chat, supervisor, registros persistentes y consola diferencian el backend real: `browser-agent` para navegación interactiva y `api-search` para proveedores de búsqueda. Los scopes incluyen identidad de tarea/agente y acción actual.
+# Seguridad
 
-# Archivos y módulos clave
-
-- `src/bot.ts`: orquestación principal, mensajes normalizados, comandos y herramientas; no depende de Baileys.
-- `src/context.ts`: prompt de sistema, historial y compactación.
-- `src/agents/`: runtime, registro y subagentes.
-- `src/browser/`: navegación, sesiones y credenciales.
-- `src/search/`: motores, fallback, cola y lectura segura de URLs.
-- `src/workspace/`: aislamiento de archivos por usuario.
-- `src/artifacts/`: PDF y ZIP.
-- `src/media-processing/`: audio, Whisper y OCR.
-- `src/transports/`: contratos, factoría y adaptadores de clientes; `src/transports/baileys/` contiene toda la integración actual de WhatsApp.
-- `src/messaging.ts`: fachada genérica de salida y actividad; no implementa presencia de ninguna plataforma.
-- `src/tools/messaging-tools.ts`: herramienta genérica `message_send` para texto, rutas, archivos y carpetas del workdir.
-- `scripts/`: preparación/empaquetado de runtimes y limpiezas reproducibles.
-
-# Limpieza de contexto
-
-- `contexto/000-contexto-maestro.md` es el maestro canónico.
-- `contexto/01-contexto-maestro.md` se conserva únicamente como puntero de compatibilidad para registros históricos que todavía lo referencian.
-- Se eliminaron registros exactos duplicados y registros automáticos espurios `064–069` que no representaban cambios técnicos fiables.
-- Se eliminó `informe.md` porque describía soluciones ARM64 temporales que contradicen el estado final documentado en `contexto/66-runtime-multiarch-browser-whisper-docker.md`.
-
-# Pendientes
-
-- Probar en el entorno real de WhatsApp la entrega automática de capturas y varias solicitudes de credenciales simultáneas.
-- Mantener los registros futuros con títulos y numeración coherentes y sin duplicar documentación ya existente.
+- Workdirs aislados por usuario y protegidos contra traversal y symlinks externos.
+- Credenciales web cifradas con AES-256-GCM; una clave corrupta no se reemplaza silenciosamente.
+- Contraseñas y OTP se capturan fuera del LLM y se vinculan a la solicitud/agente correcto.
+- message_send no permite enviar ZIP con posibles credenciales sin confirmación explícita.
 
 # Último registro
 
-- `contexto/77-diferenciar-browser-agent-y-api-search.md`
+- `contexto/79-enrutamiento-browser-api-y-herramientas-web-completas.md`

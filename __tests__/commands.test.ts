@@ -7,7 +7,7 @@ import {
   isPositiveInteger,
 } from "../src/commands.ts";
 
-// ─── Mock de transporte para pruebas ─────────────────────────────
+// ─── Mock de WASocket para pruebas ───────────────────────────────
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -21,13 +21,9 @@ function hasRegisteredCommand(source: string, commandName: string): boolean {
 
 function mockSock(): Parameters<typeof dispatchCommand>[2] {
   return {
-    id: "test",
-    label: "Test",
-    send: async () => "sent",
-    startActivity: async () => ({ refresh: async () => {}, stop: async () => {} }),
-    markRead: async () => {},
-    deleteMessage: async () => {},
-  } as Parameters<typeof dispatchCommand>[2];
+    sendPresenceUpdate: async () => {},
+    sendMessage: async () => ({} as never),
+  } as unknown as Parameters<typeof dispatchCommand>[2];
 }
 
 describe("parseCommand", () => {

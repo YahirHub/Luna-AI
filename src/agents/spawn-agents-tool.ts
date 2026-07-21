@@ -3,7 +3,7 @@ import type { AgentConfig } from "../agent-config.ts";
 import type { LlmConfig } from "../llm-config.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import type { TaskRuntime } from "../orchestration/task-runtime.ts";
-import { debugError, debugInfo, debugLog } from "../debug.ts";
+import { debugError, debugInfo } from "../debug.ts";
 import { MAIN_SPAWNABLE_AGENTS, normalizeAgentType, validateSpawnableAgent } from "./agent-registry.ts";
 import { runAgent } from "./agent-runtime.ts";
 import { deduplicateSpawnAgentRequests } from "./spawn-deduper.ts";
@@ -20,11 +20,12 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
   function: {
     name: "spawn_agents",
     description: [
-      "Crea subagentes especializados con contexto aislado. Puede ejecutarlos en primer plano o en segundo plano.",
-      "Úsala para delegar trabajos independientes en paralelo. El backend api-search consulta proveedores configurados en /setup-search; browser-agent controla un navegador real mediante agent-browser.",
+      "Crea subagentes especializados con contexto aislado y los ejecuta en segundo plano para no bloquear el chat.",
+      "Úsala para delegar dos o más investigaciones independientes en paralelo; por ejemplo un researcher-web por proveedor, producto o tema.",
       "Cada subagente puede usar sus propias herramientas y devuelve únicamente su respuesta final compacta.",
       "La herramienta NO crea PDFs ni entrega archivos: cuando termine, tú recuperas el control, revisas los resultados, puedes lanzar investigaciones adicionales si algo falta y después debes crear/sintetizar los archivos solicitados con las herramientas normales.",
-      "Internamente usa agent_type=researcher-web para api-search y agent_type=browser-web para browser-agent. En mensajes, estados y logs siempre se mostrarán los nombres públicos api-search o browser-agent.",
+      "Usa researcher-web/api-search para búsquedas rápidas, noticias, comparaciones o verificación pública en múltiples fuentes cuando existan motores configurados.",
+      "Usa browser-web/browser-agent para analizar, scrapear o inventariar un dominio concreto, recorrer sus páginas internas, inspeccionar HTML/DOM/consola/red, iniciar sesión, tomar capturas o descargar imágenes, favicon y archivos.",
     ].join(" "),
     parameters: {
       type: "object",
@@ -63,10 +64,6 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
             additionalProperties: false,
           },
         },
-        background: {
-          type: "boolean",
-          description: "Si es true, inicia la tarea y devuelve control inmediatamente para seguir conversando mientras los agentes trabajan.",
-        },
       },
       required: ["agents"],
       additionalProperties: false,
@@ -79,13 +76,18 @@ export const RESEARCHER_WEB_DIRECT_TOOL: ToolDefinition = {
   function: {
     name: "researcher_web",
     description: [
-      "Lanza un único agente api-search en un contexto aislado usando los proveedores configurados mediante /setup-search.",
+      "Lanza un único investigador web en un contexto aislado.",
+      "Úsalo para búsquedas rápidas o investigación pública en múltiples fuentes. NO lo uses para recorrer o scrapear íntegramente un dominio concreto: para eso usa browser_agent.",
       "El investigador decide cuántas búsquedas y lecturas necesita, prioriza fuentes oficiales y devuelve una síntesis con URLs y puntos no resueltos.",
-      "Después de recibir el resultado tú recuperas el control y decides si debes investigar algo más o realizar otras acciones.",
+      "La tarea queda en segundo plano, el chat continúa disponible y el orquestador revisa el resultado automáticamente al terminar.",
     ].join(" "),
     parameters: {
       type: "object",
       properties: {
+        name: {
+          type: "string",
+          description: "Nombre corto opcional para identificar este api-search.",
+        },
         prompt: {
           type: "string",
           description: "Pregunta o misión exacta que debe resolver el investigador.",
@@ -102,8 +104,9 @@ export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
   function: {
     name: "browser_agent",
     description: [
-      "Lanza un browser-agent aislado que controla agent-browser para navegar sitios interactivos, iniciar sesión mediante credential_ref segura, extraer datos, tomar capturas o descargar archivos.",
-      "El agente trabaja sin visión usando snapshots de accesibilidad y texto renderizado. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por el chat activo.",
+      "Lanza un agente de navegador aislado para navegar sitios interactivos, iniciar sesión mediante credential_ref segura, extraer datos, tomar capturas o descargar archivos.",
+      "Es la opción correcta para analizar o scrapear un dominio específico, recorrer todas sus rutas internas, inspeccionar HTML, consola y red, y descargar imágenes/favicon/assets.",
+      "El agente trabaja usando accesibilidad, DOM renderizado y herramientas de depuración. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por WhatsApp.",
       "Nunca incluyas una contraseña en prompt ni en argumentos: usa únicamente la credential_ref segura que el sistema haya colocado en el mensaje.",
     ].join(" "),
     parameters: {
@@ -112,7 +115,6 @@ export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
         name: { type: "string", description: "Nombre corto opcional para identificar esta tarea/agente de navegador." },
         prompt: { type: "string", description: "Misión exacta y autocontenida de navegación." },
         credential_ref: { type: "string", description: "Referencia segura opcional capturada fuera del LLM. Nunca contiene la contraseña." },
-        background: { type: "boolean", description: "Por defecto true. Permite seguir conversando mientras el navegador trabaja." },
       },
       required: ["prompt"],
       additionalProperties: false,
@@ -206,9 +208,9 @@ export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
 
 export type SpawnAgentsProgress =
   | { type: "task_registered"; taskId: string; title: string; total: number; background: boolean }
-  | { type: "agent_started"; taskId: string; agentId: string; agentName: string; backend: "browser-agent" | "api-search"; index: number; total: number; agentType: string; prompt: string }
-  | { type: "agent_activity"; taskId: string; agentId: string; agentName: string; backend: "browser-agent" | "api-search"; activity: string }
-  | { type: "agent_completed"; taskId: string; agentId: string; agentName: string; backend: "browser-agent" | "api-search"; index: number; total: number; agentType: string; status: SpawnAgentReport["status"] }
+  | { type: "agent_started"; taskId: string; agentId: string; agentName: string; index: number; total: number; agentType: string; prompt: string }
+  | { type: "agent_activity"; taskId: string; agentId: string; agentName: string; activity: string }
+  | { type: "agent_completed"; taskId: string; agentId: string; agentName: string; index: number; total: number; agentType: string; status: SpawnAgentReport["status"] }
   | { type: "task_completed"; taskId: string; status: "completed" | "partial" | "failed" | "cancelled"; background?: boolean };
 
 export type SpawnAgentsProgressHandler = (event: SpawnAgentsProgress) => void | Promise<void>;
@@ -251,6 +253,24 @@ function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
   });
 }
 
+export function shouldUseBrowserAgentForPrompt(prompt: string): boolean {
+  const normalized = prompt.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (/\b(?:usa|utiliza|con)\s+(?:api[- ]?search|researcher[- ]?web|investigador web)\b/.test(normalized)) return false;
+  const hasDomain = /https?:\/\/[^\s]+|\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|ai|mx|es|co|uk|de|info|xyz|site|online)\b/i.test(prompt);
+  const domainInspection = /\b(?:analiz|audit|revis|explor|recorr|scrap|rasp|extrae|extraer|inventari|clon|reconstru|moderniz|todas? las paginas|todo el sitio|contenido de cada pagina|rutas internas|favicon|imagenes|assets|codigo html|html|dom|consola|network|red)\w*/.test(normalized);
+  return hasDomain && domainInspection;
+}
+
+function routeAgentRequest(request: SpawnAgentRequest): SpawnAgentRequest {
+  if (normalizeAgentType(request.agent_type) !== "researcher-web") return request;
+  if (!shouldUseBrowserAgentForPrompt(request.prompt ?? "")) return request;
+  return {
+    ...request,
+    agent_type: "browser-web",
+    name: request.name || "Análisis completo del dominio",
+  };
+}
+
 function safeSegment(value: string): string {
   return value
     .normalize("NFD")
@@ -272,6 +292,14 @@ function describeAgentActivity(toolName: string, args: Record<string, unknown>):
     case "browser_open": return `Abriendo ${text("url") || "el sitio"}`;
     case "browser_snapshot": return "Inspeccionando los campos y controles de la página";
     case "browser_read": return "Leyendo el contenido visible de la página";
+    case "browser_get_html": return "Inspeccionando y guardando el HTML renderizado";
+    case "browser_eval": return "Consultando el DOM con JavaScript de inspección";
+    case "browser_console": return "Revisando la consola JavaScript";
+    case "browser_errors": return "Revisando errores de la página";
+    case "browser_network_requests": return "Inspeccionando solicitudes de red";
+    case "browser_network_request": return "Leyendo el detalle de una solicitud de red";
+    case "browser_extract_assets": return "Inventariando imágenes, favicon y recursos del sitio";
+    case "browser_download_assets": return "Descargando imágenes y favicon del sitio";
     case "browser_click": return `Haciendo clic en ${text("selector") || "un control"}`;
     case "browser_fill": return `Escribiendo en ${text("selector") || "un campo"}`;
     case "browser_fill_secret": return `Completando de forma segura ${text("selector") || "un campo protegido"}`;
@@ -281,13 +309,20 @@ function describeAgentActivity(toolName: string, args: Record<string, unknown>):
     case "browser_get_text": return `Leyendo ${text("selector") || "un elemento"}`;
     case "browser_get_url": return "Comprobando la página actual";
     case "browser_screenshot": return `Tomando la captura ${text("filename") || "solicitada"}`;
+    case "browser_pdf": return `Guardando la página como PDF ${text("filename") || ""}`.trim();
     case "browser_download": return `Descargando ${text("filename") || "un archivo"}`;
     case "browser_auth_profiles": return "Buscando una credencial cifrada compatible";
     case "browser_auth_login": return "Intentando iniciar sesión con una credencial segura";
     case "browser_auth_confirm": return "Confirmando y guardando el acceso cifrado";
     case "browser_request_user_input": return `Esperando ${text("field_name") || "un dato del usuario"}`;
-    case "web_search": return `Consultando proveedores API: ${text("query") || "información en la web"}`;
-    case "read_url": return `Verificando fuente encontrada por API: ${text("url") || "una URL"}`;
+    case "web_search": return `Buscando: ${text("query") || "información en la web"}`;
+    case "read_url": return `Leyendo ${text("url") || "una fuente"}`;
+    case "agent_workspace_list": return "Revisando los archivos de su carpeta de tarea";
+    case "agent_workspace_read_text": return `Leyendo ${text("path") || "un archivo de tarea"}`;
+    case "agent_workspace_write_text": return `Escribiendo ${text("path") || "un archivo de tarea"}`;
+    case "agent_workspace_append_text": return `Añadiendo contenido a ${text("path") || "un archivo de tarea"}`;
+    case "agent_workspace_edit_text": return `Editando ${text("path") || "un archivo de tarea"}`;
+    case "agent_workspace_delete": return `Eliminando ${text("path") || "una ruta de tarea"}`;
     default: return `Ejecutando ${toolName}`;
   }
 }
@@ -333,21 +368,11 @@ async function runSpawnTask(
       const tracked = dependencies.tasks.createAgent(dependencies.jid, task.record.id, {
         name: agentName,
         agentType: definition.id,
-        backend: definition.backend,
         runId,
         agentPath: agentDir,
         prompt: request.prompt ?? "",
       });
       agentRecords[index] = tracked.record;
-      debugInfo(`supervisor.${definition.backend}`, "agent_registered", {
-        backend: definition.backend,
-        taskId: task.record.id,
-        agentId: tracked.record.id,
-        agentName,
-        agentType: definition.id,
-        runId,
-        action: "Agente registrado y en cola",
-      });
 
       const credentialRef = definition.id === "browser-web" && typeof request.params?.credential_ref === "string"
         ? request.params.credential_ref.trim()
@@ -360,7 +385,6 @@ async function runSpawnTask(
         agentId: tracked.record.id,
         agentName,
         agentType: definition.id,
-        backend: definition.backend,
         displayName: definition.displayName,
         prompt: agentPrompt,
         params: request.params ?? null,
@@ -381,16 +405,14 @@ async function runSpawnTask(
             onStateChange: async (state) => {
               dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
                 status: state,
-                ...(state === "running" ? {
-                  waitingFieldName: undefined,
-                  waitingRequestId: undefined,
-                  waitingScreenshotPath: undefined,
-                } : {}),
+                activity: state === "waiting_user"
+                  ? "Esperando un dato del usuario"
+                  : state === "queued"
+                    ? "Esperando un recurso del navegador"
+                    : "Navegador activo",
               });
             },
             onUserInputRequest: async (input) => {
-              const secret = input.kind === "password" || input.kind === "otp";
-              const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
               dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
                 status: "waiting_user",
                 activity: `Esperando ${input.fieldName}`,
@@ -398,47 +420,41 @@ async function runSpawnTask(
                 waitingRequestId: input.requestId,
                 waitingScreenshotPath: input.screenshotPath,
               });
+              if (input.screenshotPath) {
+                await dependencies.onSystemArtifact?.(
+                  input.screenshotPath,
+                  `Pantalla donde ${tracked.record.id} necesita ${input.fieldName}`,
+                );
+              }
+              const secret = input.kind === "password" || input.kind === "otp";
+              const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
               const lines = [
                 heading,
                 "",
                 secret
-                  ? `Envía ahora ${input.fieldName} para continuar.`
+                  ? `Este es el mensaje seguro del sistema: envía ahora ${input.fieldName} para continuar.`
                   : (input.message || `La tarea necesita ${input.fieldName} para continuar.`),
               ];
+              lines.push(`Agente: ${tracked.record.id} (${agentName})`);
               if (input.url) lines.push(`Sitio: ${input.url}`);
               if (input.username) lines.push(`Cuenta: ${input.username}`);
               lines.push(
-                `Agente: browser-agent ${tracked.record.id} — ${agentName}`,
                 "",
-                `Responde con: ${tracked.record.id} <dato>`,
-                input.kind === "text"
-                  ? "Para datos libres usa siempre el ID del agente, así puedes seguir conversando sin que otro mensaje se interprete como respuesta."
-                  : "Si esta es la única solicitud pendiente, también puedes enviar solo un usuario, contraseña o código con formato inequívoco.",
                 secret
-                  ? "El valor se capturará fuera del modelo y se inyectará únicamente en esta tarea. Si la cuenta es incorrecta, escribe: corregir usuario."
-                  : "La misma sesión del navegador permanecerá abierta mientras respondes.",
+                  ? "El agente de navegador está pausado y mantiene la misma sesión abierta. El agente no verá el valor: tu respuesta se capturará fuera del modelo y se inyectará únicamente en esta misma tarea. Al responder, continuará desde la página actual sin crear otro subagente."
+                  : "El agente de navegador está pausado y mantiene la misma sesión abierta. Responde con el dato solicitado y esta misma tarea continuará desde la página actual.",
               );
-              if (input.screenshotPath) {
-                try {
-                  await dependencies.onSystemArtifact?.(
-                    input.screenshotPath,
-                    `Vista actual de browser-agent ${tracked.record.id}. Revisa el campo solicitado antes de responder.`,
-                  );
-                } catch (error) {
-                  debugError("agents.spawn", "input_screenshot_send_failed", error, {
-                    taskId: task.record.id,
-                    agentId: tracked.record.id,
-                    path: input.screenshotPath,
-                  });
-                }
-              }
               await dependencies.onSystemMessage?.(lines.join("\n"));
             },
           })
         : undefined;
 
       const unregisterTerminator = browserExecution
-        ? dependencies.tasks.registerAgentTerminator(dependencies.jid, tracked.record.id, (reason) => browserExecution.cancel(reason))
+        ? dependencies.tasks.registerAgentTerminator(
+            dependencies.jid,
+            tracked.record.id,
+            (reason) => browserExecution.cancel(reason),
+          )
         : () => undefined;
 
       let report: SpawnAgentReport;
@@ -451,10 +467,15 @@ async function runSpawnTask(
           agentConfig: dependencies.agentConfig,
           runId,
           parentRunId: task.record.id,
+          taskId: task.record.id,
           supervisorAgentId: tracked.record.id,
           supervisorAgentName: agentName,
+          backend: definition.id === "browser-web" ? "browser-agent" : "api-search",
           parentSignal: tracked.signal,
           browserExecution,
+          workspace: dependencies.workspace,
+          jid: dependencies.jid,
+          agentDir,
           onEvent: async (event) => {
             events.push(event);
             dependencies.workspace.writeText(
@@ -473,15 +494,10 @@ async function runSpawnTask(
                 taskId: task.record.id,
                 agentId: tracked.record.id,
                 agentName,
-                backend: definition.backend,
                 index,
                 total: uniqueAgents.length,
                 agentType: definition.id,
                 prompt: request.prompt ?? "",
-              });
-              debugInfo(`supervisor.${definition.backend}`, "agent_started", {
-                backend: definition.backend, taskId: task.record.id, agentId: tracked.record.id, agentName, agentType: definition.id, runId,
-                action: definition.backend === "browser-agent" ? "Navegación interactiva iniciada" : "Investigación mediante APIs iniciada",
               });
             } else if (event.type === "tool_started") {
               const activity = describeAgentActivity(event.toolName, event.args);
@@ -491,12 +507,7 @@ async function runSpawnTask(
                 taskId: task.record.id,
                 agentId: tracked.record.id,
                 agentName,
-                backend: definition.backend,
                 activity,
-              });
-              debugLog(`supervisor.${definition.backend}`, "agent_activity", {
-                backend: definition.backend, taskId: task.record.id, agentId: tracked.record.id, agentName, agentType: definition.id, runId,
-                tool: event.toolName, action: activity,
               });
             } else if (event.type === "tool_completed") {
               dependencies.tasks.updateAgentActivity(
@@ -530,6 +541,14 @@ async function runSpawnTask(
         resultPath,
         error: report.error,
       });
+      dependencies.tasks.releaseAgentRuntime(dependencies.jid, tracked.record.id);
+      debugInfo("agents.spawn", "agent_runtime_released", {
+        taskId: task.record.id,
+        agentId: tracked.record.id,
+        agentName,
+        backend: definition.id === "browser-web" ? "browser-agent" : "api-search",
+        status: report.status,
+      });
 
       completed += 1;
       dependencies.tasks.update(dependencies.jid, task.record.id, { completedWorkers: completed });
@@ -538,15 +557,9 @@ async function runSpawnTask(
         taskId: task.record.id,
         agentId: tracked.record.id,
         agentName,
-        backend: definition.backend,
         index,
         total: uniqueAgents.length,
         agentType: definition.id,
-        status: report.status,
-      });
-      debugInfo(`supervisor.${definition.backend}`, "agent_completed", {
-        backend: definition.backend, taskId: task.record.id, agentId: tracked.record.id, agentName, agentType: definition.id, runId,
-        action: report.status === "completed" ? "Agente terminado" : report.status === "cancelled" ? "Agente cancelado" : "Agente falló",
         status: report.status,
       });
       return report;
@@ -600,6 +613,8 @@ async function runSpawnTask(
       completedWorkers: uniqueReports.length,
       error: status === "cancelled" ? "Cancelada por el usuario." : failedCount > 0 ? `${failedCount} subagente(s) no completaron la tarea.` : undefined,
     });
+    dependencies.tasks.releaseTaskRuntime(dependencies.jid, task.record.id);
+    debugInfo("agents.spawn", "task_runtime_released", { taskId: task.record.id, status });
     await emit(dependencies.onProgress, { type: "task_completed", taskId: task.record.id, status, background });
     if (background && status !== "cancelled") {
       try {
@@ -620,7 +635,6 @@ async function runSpawnTask(
       reports: reports.map((report, index) => ({
         agent_id: agentRecords[originalToUniqueIndex[index] ?? index]?.id,
         agent_type: report.agentType,
-        backend: agentRecords[originalToUniqueIndex[index] ?? index]?.backend,
         agent_name: report.agentName,
         prompt: report.prompt.length > 500 ? `${report.prompt.slice(0, 500)}…` : report.prompt,
         status: report.status,
@@ -654,7 +668,7 @@ export async function executeSpawnAgentsTool(
   args: Record<string, unknown>,
   dependencies: SpawnAgentsDependencies,
 ): Promise<string> {
-  let requested = parseRequests(args);
+  let requested = parseRequests(args).map(routeAgentRequest);
   if (requested.length === 0) return "Error: agents debe contener al menos un subagente con agent_type y prompt.";
   if (requested.length > MAX_AGENTS_PER_CALL) return `Error: solo se permiten ${MAX_AGENTS_PER_CALL} subagentes por llamada.`;
   if (dependencies.filterRequests) requested = dependencies.filterRequests(requested);
@@ -674,9 +688,9 @@ export async function executeSpawnAgentsTool(
       ? `${uniqueAgents[0]?.name || "Tarea"}: ${uniqueAgents[0]?.prompt?.slice(0, 70) ?? "subagente"}`
       : `Tarea paralela con ${uniqueAgents.length} subagentes`;
   const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length);
-  const background = args.background === true;
+  const background = args.background !== false;
 
-  debugInfo("agents.spawn", "task_started", { taskId: task.record.id, jid: dependencies.jid, requested: requested.length, unique: uniqueAgents.length, title, background, backends: uniqueAgents.map((agent) => validateSpawnableAgent(agent.agent_type, MAIN_SPAWNABLE_AGENTS).backend) });
+  debugInfo("agents.spawn", "task_started", { taskId: task.record.id, jid: dependencies.jid, requested: requested.length, unique: uniqueAgents.length, title, background });
   await emit(dependencies.onProgress, {
     type: "task_registered",
     taskId: task.record.id,
@@ -694,7 +708,7 @@ export async function executeSpawnAgentsTool(
       title: task.record.title,
       status: "queued",
       background: true,
-      message: "La tarea quedó registrada y el supervisor confirmará cuando el agente comience realmente. Puedes seguir conversando. Usa task_list/agent_list para verla o task_cancel/agent_cancel para detenerla.",
+      message: "La tarea quedó bajo control del supervisor en segundo plano. Los mensajes del sistema task_registered/agent_started son la única fuente autoritativa de su estado. No repitas la misión completa ni afirmes que sigue en cola o activa; limita tu respuesta a confirmar que el supervisor la administrará. Puedes seguir conversando y cancelarla con task_cancel/agent_cancel.",
     }, null, 2);
   }
 
@@ -709,11 +723,24 @@ export async function executeResearcherWebTool(
 ): Promise<string> {
   const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return "Error: prompt es obligatorio.";
+  const background = args.background !== false;
+  const name = typeof args.name === "string" ? args.name.trim() : "";
+  if (shouldUseBrowserAgentForPrompt(prompt)) {
+    return await executeBrowserWebTool({
+      name: name || "Análisis completo del dominio",
+      prompt,
+      background,
+    }, dependencies);
+  }
   const raw = await executeSpawnAgentsTool(
-    { title: `Investigación web: ${prompt.slice(0, 70)}`, background: false, agents: [{ agent_type: "researcher-web", prompt }] },
+    {
+      title: name || `Investigación web: ${prompt.slice(0, 70)}`,
+      background,
+      agents: [{ agent_type: "researcher-web", name: name || undefined, prompt }],
+    },
     dependencies,
   );
-  if (raw.startsWith("Error:")) return raw;
+  if (background || raw.startsWith("Error:")) return raw;
   try {
     const parsed = JSON.parse(raw) as { reports?: Array<{ result?: string; error?: string; status?: string }>; task_id?: string };
     const report = parsed.reports?.[0];
@@ -818,7 +845,7 @@ export function executeAgentTaskTool(
     return agents.map((agent, index) => {
       const detail = agent.activity ? ` — ahora: ${agent.activity}` : "";
       const waiting = agent.waitingFieldName ? ` — espera: ${agent.waitingFieldName}` : "";
-      return `${index + 1}. ${agent.id} — ${agent.backend} — ${agent.status}/${agent.reviewStatus} — ${agent.name}${detail}${waiting} — tarea ${agent.taskId}`;
+      return `${index + 1}. ${agent.id} — ${agent.status}/${agent.reviewStatus} — ${agent.name}${detail}${waiting} — tarea ${agent.taskId}`;
     }).join("\n");
   }
   if (name === "task_cancel_all") {
@@ -866,7 +893,6 @@ export function executeAgentTaskTool(
         agent_id: agent.id,
         name: agent.name,
         type: agent.agentType,
-        backend: agent.backend,
         status: agent.status,
         error: agent.error,
         result_path: agent.resultPath,
@@ -905,7 +931,6 @@ export function executeAgentTaskTool(
       agent_id: agent.id,
       name: agent.name,
       type: agent.agentType,
-      backend: agent.backend,
       status: agent.status,
       review_status: "reviewed",
       error: agent.error,
@@ -917,7 +942,7 @@ export function executeAgentTaskTool(
     const agent = dependencies.tasks.findAgent(dependencies.jid, agentSelector);
     if (!agent) return `Error: no existe un agente que coincida con ${agentSelector}.`;
     return dependencies.tasks.cancelAgent(dependencies.jid, agent.id)
-      ? `✅ ${agent.backend} ${agent.id} (${agent.name}) cancelado. Los demás agentes y la conversación continúan.`
+      ? `✅ Agente ${agent.id} (${agent.name}) cancelado. Los demás agentes y la conversación continúan.`
       : `Error: el agente ${agent.id} ya terminó o no está activo.`;
   }
   return `Error: herramienta de tareas desconocida "${name}".`;

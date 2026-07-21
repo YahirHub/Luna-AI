@@ -1,4 +1,4 @@
-import { deriveLlmEndpointUrls, type LlmConfig } from "./llm-config.ts";
+import type { LlmConfig, ProviderEndpointCandidate } from "./llm-config.ts";
 import { debugError, debugWarn } from "./debug.ts";
 
 /** Mensaje en formato OpenAI. */
@@ -541,105 +541,59 @@ export async function chatCompletionWithTools(
  * No aplica filtros por sufijo, proveedor o nombre: el endpoint es la fuente
  * de verdad y solo se descartan identificadores vacíos o duplicados.
  */
-export async function fetchModels(
-  config: Pick<LlmConfig, "modelsUrl" | "apiKey" | "requestTimeoutMs">,
-): Promise<string[]> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (config.apiKey) {
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
-  }
-
-  const response = await fetchWithTimeout(
-    config.modelsUrl,
-    { headers },
-    config.requestTimeoutMs,
-  );
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `Error al obtener modelos (${response.status}): ${text.slice(0, 200)}`,
-    );
-  }
-
-  const payload = (await response.json()) as unknown;
-  let entries: unknown[] | null = null;
-
-  if (Array.isArray(payload)) {
-    entries = payload;
-  } else if (payload && typeof payload === "object") {
-    const object = payload as { data?: unknown; models?: unknown };
-    if (Array.isArray(object.data)) entries = object.data;
-    else if (Array.isArray(object.models)) entries = object.models;
-  }
-
-  if (!entries) {
-    throw new Error("Respuesta inesperada del endpoint de modelos");
-  }
-
+function extractModelIds(payload: unknown): string[] {
+  const root = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null;
+  const entries = Array.isArray(payload)
+    ? payload
+    : Array.isArray(root?.data)
+      ? root.data
+      : Array.isArray(root?.models)
+        ? root.models
+        : [];
   const ids = entries.flatMap((entry) => {
-    if (typeof entry === "string") {
-      return entry.trim() ? [entry.trim()] : [];
-    }
-    if (!entry || typeof entry !== "object") {
-      return [];
-    }
-
-    const object = entry as { id?: unknown; name?: unknown; model?: unknown };
-    const rawId = object.id ?? object.model ?? object.name;
-    return typeof rawId === "string" && rawId.trim() !== ""
-      ? [rawId.trim()]
-      : [];
+    if (typeof entry === "string" && entry.trim()) return [entry.trim()];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const candidate = entry as Record<string, unknown>;
+    const id = [candidate.id, candidate.model, candidate.name]
+      .find((value) => typeof value === "string" && value.trim());
+    return typeof id === "string" ? [id.trim()] : [];
   });
-
   return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
 }
 
-export interface ProviderModelDiscoveryResult {
-  baseUrl: string;
-  chatCompletionsUrl: string;
-  modelsUrl: string;
-  models: string[];
+async function fetchModelCatalog(modelsUrl: string, apiKey: string, timeoutMs: number): Promise<string[]> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const response = await fetchWithTimeout(modelsUrl, { headers }, timeoutMs);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP ${response.status}: ${text.slice(0, 200) || response.statusText}`);
+  }
+  return extractModelIds(await response.json());
 }
 
-/**
- * Prueba automáticamente las URLs base candidatas y selecciona la primera cuyo
- * catálogo /models responda correctamente. Nunca registra ni incluye la API key
- * en los errores.
- */
-export async function discoverProviderModels(
-  baseUrlCandidates: readonly string[],
-  apiKey: string,
-  requestTimeoutMs: number,
-): Promise<ProviderModelDiscoveryResult> {
-  const errors: string[] = [];
+export async function fetchModels(config: LlmConfig): Promise<string[]> {
+  return fetchModelCatalog(config.modelsUrl, config.apiKey, config.requestTimeoutMs);
+}
 
-  for (const baseUrlCandidate of baseUrlCandidates) {
-    const endpoints = deriveLlmEndpointUrls(baseUrlCandidate);
+export async function discoverProviderModels(
+  candidates: readonly ProviderEndpointCandidate[],
+  apiKey: string,
+  timeoutMs: number,
+): Promise<{ candidate: ProviderEndpointCandidate; models: string[] }> {
+  const failures: string[] = [];
+  for (const candidate of candidates) {
     try {
-      const models = await fetchModels({
-        modelsUrl: endpoints.modelsUrl,
-        apiKey,
-        requestTimeoutMs,
-      });
-      if (models.length === 0) {
-        errors.push(`${endpoints.modelsUrl}: catálogo vacío`);
-        continue;
-      }
-      return { ...endpoints, models };
+      const models = await fetchModelCatalog(candidate.modelsUrl, apiKey, timeoutMs);
+      if (models.length === 0) throw new Error("El catálogo no contiene modelos reconocibles.");
+      return { candidate, models };
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      errors.push(`${endpoints.modelsUrl}: ${reason}`);
+      failures.push(`${candidate.modelsUrl}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-
-  const attempted = baseUrlCandidates
-    .map((baseUrl) => deriveLlmEndpointUrls(baseUrl).modelsUrl)
-    .join(", ");
-  throw new Error(
-    `No se pudo obtener el catálogo de modelos. Se probaron automáticamente: ${attempted}. ` +
-    `Verifica la URL base y la API key. ${errors.join(" | ")}`,
-  );
+  throw new Error(`No pude detectar /models en la URL proporcionada. ${failures.join(" | ")}`);
 }
 
 export interface ModelDiscoveryResult {

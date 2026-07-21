@@ -7,7 +7,10 @@ import { READ_URL_TOOL, executeReadUrlTool } from "../search/read-url.ts";
 import { runSearchWithRetry } from "../search/search-coordinator.ts";
 import { BROWSER_AGENT_TOOLS } from "../browser/browser-tools.ts";
 import type { BrowserAgentExecution } from "../browser/browser-runtime.ts";
+import { AGENT_WORKSPACE_TOOLS, executeAgentWorkspaceTool } from "../workspace/agent-workspace-tools.ts";
+import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import { getMexicoCityNow } from "../utils.ts";
+import { agentLogData, withAgentExecutionContext, type AgentBackend } from "./execution-context.ts";
 import type {
   AgentDefinition,
   AgentEventHandler,
@@ -19,6 +22,7 @@ const TOOL_BINDINGS = new Map<string, Omit<AgentToolBinding, "execute">>([
   ["web_search", { definition: WEB_SEARCH_TOOL }],
   ["read_url", { definition: READ_URL_TOOL }],
   ...BROWSER_AGENT_TOOLS.map((definition) => [definition.function.name, { definition }] as const),
+  ...AGENT_WORKSPACE_TOOLS.map((definition) => [definition.function.name, { definition }] as const),
 ]);
 
 function childAbortController(parentSignal: AbortSignal | undefined, timeoutMs: number): {
@@ -82,42 +86,31 @@ export interface RunAgentOptions {
   agentConfig: AgentConfig;
   runId: string;
   parentRunId?: string;
-  supervisorAgentId?: string;
-  supervisorAgentName?: string;
   parentSignal?: AbortSignal;
   timeoutMs?: number;
   onEvent?: AgentEventHandler;
   webSearchExecutor?: typeof executeWebSearchToolDetailed;
   readUrlExecutor?: typeof executeReadUrlTool;
   browserExecution?: BrowserAgentExecution;
+  taskId?: string;
+  supervisorAgentId?: string;
+  supervisorAgentName?: string;
+  backend?: AgentBackend;
+  workspace?: WorkspaceManager;
+  jid?: string;
+  agentDir?: string;
 }
 
-export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentReport> {
+async function runAgentInternal(options: RunAgentOptions): Promise<SpawnAgentReport> {
   const timeoutMs = options.timeoutMs ?? (options.definition.id === "researcher-web"
     ? options.agentConfig.researcherTimeoutMs
     : options.definition.timeoutMs);
   const { controller, cleanup } = childAbortController(options.parentSignal, timeoutMs);
   const signal = controller.signal;
   const toolsCalled: string[] = [];
-  const backend = options.definition.backend;
-  const supervisorAgentId = options.supervisorAgentId ?? options.definition.id;
-  const supervisorAgentName = options.supervisorAgentName ?? options.definition.displayName;
-  const logScope = `agent.${backend}`;
-  const logContext = {
-    backend,
-    taskId: options.parentRunId,
-    agentId: supervisorAgentId,
-    agentName: supervisorAgentName,
-    agentType: options.definition.id,
-    runId: options.runId,
-  };
 
   await options.onEvent?.({
     type: "agent_started",
-    backend,
-    taskId: options.parentRunId,
-    supervisorAgentId,
-    supervisorAgentName,
     runId: options.runId,
     parentRunId: options.parentRunId,
     agentId: options.definition.id,
@@ -125,14 +118,14 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
     prompt: options.prompt,
     timeoutMs,
   });
-  debugInfo(logScope, "started", {
-    ...logContext,
-    action: backend === "browser-agent" ? "Iniciando navegación interactiva" : "Iniciando investigación mediante APIs de búsqueda",
+  debugInfo(`agent.${options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search")}`, "started", agentLogData({
+    agentId: options.definition.id,
+    runId: options.runId,
     parentRunId: options.parentRunId,
     timeoutMs,
     maxSteps: options.definition.maxSteps,
     toolNames: options.definition.toolNames,
-  });
+  }));
 
   try {
     const result = await chatCompletionWithTools(
@@ -143,21 +136,17 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
       async (name, args) => {
         await options.onEvent?.({
           type: "tool_started",
-          backend,
-          taskId: options.parentRunId,
-          supervisorAgentId,
-          supervisorAgentName,
           runId: options.runId,
           agentId: options.definition.id,
           toolName: name,
           args,
         });
-        debugLog(logScope, "tool_started", {
-          ...logContext,
-          action: `Ejecutando ${name}`,
+        debugLog(`agent.${options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search")}`, "tool_started", agentLogData({
+          agentId: options.definition.id,
+          runId: options.runId,
           tool: name,
           args,
-        });
+        }));
 
         let toolResult: string;
         try {
@@ -165,14 +154,15 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
             const query = typeof args.query === "string" ? args.query.trim() : "";
             toolResult = (await runSearchWithRetry(
               `${options.runId}:${query || "web_search"}`,
-              () => (options.webSearchExecutor ?? executeWebSearchToolDetailed)(args, options.agentConfig.defaultSearchDepth, signal, logContext),
+              () => (options.webSearchExecutor ?? executeWebSearchToolDetailed)(args, options.agentConfig.defaultSearchDepth, signal),
               signal,
-              logContext,
             )).text;
           } else if (name === "read_url") {
-            toolResult = await (options.readUrlExecutor ?? executeReadUrlTool)(args, signal, logContext);
+            toolResult = await (options.readUrlExecutor ?? executeReadUrlTool)(args, signal);
           } else if (name.startsWith("browser_") && options.browserExecution) {
             toolResult = await options.browserExecution.executeTool(name, args, signal);
+          } else if (name.startsWith("agent_workspace_") && options.workspace && options.jid && options.agentDir) {
+            toolResult = await executeAgentWorkspaceTool(name, args, options.workspace, options.jid, options.agentDir);
           } else {
             toolResult = `Error: la herramienta "${name}" no está permitida para ${options.definition.id}.`;
           }
@@ -185,23 +175,19 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
         toolsCalled.push(name);
         await options.onEvent?.({
           type: "tool_completed",
-          backend,
-          taskId: options.parentRunId,
-          supervisorAgentId,
-          supervisorAgentName,
           runId: options.runId,
           agentId: options.definition.id,
           toolName: name,
           ok,
           resultChars: toolResult.length,
         });
-        debugLog(logScope, "tool_completed", {
-          ...logContext,
-          action: ok ? `Finalizó ${name}` : `Falló ${name}`,
+        debugLog(`agent.${options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search")}`, "tool_completed", agentLogData({
+          agentId: options.definition.id,
+          runId: options.runId,
           tool: name,
           ok,
           resultChars: toolResult.length,
-        });
+        }));
         return toolResult;
       },
       5,
@@ -219,21 +205,17 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
 
     await options.onEvent?.({
       type: "agent_finished",
-      backend,
-      taskId: options.parentRunId,
-      supervisorAgentId,
-      supervisorAgentName,
       runId: options.runId,
       agentId: options.definition.id,
       outputChars: output.length,
       toolsCalled: [...toolsCalled],
     });
-    debugInfo(logScope, "finished", {
-      ...logContext,
-      action: "Agente terminado",
+    debugInfo(`agent.${options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search")}`, "finished", agentLogData({
+      agentId: options.definition.id,
+      runId: options.runId,
       outputChars: output.length,
       toolsCalled,
-    });
+    }));
 
     return {
       agentType: options.definition.id,
@@ -253,21 +235,17 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
 
     await options.onEvent?.({
       type: "agent_failed",
-      backend,
-      taskId: options.parentRunId,
-      supervisorAgentId,
-      supervisorAgentName,
       runId: options.runId,
       agentId: options.definition.id,
       cancelled,
       error: message,
     });
-    debugError(logScope, cancelled ? "cancelled" : timedOut ? "timeout" : "failed", error, {
-      ...logContext,
-      action: cancelled ? "Agente cancelado" : timedOut ? "Agente agotó su tiempo" : "Agente falló",
+    debugError(`agent.${options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search")}`, cancelled ? "cancelled" : timedOut ? "timeout" : "failed", error, agentLogData({
+      agentId: options.definition.id,
+      runId: options.runId,
       timeoutMs,
       toolsCalled,
-    });
+    }));
 
     return {
       agentType: options.definition.id,
@@ -281,4 +259,16 @@ export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentRepo
   } finally {
     cleanup();
   }
+}
+
+export async function runAgent(options: RunAgentOptions): Promise<SpawnAgentReport> {
+  const backend = options.backend ?? (options.definition.id === "browser-web" ? "browser-agent" : "api-search");
+  return withAgentExecutionContext({
+    backend,
+    taskId: options.taskId ?? options.parentRunId,
+    agentId: options.supervisorAgentId,
+    agentName: options.supervisorAgentName,
+    agentType: options.definition.id,
+    runId: options.runId,
+  }, () => runAgentInternal({ ...options, backend }));
 }

@@ -2,10 +2,18 @@ import type { AgentDefinition } from "../agent-types.ts";
 
 export const RESEARCHER_WEB_AGENT: AgentDefinition = {
   id: "researcher-web",
-  backend: "api-search",
   displayName: "Investigador web",
   spawnerPrompt: "Investiga una pregunta actual usando búsquedas web y lectura directa de fuentes.",
-  toolNames: ["web_search", "read_url"],
+  toolNames: [
+    "web_search",
+    "read_url",
+    "agent_workspace_list",
+    "agent_workspace_read_text",
+    "agent_workspace_write_text",
+    "agent_workspace_append_text",
+    "agent_workspace_edit_text",
+    "agent_workspace_delete",
+  ],
   spawnableAgents: [],
   includeMessageHistory: false,
   outputMode: "last_message",
@@ -26,6 +34,7 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
     "Devuelve una síntesis concisa y útil para el agente padre, con hallazgos exactos, URLs completas de las fuentes utilizadas y cualquier punto no resuelto.",
     "La respuesta final debe estar completa y ser compacta: prioriza exactamente lo solicitado y procura no superar unas 7000-9000 caracteres. No cortes tablas ni frases a la mitad.",
     "No devuelvas páginas completas ni volcados de resultados de búsqueda.",
+    "Puedes crear notas, tablas o borradores dentro de tu carpeta privada con agent_workspace_*. No puedes tocar archivos fuera de esa carpeta.",
   ].join("\n"),
   instructionsPrompt: [
     "Usa tantas búsquedas enfocadas y lecturas de fuentes como la evidencia realmente requiera.",

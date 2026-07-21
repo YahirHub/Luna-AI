@@ -1,5 +1,4 @@
 import { debugError, debugLog, debugWarn } from "../debug.ts";
-import type { AgentExecutionLogContext } from "../agents/agent-types.ts";
 
 interface QueueEntry<T> {
   id: number;
@@ -9,7 +8,6 @@ interface QueueEntry<T> {
   reject: (reason: unknown) => void;
   signal?: AbortSignal;
   onAbort?: () => void;
-  executionContext?: AgentExecutionLogContext;
 }
 
 let queueSequence = 0;
@@ -71,9 +69,6 @@ function pump(): void {
     active += 1;
     lastStartedAt = Date.now();
     debugLog("api-search.queue", "started", {
-      backend: "api-search",
-      ...entry.executionContext,
-      action: "Solicitud API liberada desde la cola",
       queueId: entry.id,
       label: entry.label,
       active,
@@ -87,9 +82,6 @@ function pump(): void {
       .finally(() => {
         active -= 1;
         debugLog("api-search.queue", "released", {
-          backend: "api-search",
-          ...entry.executionContext,
-          action: "Solicitud API finalizada y cupo liberado",
           queueId: entry.id,
           label: entry.label,
           active,
@@ -100,7 +92,7 @@ function pump(): void {
   }
 }
 
-export function scheduleSearch<T>(label: string, operation: () => Promise<T>, signal?: AbortSignal, executionContext?: AgentExecutionLogContext): Promise<T> {
+export function scheduleSearch<T>(label: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal?.aborted) return Promise.reject(cancellationReason(signal));
   return new Promise<T>((resolve, reject) => {
     const entry: QueueEntry<T> = {
@@ -110,7 +102,6 @@ export function scheduleSearch<T>(label: string, operation: () => Promise<T>, si
       resolve,
       reject,
       signal,
-      executionContext,
     };
     if (signal) {
       entry.onAbort = () => {
@@ -118,9 +109,6 @@ export function scheduleSearch<T>(label: string, operation: () => Promise<T>, si
         if (index >= 0) queue.splice(index, 1);
         reject(cancellationReason(signal));
         debugWarn("api-search.queue", "cancelled_while_waiting", {
-          backend: "api-search",
-          ...executionContext,
-          action: "Búsqueda API cancelada mientras esperaba turno",
           queueId: entry.id,
           label,
           pending: queue.length,
@@ -130,9 +118,6 @@ export function scheduleSearch<T>(label: string, operation: () => Promise<T>, si
     }
     queue.push(entry as QueueEntry<unknown>);
     debugLog("api-search.queue", "queued", {
-      backend: "api-search",
-      ...executionContext,
-      action: "Búsqueda API colocada en cola",
       queueId: entry.id,
       label,
       active,
@@ -174,27 +159,23 @@ export async function runSearchWithRetry<T>(
   label: string,
   operation: () => Promise<T>,
   signal?: AbortSignal,
-  executionContext?: AgentExecutionLogContext,
 ): Promise<T> {
   const attempts = retryAttempts();
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      debugLog("api-search.retry", "attempt", { backend: "api-search", ...executionContext, action: `Intento API ${attempt}/${attempts}`, label, attempt, attempts });
-      const result = await scheduleSearch(`${label}#${attempt}`, operation, signal, executionContext);
-      if (attempt > 1) debugInfoCompat(label, attempt, executionContext);
+      debugLog("api-search.retry", "attempt", { label, attempt, attempts });
+      const result = await scheduleSearch(`${label}#${attempt}`, operation, signal);
+      if (attempt > 1) debugInfoCompat(label, attempt);
       return result;
     } catch (error) {
       lastError = error;
       if (isCancellation(error, signal) || isConfigurationError(error) || attempt >= attempts) {
-        debugError("api-search.retry", "exhausted", error, { backend: "api-search", ...executionContext, action: "Se agotaron los reintentos API", label, attempt, attempts });
+        debugError("api-search.retry", "exhausted", error, { label, attempt, attempts });
         throw error;
       }
       const delayMs = retryBaseDelayMs() * (2 ** (attempt - 1));
       debugWarn("api-search.retry", "will_retry", {
-        backend: "api-search",
-        ...executionContext,
-        action: "La búsqueda API falló; se reintentará",
         label,
         attempt,
         attempts,
@@ -207,6 +188,6 @@ export async function runSearchWithRetry<T>(
   throw lastError;
 }
 
-function debugInfoCompat(label: string, attempt: number, executionContext?: AgentExecutionLogContext): void {
-  debugLog("api-search.retry", "recovered", { backend: "api-search", ...executionContext, action: "Búsqueda API recuperada tras reintento", label, attempt });
+function debugInfoCompat(label: string, attempt: number): void {
+  debugLog("api-search.retry", "recovered", { label, attempt });
 }

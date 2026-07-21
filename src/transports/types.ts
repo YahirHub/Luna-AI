@@ -1,87 +1,43 @@
-/**
- * Contrato de transporte independiente de WhatsApp, Telegram u otra librería.
- * El núcleo de Luna solo conoce estas estructuras; cada adaptador convierte
- * desde/hacia las estructuras nativas de su SDK.
- */
 export type TransportDeliveryStatus = "sent" | "queued";
 
-export type TransportMediaKind = "image" | "audio" | "video" | "document";
-
-export interface TransportActivitySession {
-  refresh: () => Promise<void>;
-  stop: () => Promise<void>;
-}
-
-export interface TransportIncomingMedia {
-  kind: TransportMediaKind;
-  mimeType: string;
-  fileName?: string;
+export interface TransportOutboundContent {
+  text?: string;
+  image?: Buffer;
+  audio?: Buffer;
+  video?: Buffer;
+  document?: Buffer;
   caption?: string;
-  sizeBytes?: number;
-  durationSeconds?: number;
-  download: () => Promise<Uint8Array>;
+  mimetype?: string;
+  fileName?: string;
+  ptt?: boolean;
 }
 
 export interface TransportIncomingMessage {
-  /** Identificador estable de la conversación usado por auth/contexto/workdir. */
+  id: string;
   conversationId: string;
-  /** Identificador nativo que el adaptador usa para responder. */
-  chatId: string;
-  /** Identificador del remitente, cuando la plataforma lo expone. */
-  senderId: string;
-  /** Identificador nativo del mensaje. */
-  messageId: string;
-  transportId: string;
   fromSelf: boolean;
-  isGroup: boolean;
   text: string;
-  media?: TransportIncomingMedia;
-  /** Referencia opaca para operaciones propias del adaptador, como borrar. */
-  native?: unknown;
+  mediaKind: "image" | "audio" | null;
+  caption: string;
+  /** Objeto nativo reservado exclusivamente para el adaptador/decodificador. */
+  raw: unknown;
+  downloadMedia?: () => Promise<Uint8Array>;
+  mediaMimeType?: string;
+  mediaSizeBytes?: number;
+  mediaDurationSeconds?: number;
 }
-
-export interface TransportTextMessage {
-  kind: "text";
-  text: string;
-}
-
-export interface TransportFileMessage {
-  kind: "file";
-  bytes: Uint8Array;
-  fileName: string;
-  mimeType: string;
-  caption?: string;
-  /** "auto" permite al adaptador elegir medio nativo o documento. */
-  mode?: "auto" | "document";
-}
-
-export type TransportOutboundMessage = TransportTextMessage | TransportFileMessage;
 
 export interface TransportSendOptions {
   minDelayMs?: number;
   maxDelayMs?: number;
-  /** Si false, permite continuar sin esperar confirmación inmediata de entrega. */
   waitForDelivery?: boolean;
 }
 
 export interface MessagingTransport {
   readonly id: string;
-  readonly label: string;
-
-  /**
-   * Envía un mensaje. La política de escritura/presencia y cola pertenece al
-   * adaptador, no al núcleo de Luna.
-   */
-  send(
-    conversationId: string,
-    message: TransportOutboundMessage,
-    options?: TransportSendOptions,
-  ): Promise<TransportDeliveryStatus>;
-
-  /** Actividad larga opcional ("escribiendo", chat action, etc.). */
-  startActivity(conversationId: string, refreshIntervalMs?: number): Promise<TransportActivitySession>;
-
-  /** Operaciones best-effort específicas de plataforma. */
+  readonly connected: boolean;
+  send(conversationId: string, content: TransportOutboundContent, options?: TransportSendOptions): Promise<TransportDeliveryStatus>;
+  sendPresence(conversationId: string, state: "composing" | "paused"): Promise<void>;
   markRead(message: TransportIncomingMessage): Promise<void>;
   deleteMessage(message: TransportIncomingMessage): Promise<void>;
 }
@@ -91,13 +47,9 @@ export type TransportMessageHandler = (
   message: TransportIncomingMessage,
 ) => Promise<void>;
 
-/**
- * Un runner administra autenticación, reconexión y ciclo de vida de una
- * implementación concreta. Añadir Telegram u otro cliente requiere crear un
- * runner/adaptador nuevo, sin modificar bot.ts.
- */
 export interface TransportRunner {
   readonly id: string;
-  readonly label: string;
-  run(handler: TransportMessageHandler): Promise<void>;
+  getAuthDir(): string;
+  sessionExists(): boolean;
+  run(handler: TransportMessageHandler, options: { authMode?: "qr" | "pairing"; phoneNumber?: string }): Promise<{ loggedOut: boolean }>;
 }

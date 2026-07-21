@@ -1,6 +1,8 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
+import { basename, dirname, extname, join } from "node:path";
 import { getAppDir } from "../utils.ts";
 import {
   agentBrowserGenericName,
@@ -13,9 +15,8 @@ import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import type { BrowserCredentialStore, BrowserInputKind } from "./browser-credentials.ts";
 import { debugInfo, debugLog, debugWarn } from "../debug.ts";
 import { createProcessOutputCollector } from "./process-output.ts";
-import { loadOrCreateBrowserEncryptionKey } from "./browser-encryption.ts";
-import { writeJsonFileAtomically } from "../storage.ts";
 
+import { writeJsonFileAtomically } from "../storage.ts";
 export function resolveAgentBrowserBinary(): string {
   const appDir = getAppDir();
   const nativeName = agentBrowserNativeName();
@@ -39,7 +40,14 @@ export function resolveAgentBrowserBinary(): string {
 }
 
 function encryptionKey(): string {
-  return loadOrCreateBrowserEncryptionKey(join(getAppDir(), "persistent", "browser", "encryption.key"));
+  const directory = join(getAppDir(), "persistent", "browser");
+  const path = join(directory, "encryption.key");
+  mkdirSync(directory, { recursive: true });
+  if (existsSync(path)) return readFileSync(path, "utf8").trim();
+  const key = randomBytes(32).toString("hex");
+  writeFileSync(path, `${key}\n`, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* Windows */ }
+  return key;
 }
 
 function safeName(value: string): string {
@@ -107,6 +115,59 @@ function extractCurrentUrl(output: string): string | undefined {
     // Algunos comandos/versiones imprimen texto plano aunque se solicite JSON.
   }
   return output.match(/https?:\/\/[^\s"}]+/i)?.[0];
+}
+
+function extractJsonCommandData(output: string): unknown {
+  try {
+    const parsed = JSON.parse(output) as { data?: unknown };
+    return parsed.data ?? parsed;
+  } catch {
+    return output;
+  }
+}
+
+function isPrivateIpv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
+  const [a = 0, b = 0, c = 0] = parts;
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127) || (a === 192 && b === 0 && c <= 2)
+    || a >= 224;
+}
+
+function isPrivateAddress(ip: string): boolean {
+  if (isIP(ip) === 4) return isPrivateIpv4(ip);
+  const normalized = ip.toLowerCase().split("%")[0] ?? "";
+  return normalized === "::" || normalized === "::1" || normalized.startsWith("fc")
+    || normalized.startsWith("fd") || normalized.startsWith("fe") || normalized.startsWith("ff");
+}
+
+async function validateDownloadUrl(rawUrl: string): Promise<URL> {
+  const url = new URL(rawUrl);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error("Solo se permiten assets http/https sin credenciales embebidas.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+    throw new Error("No se descargan assets desde hosts locales o internos.");
+  }
+  const addresses = isIP(hostname) ? [{ address: hostname }] : await lookup(hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error("El asset resuelve a una red privada o reservada.");
+  }
+  return url;
+}
+
+function assetExtension(url: URL, contentType: string | null): string {
+  const fromPath = extname(url.pathname).toLowerCase().replace(/[^.a-z0-9]/g, "");
+  if (fromPath && fromPath.length <= 8) return fromPath;
+  const type = (contentType ?? "").split(";")[0]?.trim().toLowerCase();
+  const byType: Record<string, string> = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif",
+    "image/svg+xml": ".svg", "image/x-icon": ".ico", "image/vnd.microsoft.icon": ".ico",
+  };
+  return byType[type ?? ""] ?? ".bin";
 }
 
 
@@ -264,6 +325,7 @@ export class BrowserAgentExecution {
   private downloadCounter = 0;
   private snapshotCounter = 0;
   private readCounter = 0;
+  private inspectCounter = 0;
   private inputRequestCounter = 0;
   private readonly activeChildren = new Set<any>();
   private commandTail: Promise<void> = Promise.resolve();
@@ -298,19 +360,6 @@ export class BrowserAgentExecution {
     mkdirSync(dirname(this.stateFile), { recursive: true });
   }
 
-  private logContext(action: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
-    return {
-      backend: "browser-agent",
-      taskId: this.options.taskId,
-      agentId: this.options.agentId,
-      agentName: this.options.agentName,
-      agentType: "browser-web",
-      runId: this.options.runId,
-      action,
-      ...extra,
-    };
-  }
-
   private env(): Record<string, string> {
     // Prioridad: ruta explícita del operador > Chrome for Testing administrado
     // por agent-browser > navegador del sistema. Esto evita forzar Chrome/Edge
@@ -335,7 +384,7 @@ export class BrowserAgentExecution {
       AGENT_BROWSER_PROFILE: this.profileDir,
       ...(existsSync(this.stateFile) ? { AGENT_BROWSER_STATE: this.stateFile } : {}),
       AGENT_BROWSER_CONTENT_BOUNDARIES: "true",
-      AGENT_BROWSER_MAX_OUTPUT: "50000",
+      AGENT_BROWSER_MAX_OUTPUT: "500000",
       // Debe quedar por debajo del timeout IPC del CLI (30 s). Así el daemon
       // devuelve un error controlado antes de que el cliente quede esperando.
       AGENT_BROWSER_DEFAULT_TIMEOUT: process.env.AGENT_BROWSER_DEFAULT_TIMEOUT?.trim() || "20000",
@@ -381,9 +430,13 @@ export class BrowserAgentExecution {
       const command = args.slice(0, 2).join(" ") || "unknown";
     const startedAt = Date.now();
     const env = this.env();
-    debugLog("browser-agent.runtime", "command_started", this.logContext(`Ejecutando agent-browser: ${command}`, {
-      session: this.session, command, timeoutMs, executablePath: env.AGENT_BROWSER_EXECUTABLE_PATH ?? "managed-default",
-    }));
+    debugLog("browser-agent.runtime", "command_started", {
+      runId: this.options.runId,
+      session: this.session,
+      command,
+      timeoutMs,
+      executablePath: env.AGENT_BROWSER_EXECUTABLE_PATH ?? "managed-default",
+    });
 
     const child = Bun.spawn([
       this.binary,
@@ -432,9 +485,13 @@ export class BrowserAgentExecution {
 
       if (outcome.kind === "timeout") {
         timedOut = true;
-        debugWarn("browser-agent.runtime", "command_timeout", this.logContext(`Tiempo agotado en agent-browser: ${command}`, {
-          session: this.session, command, timeoutMs, durationMs: Date.now() - startedAt,
-        }));
+        debugWarn("browser-agent.runtime", "command_timeout", {
+          runId: this.options.runId,
+          session: this.session,
+          command,
+          timeoutMs,
+          durationMs: Date.now() - startedAt,
+        });
         try { child.kill(); } catch { /* best effort */ }
         // No dejamos que un proceso CLI bloqueado congele el subagente completo.
         await Promise.race([
@@ -463,18 +520,26 @@ export class BrowserAgentExecution {
       const stdout = stdoutCollector.text();
       const stderr = stderrCollector.text();
       if (stdoutWasOpen || stderrWasOpen) {
-        debugLog("browser-agent.runtime", "pipe_detached_after_cli_exit", this.logContext(`Liberando streams de agent-browser: ${command}`, {
-          session: this.session, command, stdoutWasOpen, stderrWasOpen,
-        }));
+        debugLog("browser-agent.runtime", "pipe_detached_after_cli_exit", {
+          runId: this.options.runId,
+          session: this.session,
+          command,
+          stdoutWasOpen,
+          stderrWasOpen,
+        });
       }
 
       if (outcome.exitCode !== 0) {
         throw new Error((stderr || stdout || `agent-browser terminó con código ${outcome.exitCode}`).trim());
       }
 
-      debugInfo("browser-agent.runtime", "command_completed", this.logContext(`Comando agent-browser completado: ${command}`, {
-        session: this.session, command, durationMs: Date.now() - startedAt, outputChars: (stdout || stderr).length,
-      }));
+      debugInfo("browser-agent.runtime", "command_completed", {
+        runId: this.options.runId,
+        session: this.session,
+        command,
+        durationMs: Date.now() - startedAt,
+        outputChars: (stdout || stderr).length,
+      });
       return stdout.trim() || stderr.trim() || "OK";
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -512,9 +577,11 @@ export class BrowserAgentExecution {
   private rotateSessionAfterHang(): void {
     this.recoveryCounter += 1;
     this.session = `${this.sessionBase}-recovery-${this.recoveryCounter}`;
-    debugWarn("browser-agent.runtime", "session_rotated", this.logContext("Rotando sesión bloqueada de agent-browser", {
-      session: this.session, recoveryCounter: this.recoveryCounter,
-    }));
+    debugWarn("browser-agent.runtime", "session_rotated", {
+      runId: this.options.runId,
+      session: this.session,
+      recoveryCounter: this.recoveryCounter,
+    });
   }
 
 
@@ -532,9 +599,11 @@ ${snapshot}
 
 [SISTEMA: snapshot físico guardado en ${path}]`;
     } catch (error) {
-      debugWarn("browser-agent.runtime", "initial_snapshot_failed", this.logContext("No se pudo obtener el snapshot inicial", {
+      debugWarn("browser-agent.runtime", "initial_snapshot_failed", {
+        runId: this.options.runId,
+        agentId: this.options.agentId,
         error: error instanceof Error ? error.message : String(error),
-      }));
+      });
       return opened;
     }
   }
@@ -553,9 +622,11 @@ ${snapshot}
         const currentOutput = await this.run(["get", "url", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
         const currentUrl = extractCurrentUrl(currentOutput);
         if (currentUrl) {
-          debugWarn("browser-agent.runtime", "open_recovered_from_current_url", this.logContext("La página abrió aunque el CLI agotó el tiempo", {
-            requestedUrl: url, currentUrl,
-          }));
+          debugWarn("browser-agent.runtime", "open_recovered_from_current_url", {
+            runId: this.options.runId,
+            requestedUrl: url,
+            currentUrl,
+          });
           this.startKeepAlive();
           return await this.appendInitialSnapshot(JSON.stringify({
             success: true,
@@ -569,9 +640,11 @@ ${snapshot}
       // Si la sesión quedó trabada en el daemon, una sesión nueva evita esperar
       // hasta el timeout global de 20 minutos del subagente.
       this.rotateSessionAfterHang();
-      debugWarn("browser-agent.runtime", "open_retry", this.logContext("Reintentando apertura con una sesión nueva", {
-        url, session: this.session,
-      }));
+      debugWarn("browser-agent.runtime", "open_retry", {
+        runId: this.options.runId,
+        url,
+        session: this.session,
+      });
       const reopened = await this.run(["open", url, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.open);
       this.startKeepAlive();
       return await this.appendInitialSnapshot(reopened, signal);
@@ -584,6 +657,57 @@ ${snapshot}
     const absolute = this.options.workspace.resolvePath(this.options.jid, rel);
     mkdirSync(dirname(absolute), { recursive: true });
     return { absolute, relative: rel };
+  }
+
+  private saveInspection(kind: string, output: string, extension = "txt"): string {
+    this.inspectCounter += 1;
+    const filename = `${String(this.inspectCounter).padStart(3, "0")}-${safeName(kind)}.${extension}`;
+    const relative = `${this.options.agentDir}/browser/inspection/${filename}`;
+    this.options.workspace.writeText(this.options.jid, relative, output.endsWith("\n") ? output : `${output}\n`);
+    if (output.length <= 14_000) return `${output}\n\n[SISTEMA: salida completa guardada en ${relative}]`;
+    return `${output.slice(0, 12_000)}\n\n[...salida completa guardada en ${relative}; ${output.length} caracteres...]`;
+  }
+
+  private async collectAssetManifest(signal: AbortSignal): Promise<Record<string, unknown>> {
+    const script = `(() => {
+      const absolute = (value) => { try { return new URL(value, document.baseURI).href; } catch { return null; } };
+      const unique = (values) => [...new Set(values.filter(Boolean))];
+      const images = unique([...document.images].flatMap((img) => [absolute(img.currentSrc || img.src), ...String(img.srcset || '').split(',').map((item) => absolute(item.trim().split(/\\s+/)[0]))]));
+      const icons = unique([...document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"], link[rel="mask-icon"]')].map((node) => absolute(node.href)));
+      const stylesheets = unique([...document.querySelectorAll('link[rel="stylesheet"]')].map((node) => absolute(node.href)));
+      const scripts = unique([...document.scripts].map((node) => absolute(node.src)));
+      const links = unique([...document.querySelectorAll('a[href]')].map((node) => absolute(node.href)));
+      return { pageUrl: location.href, title: document.title, images, icons, stylesheets, scripts, links };
+    })()`;
+    const output = await this.run(["eval", script, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+    let value = extractJsonCommandData(output);
+    if (value && typeof value === "object" && "result" in (value as Record<string, unknown>)) {
+      value = (value as Record<string, unknown>).result;
+    }
+    if (typeof value === "string") {
+      try { value = JSON.parse(value); } catch { /* se conserva texto */ }
+    }
+    return value && typeof value === "object" ? value as Record<string, unknown> : { raw: value };
+  }
+
+  private async fetchAsset(urlValue: string, signal: AbortSignal): Promise<{ bytes: Uint8Array; url: URL; contentType: string | null }> {
+    let url = await validateDownloadUrl(urlValue);
+    for (let redirect = 0; redirect <= 5; redirect += 1) {
+      const response = await fetch(url, { signal, redirect: "manual", headers: { "user-agent": "Luna-AI-browser-agent/1.0" } });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) throw new Error(`Redirección HTTP ${response.status} sin Location.`);
+        url = await validateDownloadUrl(new URL(location, url).href);
+        continue;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const declared = Number(response.headers.get("content-length") ?? "0");
+      if (Number.isFinite(declared) && declared > 8_000_000) throw new Error("Asset mayor a 8 MB.");
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > 8_000_000) throw new Error("Asset mayor a 8 MB.");
+      return { bytes, url, contentType: response.headers.get("content-type") };
+    }
+    throw new Error("Demasiadas redirecciones.");
   }
 
 
@@ -602,9 +726,11 @@ ${snapshot}
       });
       return file.relative;
     } catch (error) {
-      debugWarn("browser-agent.runtime", "input_request_screenshot_failed", this.logContext("No se pudo capturar el formulario antes de pedir datos", {
+      debugWarn("browser-agent.runtime", "input_request_screenshot_failed", {
+        runId: this.options.runId,
+        agentId: this.options.agentId,
         error: error instanceof Error ? error.message : String(error),
-      }));
+      });
       return undefined;
     }
   }
@@ -627,9 +753,11 @@ ${snapshot}
     this.cancelled = true;
     this.stopKeepAlive();
     await this.terminateActiveProcesses();
-    debugWarn("browser-agent.runtime", "execution_cancelled", this.logContext("Cancelando navegador y procesos asociados", {
-      session: this.session, reason: reason.message,
-    }));
+    debugWarn("browser-agent.runtime", "execution_cancelled", {
+      runId: this.options.runId,
+      session: this.session,
+      reason: reason.message,
+    });
     // No esperamos a que el runner/LLM reaccione al AbortSignal para liberar el
     // navegador: la cancelación del supervisor debe cerrar recursos de inmediato.
     await this.finalize();
@@ -671,13 +799,18 @@ ${snapshot}
             await this.run(["state", "save", this.runStateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
             this.releaseProfileLease = await acquireBrowserProfileLease(this.profileLeaseKey, controller.signal);
             this.mergePersistentState();
-            debugInfo("browser-agent.runtime", "persistent_state_saved", this.logContext("Estado autenticado del navegador guardado", {
-              session: this.session, stateFile: this.stateFile, strategy: "merge",
-            }));
+            debugInfo("browser-agent.runtime", "persistent_state_saved", {
+              runId: this.options.runId,
+              session: this.session,
+              stateFile: this.stateFile,
+              strategy: "merge",
+            });
           } catch (error) {
-            debugWarn("browser-agent.runtime", "persistent_state_save_failed", this.logContext("No se pudo guardar el estado autenticado", {
-              session: this.session, error: error instanceof Error ? error.message : String(error),
-            }));
+            debugWarn("browser-agent.runtime", "persistent_state_save_failed", {
+              runId: this.options.runId,
+              session: this.session,
+              error: error instanceof Error ? error.message : String(error),
+            });
           } finally {
             this.releaseProfileLease?.();
             this.releaseProfileLease = undefined;
@@ -734,6 +867,100 @@ ${snapshot}
         this.options.workspace.writeText(this.options.jid, path, `${output}\n`);
         return `${output}\n\n[SISTEMA: contenido extraído guardado en ${path}]`;
       }
+      case "browser_get_html": {
+        const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "html";
+        const output = await this.run(["get", "html", selector, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        const value = extractJsonCommandData(output);
+        const html = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        const requested = typeof args.filename === "string" && args.filename.trim() ? args.filename.trim() : `page-${Date.now()}.html`;
+        const relative = `${this.options.agentDir}/browser/html/${safeName(requested.endsWith(".html") ? requested : `${requested}.html`)}`;
+        this.options.workspace.writeText(this.options.jid, relative, html);
+        return `${html.slice(0, 12_000)}${html.length > 12_000 ? "\n\n[...HTML completo guardado en el archivo...]" : ""}\n\n[SISTEMA: HTML guardado en ${relative}; ${html.length} caracteres]`;
+      }
+      case "browser_eval": {
+        const script = typeof args.script === "string" ? args.script.trim() : "";
+        if (!script) return "Error: script es obligatorio.";
+        if (/document\.cookie|password[^\n]{0,20}value|navigator\.clipboard|indexedDB/i.test(script)) {
+          return "Error: browser_eval no permite extraer cookies, contraseñas, portapapeles ni almacenes sensibles.";
+        }
+        const output = await this.run(["eval", script, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        const filename = typeof args.filename === "string" && args.filename.trim() ? safeName(args.filename.trim()) : "eval-output.json";
+        const relative = `${this.options.agentDir}/browser/inspection/${filename}`;
+        this.options.workspace.writeText(this.options.jid, relative, output);
+        return `${output.slice(0, 14_000)}${output.length > 14_000 ? "\n\n[...salida completa guardada en el archivo...]" : ""}\n\n[SISTEMA: salida completa guardada en ${relative}]`;
+      }
+      case "browser_console": {
+        const output = await this.run(args.clear === true ? ["console", "--clear", "--json"] : ["console", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        return this.saveInspection("console", output, "json");
+      }
+      case "browser_errors": {
+        const output = await this.run(args.clear === true ? ["errors", "--clear", "--json"] : ["errors", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        return this.saveInspection("errors", output, "json");
+      }
+      case "browser_network_requests": {
+        const cmd = ["network", "requests"];
+        if (args.clear === true) cmd.push("--clear");
+        if (typeof args.filter === "string" && args.filter.trim()) cmd.push("--filter", args.filter.trim());
+        if (typeof args.resource_types === "string" && args.resource_types.trim()) cmd.push("--type", args.resource_types.trim());
+        if (typeof args.method === "string" && args.method.trim()) cmd.push("--method", args.method.trim());
+        if (typeof args.status === "string" && args.status.trim()) cmd.push("--status", args.status.trim());
+        cmd.push("--json");
+        const output = await this.run(cmd, signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        return this.saveInspection("network-requests", output, "json");
+      }
+      case "browser_network_request": {
+        const requestId = typeof args.request_id === "string" ? args.request_id.trim() : "";
+        if (!requestId) return "Error: request_id es obligatorio.";
+        const output = await this.run(["network", "request", requestId, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        return this.saveInspection(`network-request-${requestId}`, output, "json");
+      }
+      case "browser_extract_assets": {
+        const manifest = await this.collectAssetManifest(signal);
+        const requested = typeof args.filename === "string" && args.filename.trim() ? args.filename.trim() : "assets-manifest.json";
+        const relative = `${this.options.agentDir}/browser/extracted/${safeName(requested.endsWith(".json") ? requested : `${requested}.json`)}`;
+        const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
+        this.options.workspace.writeText(this.options.jid, relative, serialized);
+        return `${serialized.slice(0, 14_000)}\n[SISTEMA: manifest completo guardado en ${relative}]`;
+      }
+      case "browser_download_assets": {
+        const manifest = await this.collectAssetManifest(signal);
+        const pageUrl = typeof manifest.pageUrl === "string" ? new URL(manifest.pageUrl) : undefined;
+        const images = Array.isArray(manifest.images) ? manifest.images : [];
+        const icons = Array.isArray(manifest.icons) ? manifest.icons : [];
+        const candidates = [...new Set([...icons, ...images].filter((item): item is string => typeof item === "string" && /^https?:\/\//i.test(item)))];
+        const maxFiles = Number.isInteger(args.max_files) ? Math.max(1, Math.min(150, Number(args.max_files))) : 80;
+        const includeExternal = args.include_external !== false;
+        const folderName = typeof args.folder === "string" && args.folder.trim() ? args.folder.trim().replace(/^\/+|\/+$/g, "") : "browser/downloads/assets";
+        const results: Array<Record<string, unknown>> = [];
+        let totalBytes = 0;
+        for (const [index, candidate] of candidates.slice(0, maxFiles).entries()) {
+          try {
+            const candidateUrl = new URL(candidate);
+            if (!includeExternal && pageUrl && candidateUrl.hostname !== pageUrl.hostname) {
+              results.push({ url: candidate, status: "skipped", reason: "external-host" });
+              continue;
+            }
+            const downloaded = await this.fetchAsset(candidate, signal);
+            if (totalBytes + downloaded.bytes.byteLength > 50_000_000) {
+              results.push({ url: candidate, status: "skipped", reason: "total-limit" });
+              break;
+            }
+            totalBytes += downloaded.bytes.byteLength;
+            const base = safeName(basename(downloaded.url.pathname).replace(/\.[^.]+$/, "") || `asset-${index + 1}`);
+            const extension = assetExtension(downloaded.url, downloaded.contentType);
+            const relative = `${this.options.agentDir}/${folderName}/${String(index + 1).padStart(3, "0")}-${base}${extension}`;
+            this.options.workspace.writeBuffer(this.options.jid, relative, downloaded.bytes);
+            this.options.workspace.registerArtifact(this.options.jid, relative, "browser-web", { taskId: this.options.taskId, temporary: false });
+            results.push({ url: candidate, finalUrl: downloaded.url.href, status: "downloaded", path: relative, bytes: downloaded.bytes.byteLength });
+          } catch (error) {
+            results.push({ url: candidate, status: "failed", error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        const result = { pageUrl: manifest.pageUrl, discovered: candidates.length, processed: results.length, totalBytes, results };
+        const relative = `${this.options.agentDir}/${folderName}/download-manifest.json`;
+        this.options.workspace.writeText(this.options.jid, relative, `${JSON.stringify(result, null, 2)}\n`);
+        return `${JSON.stringify(result, null, 2).slice(0, 14_000)}\n\n[SISTEMA: manifest completo guardado en ${relative}]`;
+      }
       case "browser_click":
         return await this.run(["click", String(args.selector ?? "")], signal);
       case "browser_fill":
@@ -765,6 +992,15 @@ ${snapshot}
         await this.run(cmd, signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.screenshot);
         this.options.workspace.registerArtifact(this.options.jid, file.relative, "browser-web", { taskId: this.options.taskId, temporary: false });
         return JSON.stringify({ ok: true, path: file.relative, kind: "screenshot" });
+      }
+      case "browser_pdf": {
+        const requested = typeof args.filename === "string" ? args.filename : "";
+        const file = this.resolveArtifact("downloads", requested, "page.pdf");
+        const pdfPath = file.absolute.toLowerCase().endsWith(".pdf") ? file.absolute : `${file.absolute}.pdf`;
+        const relative = file.relative.toLowerCase().endsWith(".pdf") ? file.relative : `${file.relative}.pdf`;
+        await this.run(["pdf", pdfPath], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.screenshot);
+        this.options.workspace.registerArtifact(this.options.jid, relative, "browser-web", { taskId: this.options.taskId, temporary: false });
+        return JSON.stringify({ ok: true, path: relative, kind: "pdf" });
       }
       case "browser_download": {
         this.downloadCounter += 1;
@@ -846,15 +1082,22 @@ ${snapshot}
           throw error;
         }
 
-        debugInfo("browser-agent.runtime", "waiting_for_user_input", this.logContext(`Esperando dato del usuario: ${fieldName}`, {
-          session: this.session, kind, fieldName, url: url || undefined, username: username || undefined,
-        }));
+        debugInfo("browser-agent.runtime", "waiting_for_user_input", {
+          runId: this.options.runId,
+          session: this.session,
+          kind,
+          fieldName,
+          url: url || undefined,
+          username: username || undefined,
+        });
 
         const resolution = await pending;
         await this.options.onStateChange?.("running");
-        debugInfo("browser-agent.runtime", "user_input_resumed", this.logContext("Dato recibido; reanudando navegación", {
-          session: this.session, kind: resolution.kind,
-        }));
+        debugInfo("browser-agent.runtime", "user_input_resumed", {
+          runId: this.options.runId,
+          session: this.session,
+          kind: resolution.kind,
+        });
 
         if (resolution.kind === "correction") {
           return JSON.stringify({

@@ -1,14 +1,10 @@
-# 63 — Captura inline de credenciales y cambio de contraseña
+# 63. Captura inline de credenciales y cambio de contraseña
 
-# Fecha
-
-2026-07-18
-
-# Objetivo
+## Objetivo
 
 Corregir la inconsistencia por la que una API key incluida en la misma frase natural que solicita configurarla obligaba al usuario a enviarla de nuevo en un mensaje separado.
 
-# Cambios
+## Cambios
 
 - Las API keys de motores de búsqueda incluidas junto con la instrucción se detectan localmente antes de enviar el mensaje al LLM.
 - Se reconoce el proveedor mencionado, incluyendo alias como `fireclaw` para `firecrawl`, se extrae la clave, se guarda y activa el motor inmediatamente.

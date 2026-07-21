@@ -1,12 +1,7 @@
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { getAppDir } from "../utils.ts";
 
 export type FfmpegRuntimeManifest = {
   schemaVersion: 1;
@@ -19,152 +14,105 @@ export type FfmpegRuntimeManifest = {
   preparedAt: string;
 };
 
-export type FfmpegRuntime = {
-  root: string;
+export interface FfmpegRuntime {
   executable: string;
-  manifest: FfmpegRuntimeManifest;
-};
-
-function pathInside(root: string, relativePath: string): string {
-  const normalizedRoot = resolve(root);
-  const path = resolve(normalizedRoot, relativePath);
-  if (path !== normalizedRoot && !path.startsWith(`${normalizedRoot}${sep}`)) {
-    throw new Error("El manifiesto de FFmpeg contiene una ruta insegura.");
-  }
-  return path;
+  manifest?: FfmpegRuntimeManifest;
 }
 
-function runtimeCandidates(): string[] {
-  const configured = process.env.LUNA_FFMPEG_RUNTIME_DIR?.trim();
-  const candidates = [
-    configured ? resolve(configured) : "",
-    join(dirname(process.execPath), "runtime", "ffmpeg"),
+function executableName(): string {
+  return process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+}
+
+export function loadFfmpegRuntime(): FfmpegRuntime {
+  const name = executableName();
+  const roots = [
+    join(getAppDir(), "runtime", "ffmpeg"),
+    join(process.cwd(), "dist", "runtime", "ffmpeg"),
     join(process.cwd(), "assets", "runtime", "ffmpeg"),
-    resolve(dirname(Bun.main), "..", "assets", "runtime", "ffmpeg"),
-  ].filter(Boolean);
-  return [...new Set(candidates)];
-}
-
-export function loadFfmpegRuntime(candidates = runtimeCandidates()): FfmpegRuntime {
-  for (const root of candidates) {
-    const manifestPath = join(root, "manifest.json");
-    if (!existsSync(manifestPath)) continue;
-
-    let manifest: FfmpegRuntimeManifest;
-    try {
-      manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as FfmpegRuntimeManifest;
-    } catch {
-      continue;
-    }
-
-    if (
-      manifest.schemaVersion !== 1
-      || manifest.platform !== process.platform
-      || manifest.arch !== process.arch
-    ) {
-      continue;
-    }
-
-    const executable = pathInside(root, manifest.executable);
-    if (!existsSync(executable)) continue;
-    return { root, executable, manifest };
-  }
-
-  throw new Error(
-    "No se encontró el runtime de FFmpeg para este sistema. " +
-      "Ejecuta bun run prepare:media o distribuye la carpeta runtime junto al binario de Luna.",
-  );
-}
-
-function audioExtension(mimeType: string): string {
-  const normalized = mimeType.toLowerCase();
-  if (normalized.startsWith("audio/ogg")) return ".ogg";
-  if (normalized.startsWith("audio/opus")) return ".opus";
-  return ".audio";
-}
-
-function float32FromLittleEndian(bytes: Uint8Array): Float32Array {
-  if (bytes.byteLength % 4 !== 0) {
-    throw new Error("FFmpeg produjo PCM Float32 con una longitud inválida.");
-  }
-
-  // Los runtimes soportados actualmente son little-endian. Copiamos el rango
-  // exacto para evitar que un Buffer compartido exponga bytes ajenos al PCM.
-  const exact = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  return new Float32Array(exact);
-}
-
-export async function decodeAudioWithFfmpeg(
-  encodedBytes: Uint8Array,
-  mimeType: string,
-  options: {
-    runtime?: FfmpegRuntime;
-    timeoutMs?: number;
-  } = {},
-): Promise<Float32Array> {
-  if (encodedBytes.byteLength === 0) throw new Error("El audio recibido está vacío.");
-
-  const runtime = options.runtime ?? loadFfmpegRuntime();
-  const temporaryDir = mkdtempSync(join(tmpdir(), "luna-ffmpeg-"));
-  const input = join(temporaryDir, `input${audioExtension(mimeType)}`);
-  const output = join(temporaryDir, "audio.f32le");
-  writeFileSync(input, encodedBytes);
-
-  const args = [
-    runtime.executable,
-    "-hide_banner",
-    "-loglevel", "warning",
-    "-nostdin",
-    "-y",
-    "-fflags", "+discardcorrupt",
-    "-err_detect", "ignore_err",
-    "-i", input,
-    "-map", "0:a:0",
-    "-vn",
-    "-ac", "1",
-    "-ar", "16000",
-    "-c:a", "pcm_f32le",
-    "-f", "f32le",
-    output,
   ];
+  for (const root of roots) {
+    const executable = join(root, name);
+    if (!existsSync(executable)) continue;
+    let manifest: FfmpegRuntimeManifest | undefined;
+    try { manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as FfmpegRuntimeManifest; } catch { /* manifest opcional */ }
+    return { executable, manifest };
+  }
+  throw new Error("No se encontró el runtime administrado de FFmpeg. Ejecuta bun run prepare:media.");
+}
 
-  const child = Bun.spawn(args, {
-    cwd: runtime.root,
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  });
-  const stdoutPromise = child.stdout ? new Response(child.stdout).text() : Promise.resolve("");
-  const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
-  let timedOut = false;
-  const timeoutMs = options.timeoutMs ?? 120_000;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill();
-    } catch {
-      // El proceso ya pudo finalizar.
-    }
-  }, timeoutMs);
+export interface DecodeAudioOptions {
+  runtime?: FfmpegRuntime;
+  timeoutMs?: number;
+  expectedDurationSeconds?: number | null;
+}
 
+function float32FromBuffer(buffer: Buffer): Float32Array {
+  if (buffer.byteLength % 4 !== 0) throw new Error("FFmpeg produjo PCM Float32 incompleto.");
+  const copy = new Uint8Array(buffer.byteLength);
+  copy.set(buffer);
+  return new Float32Array(copy.buffer);
+}
+
+export async function decodeOggOpusToMono16k(
+  encoded: Uint8Array,
+  options: DecodeAudioOptions = {},
+): Promise<{ samples: Float32Array; durationSeconds: number }> {
+  const runtime = options.runtime ?? loadFfmpegRuntime();
+  const directory = mkdtempSync(join(tmpdir(), "luna-ffmpeg-"));
+  const input = join(directory, "audio.ogg");
+  const output = join(directory, "audio.f32le");
+  writeFileSync(input, encoded);
+
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 5 * 60_000;
+  const timer = setTimeout(() => controller.abort(new Error("ffmpeg-timeout")), timeoutMs);
   try {
+    const child = Bun.spawn([
+      runtime.executable,
+      "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
+      "-fflags", "+discardcorrupt", "-err_detect", "ignore_err",
+      "-i", input,
+      "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+      "-c:a", "pcm_f32le", "-f", "f32le", output,
+    ], {
+      cwd: directory,
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+      signal: controller.signal,
+    });
+    const stdoutPromise = child.stdout ? new Response(child.stdout).text() : Promise.resolve("");
+    const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
     const exitCode = await child.exited;
     const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-    if (timedOut) {
-      throw new Error(`FFmpeg excedió ${Math.ceil(timeoutMs / 1000)} segundos al decodificar el audio.`);
+    if (exitCode !== 0 || !existsSync(output)) {
+      throw new Error(`FFmpeg no pudo decodificar el audio: ${(stderr || stdout || `código ${exitCode}`).trim().slice(-1800)}`);
     }
-    if (exitCode !== 0) {
-      const detail = stderr.trim() || stdout.trim() || `código ${exitCode}`;
-      throw new Error(`FFmpeg no pudo decodificar el audio: ${detail.slice(-1_500)}`);
-    }
-    if (!existsSync(output)) throw new Error("FFmpeg terminó sin producir audio PCM.");
 
-    const pcm = new Uint8Array(readFileSync(output));
-    const samples = float32FromLittleEndian(pcm);
-    if (samples.length === 0) throw new Error("FFmpeg no produjo muestras de audio válidas.");
-    return samples;
+    const samples = float32FromBuffer(readFileSync(output));
+    const durationSeconds = samples.length / 16_000;
+    if (durationSeconds <= 0) throw new Error("FFmpeg no produjo muestras de audio válidas.");
+    const expected = options.expectedDurationSeconds;
+    if (expected && expected > 0) {
+      const missing = expected - durationSeconds;
+      const tolerance = Math.max(2, expected * 0.06);
+      if (missing > tolerance) {
+        throw new Error(
+          `La decodificación se truncó: el OGG dura aproximadamente ${expected.toFixed(1)} s, ` +
+          `pero FFmpeg solo produjo ${durationSeconds.toFixed(1)} s.`,
+        );
+      }
+    }
+    return { samples, durationSeconds };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`FFmpeg excedió ${Math.round(timeoutMs / 1000)} segundos.`);
+    throw error;
   } finally {
-    clearTimeout(timeout);
-    rmSync(temporaryDir, { recursive: true, force: true });
+    clearTimeout(timer);
+    rmSync(directory, { recursive: true, force: true });
   }
+}
+
+export function ffmpegRuntimeDescription(runtime = loadFfmpegRuntime()): string {
+  return `${basename(runtime.executable)} (${runtime.manifest?.version ?? "versión desconocida"}) en ${dirname(runtime.executable)}`;
 }

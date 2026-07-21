@@ -53,16 +53,6 @@ function isInside(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-function nearestExistingAncestor(path: string, root: string): string {
-  let current = path;
-  while (!existsSync(current) && current !== root) {
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return current;
-}
-
 function normalizeRelativePath(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/");
   if (!trimmed || trimmed === ".") return ".";
@@ -124,14 +114,8 @@ export class WorkspaceManager {
       throw new Error(`No existe "${normalized}" en el workdir.`);
     }
 
-    const realRoot = realpathSync(root);
-    const existingAncestor = nearestExistingAncestor(candidate, root);
-    const realAncestor = realpathSync(existingAncestor);
-    if (!isInside(realRoot, realAncestor)) {
-      throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");
-    }
-
     if (existsSync(candidate)) {
+      const realRoot = realpathSync(root);
       const realCandidate = realpathSync(candidate);
       if (!isInside(realRoot, realCandidate)) {
         throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");
@@ -155,6 +139,34 @@ export class WorkspaceManager {
     const target = this.resolvePath(jid, path, { allowDirectory: false });
     writeTextFileAtomically(target, content);
     return this.relativePath(jid, target);
+  }
+
+  appendText(jid: string, path: string, content: string): string {
+    const target = this.resolvePath(jid, path, { allowDirectory: false });
+    let current = "";
+    if (existsSync(target)) current = readFileSync(target, "utf-8");
+    writeTextFileAtomically(target, `${current}${content}`);
+    return this.relativePath(jid, target);
+  }
+
+  editText(
+    jid: string,
+    path: string,
+    oldText: string,
+    newText: string,
+    replaceAll = false,
+  ): { path: string; replacements: number } {
+    if (!oldText) throw new Error("old_text no puede estar vacío.");
+    const target = this.resolvePath(jid, path, { mustExist: true, allowDirectory: false });
+    const current = readFileSync(target, "utf-8");
+    const matches = current.split(oldText).length - 1;
+    if (matches === 0) throw new Error("No se encontró old_text en el archivo.");
+    if (!replaceAll && matches > 1) {
+      throw new Error(`old_text aparece ${matches} veces. Usa replace_all=true o proporciona un fragmento más específico.`);
+    }
+    const updated = replaceAll ? current.split(oldText).join(newText) : current.replace(oldText, newText);
+    writeTextFileAtomically(target, updated);
+    return { path: this.relativePath(jid, target), replacements: replaceAll ? matches : 1 };
   }
 
   writeBuffer(jid: string, path: string, content: Uint8Array): string {

@@ -10,19 +10,6 @@ import {
   isWithinSizeLimit,
 } from "../src/media.ts";
 
-function baseMessage(): TransportIncomingMessage {
-  return {
-    transportId: "test",
-    conversationId: "conversation-1",
-    chatId: "conversation-1",
-    senderId: "user-1",
-    messageId: "message-1",
-    fromSelf: false,
-    isGroup: false,
-    text: "",
-  };
-}
-
 describe("formatos multimedia", () => {
   it("acepta JPEG y PNG para OCR", () => {
     expect(isAllowedImageMime("image/jpeg")).toBe(true);
@@ -56,23 +43,24 @@ describe("límites", () => {
 });
 
 describe("detección y contexto", () => {
-  it("detecta imagen, audio y pie de imagen sin depender del SDK del cliente", () => {
+  it("detecta imagen, audio y pie de imagen", () => {
     const image: TransportIncomingMessage = {
-      ...baseMessage(),
-      media: {
-        kind: "image",
-        mimeType: "image/jpeg",
-        caption: "  revisa esta factura  ",
-        download: async () => new Uint8Array(),
-      },
+      id: "image",
+      conversationId: "user",
+      fromSelf: false,
+      text: "revisa esta factura",
+      mediaKind: "image",
+      caption: "  revisa esta factura  ",
+      raw: {},
     };
     const audio: TransportIncomingMessage = {
-      ...baseMessage(),
-      media: {
-        kind: "audio",
-        mimeType: "audio/ogg; codecs=opus",
-        download: async () => new Uint8Array(),
-      },
+      id: "audio",
+      conversationId: "user",
+      fromSelf: false,
+      text: "",
+      mediaKind: "audio",
+      caption: "",
+      raw: {},
     };
 
     expect(getMediaKind(image)).toBe("image");

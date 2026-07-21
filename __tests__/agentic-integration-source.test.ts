@@ -15,12 +15,14 @@ describe("integración agéntica", () => {
     expect(bot).toContain('name === "create_reminder" || name === "create_alarm"');
   });
 
-  it("el investigador web aislado solo recibe web_search y read_url", () => {
+  it("el investigador web aislado recibe búsqueda y archivos limitados a su carpeta", () => {
     const definition = source("src/agents/definitions/researcher-web.ts");
-    expect(definition).toContain('["web_search", "read_url"]');
+    expect(definition).toContain('"web_search"');
+    expect(definition).toContain('"read_url"');
+    expect(definition).toContain('"agent_workspace_write_text"');
     expect(definition).toContain("includeMessageHistory: false");
     expect(definition).toContain('outputMode: "last_message"');
-    expect(definition).not.toContain("MESSAGING_TOOLS");
+    expect(definition).not.toContain("WHATSAPP_TOOLS");
     expect(definition).not.toContain("REMINDER_TOOLS");
     expect(definition).not.toContain("ALARM_TOOLS");
   });
@@ -59,7 +61,8 @@ describe("integración agéntica", () => {
     expect(bot).toContain("const activeTools = getAvailableTools(remoteJid)");
     expect(bot).not.toContain("secureBrowserTask");
     expect(bot).toContain("inlineBrowserCredential.password");
-    expect(context).toContain("NO implica usar browser_agent automáticamente");
+    expect(context).toContain("una solicitud de revisar íntegramente ese dominio");
+    expect(source("src/agents/spawn-agents-tool.ts")).toContain("shouldUseBrowserAgentForPrompt");
     expect(context).toContain("No pidas una contraseña por adelantado");
     expect(context).toContain("pausa la misma ejecución");
     expect(context).toContain("browser_auth_profiles");

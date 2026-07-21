@@ -1,22 +1,10 @@
 import type { ToolDefinition } from "../ai.ts";
 
 export type AgentOutputMode = "last_message" | "structured_output";
-export type AgentExecutionBackend = "browser-agent" | "api-search";
-
-export interface AgentExecutionLogContext {
-  backend: AgentExecutionBackend;
-  taskId?: string;
-  agentId?: string;
-  agentName?: string;
-  agentType?: string;
-  runId?: string;
-}
 
 export interface AgentDefinition {
   id: string;
   displayName: string;
-  /** Motor real usado por el agente; se muestra en chat, supervisor y logs. */
-  backend: AgentExecutionBackend;
   /** Prompt breve que ayuda al agente padre a decidir cuándo delegar. */
   spawnerPrompt: string;
   /** Herramientas disponibles dentro del contexto aislado del subagente. */
@@ -56,10 +44,6 @@ export interface SpawnAgentReport {
 export type AgentEvent =
   | {
       type: "agent_started";
-      backend: AgentExecutionBackend;
-      taskId?: string;
-      supervisorAgentId?: string;
-      supervisorAgentName?: string;
       runId: string;
       parentRunId?: string;
       agentId: string;
@@ -69,10 +53,6 @@ export type AgentEvent =
     }
   | {
       type: "tool_started";
-      backend: AgentExecutionBackend;
-      taskId?: string;
-      supervisorAgentId?: string;
-      supervisorAgentName?: string;
       runId: string;
       agentId: string;
       toolName: string;
@@ -80,10 +60,6 @@ export type AgentEvent =
     }
   | {
       type: "tool_completed";
-      backend: AgentExecutionBackend;
-      taskId?: string;
-      supervisorAgentId?: string;
-      supervisorAgentName?: string;
       runId: string;
       agentId: string;
       toolName: string;
@@ -92,10 +68,6 @@ export type AgentEvent =
     }
   | {
       type: "agent_finished";
-      backend: AgentExecutionBackend;
-      taskId?: string;
-      supervisorAgentId?: string;
-      supervisorAgentName?: string;
       runId: string;
       agentId: string;
       outputChars: number;
@@ -103,10 +75,6 @@ export type AgentEvent =
     }
   | {
       type: "agent_failed";
-      backend: AgentExecutionBackend;
-      taskId?: string;
-      supervisorAgentId?: string;
-      supervisorAgentName?: string;
       runId: string;
       agentId: string;
       cancelled: boolean;

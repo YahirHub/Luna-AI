@@ -2,7 +2,6 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ToolDefinition } from "../ai.ts";
 import { debugError, debugInfo, debugLog } from "../debug.ts";
-import type { AgentExecutionLogContext } from "../agents/agent-types.ts";
 
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 2_000_000;
@@ -17,7 +16,7 @@ type FetchLike = (
 export const READ_URL_TOOL: ToolDefinition = {
   type: "function",
   function: {
-    name: "read_url",
+    name: "api-search.read-url",
     description:
       "Lee una URL http/https encontrada mediante web_search y extrae texto legible. " +
       "Úsala para verificar una fuente antes de responder; no admite hosts locales ni redes privadas.",
@@ -462,19 +461,15 @@ export async function readUrl(
 export async function executeReadUrlTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
-  executionContext?: AgentExecutionLogContext,
 ): Promise<string> {
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!url) return "Error: la URL es obligatoria.";
   const maxChars = typeof args.max_chars === "number" ? args.max_chars : DEFAULT_MAX_CHARS;
   const startedAt = Date.now();
-  const logContext = { backend: "api-search" as const, ...executionContext };
-  debugLog("api-search.read-url", "started", { ...logContext, action: "Abriendo fuente para verificar resultados", url, maxChars });
+  debugLog("api-search.read-url", "started", { url, maxChars });
   try {
     const content = await readUrl(url, maxChars, { signal });
     debugInfo("api-search.read-url", "completed", {
-      ...logContext,
-      action: "Fuente leída correctamente",
       url,
       maxChars,
       contentChars: content.length,
@@ -483,8 +478,6 @@ export async function executeReadUrlTool(
     return content;
   } catch (error) {
     debugError("api-search.read-url", "failed", error, {
-      ...logContext,
-      action: "No fue posible leer la fuente",
       url,
       maxChars,
       durationMs: Date.now() - startedAt,

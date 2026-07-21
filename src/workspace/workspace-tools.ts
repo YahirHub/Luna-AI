@@ -17,6 +17,53 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "workspace_append_text",
+      description: "Añade texto al final de un archivo del workdir sin borrar su contenido actual.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_edit_text",
+      description: "Edita un archivo de texto reemplazando un fragmento exacto. Falla si el fragmento no existe o es ambiguo.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          old_text: { type: "string" },
+          new_text: { type: "string" },
+          replace_all: { type: "boolean" },
+        },
+        required: ["path", "old_text", "new_text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_delete",
+      description: "Elimina un archivo o carpeta concreta dentro del workdir. Nunca elimina el workdir completo.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          confirmed: { type: "boolean", description: "Debe ser true para confirmar la eliminación exacta." },
+        },
+        required: ["path", "confirmed"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "workspace_read_text",
       description: "Lee un archivo de texto del workdir privado del usuario.",
       parameters: {
@@ -93,6 +140,28 @@ export async function executeWorkspaceTool(
       if (!path) return "Error: path es obligatorio.";
       const stored = manager.writeText(jid, path, content);
       return `✅ Archivo guardado en ${stored}`;
+    }
+    if (name === "workspace_append_text") {
+      const path = typeof args.path === "string" ? args.path : "";
+      const content = typeof args.content === "string" ? args.content : "";
+      if (!path) return "Error: path es obligatorio.";
+      const stored = manager.appendText(jid, path, content);
+      return `✅ Texto añadido en ${stored}`;
+    }
+    if (name === "workspace_edit_text") {
+      const path = typeof args.path === "string" ? args.path : "";
+      const oldText = typeof args.old_text === "string" ? args.old_text : "";
+      const newText = typeof args.new_text === "string" ? args.new_text : "";
+      if (!path || !oldText) return "Error: path y old_text son obligatorios.";
+      const edited = manager.editText(jid, path, oldText, newText, args.replace_all === true);
+      return `✅ Archivo editado en ${edited.path}; reemplazos: ${edited.replacements}`;
+    }
+    if (name === "workspace_delete") {
+      const path = typeof args.path === "string" ? args.path.trim() : "";
+      if (!path) return "Error: path es obligatorio.";
+      if (args.confirmed !== true) return "Error: workspace_delete requiere confirmed=true.";
+      manager.remove(jid, path);
+      return `✅ Ruta eliminada: ${path}`;
     }
     if (name === "workspace_list_artifacts") {
       const artifacts = manager.listArtifacts(jid);
