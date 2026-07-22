@@ -62,6 +62,26 @@ tmp/
 temp/
 *.tmp
 
+# ─── Compressed archives / delivery artifacts ───────────────────
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz
+*.tbz2
+*.tar.xz
+*.txz
+*.7z
+*.rar
+*.gz
+*.bz2
+*.xz
+*.zst
+*.zstd
+*.lz
+*.lz4
+*.br
+*.cab
+
 assets/runtime/
-nodejs.zip
-nodejs.tar.gz

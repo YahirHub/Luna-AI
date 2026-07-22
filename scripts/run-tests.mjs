@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 
 const forwardedArgs = process.argv.slice(2);
 const bunCommand = process.versions?.bun ? process.execPath : (process.platform === "win32" ? "bun.exe" : "bun");
@@ -7,11 +9,50 @@ function stripAnsi(value) {
   return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
+function normalizeTestName(line) {
+  return line
+    .replace(/^(?:✗|\(fail\))\s*/, "")
+    .replace(/\s+\[[\d.]+ms\]\s*$/, "")
+    .trim();
+}
+
+function listTestFiles(root = join(process.cwd(), "__tests__")) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const stats = statSync(full);
+      if (stats.isDirectory()) walk(full);
+      else if (/\.test\.(?:ts|tsx|js|mjs)$/.test(entry)) files.push(full);
+    }
+  };
+  try { walk(root); } catch { /* best effort */ }
+  return files;
+}
+
+function findTestFileByName(testName, testFiles) {
+  // El texto puede contener caracteres regex o nombres describe > it. Buscar
+  // primero la parte más específica después del último ` > `.
+  const leaf = testName.split(" > ").at(-1)?.trim() || testName;
+  for (const file of testFiles) {
+    try {
+      const content = readFileSync(file, "utf8");
+      if (content.includes(leaf) || content.includes(testName)) {
+        return relative(process.cwd(), file).replaceAll("/", process.platform === "win32" ? "\\" : "/");
+      }
+    } catch { /* best effort */ }
+  }
+  return "desconocido";
+}
+
 function buildFailureSummary(rawOutput) {
   const lines = stripAnsi(rawOutput).replace(/\r/g, "").split("\n");
+  const testFiles = listTestFiles();
   let currentFile = "desconocido";
+  let currentFileStart = 0;
+  let summaryStarted = false;
   const failures = [];
-  const seenFailures = new Set();
+  const byTestName = new Map();
   const lastBoundaryByFile = new Map();
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -19,39 +60,59 @@ function buildFailureSummary(rawOutput) {
     const fileMatch = line.match(/^(__tests__[\\/].+?\.test\.(?:ts|js|mjs|tsx)):\s*$/);
     if (fileMatch) {
       currentFile = fileMatch[1];
+      currentFileStart = index;
       lastBoundaryByFile.set(currentFile, index);
       continue;
     }
 
-    if (/^✓\s/.test(line)) {
-      lastBoundaryByFile.set(currentFile, index);
+    if (/^\d+\s+tests?\s+failed:\s*$/.test(line)) {
+      summaryStarted = true;
       continue;
     }
 
-    if (!/^✗\s/.test(line)) continue;
+    if (/^(?:✓|\(pass\))\s/.test(line)) {
+      if (!summaryStarted) lastBoundaryByFile.set(currentFile, index);
+      continue;
+    }
 
-    const testName = line.replace(/^✗\s*/, "").trim();
-    const failureKey = `${currentFile}::${testName}`;
-    if (seenFailures.has(failureKey)) continue;
-    seenFailures.add(failureKey);
+    if (!/^(?:✗|\(fail\))\s/.test(line)) continue;
 
-    const start = Math.max((lastBoundaryByFile.get(currentFile) ?? Math.max(0, index - 30)) + 1, index - 35);
-    const detailLines = lines.slice(start, index + 1)
+    const testName = normalizeTestName(line);
+    const existing = byTestName.get(testName);
+
+    // Bun vuelve a enumerar los tests fallidos al final. Preferimos siempre la
+    // primera aparición, que conserva el archivo y los detalles de ejecución.
+    if (existing && summaryStarted) continue;
+
+    let resolvedFile = currentFile;
+    if (summaryStarted || resolvedFile === "desconocido") {
+      resolvedFile = existing?.file ?? findTestFileByName(testName, testFiles);
+    }
+
+    const boundary = lastBoundaryByFile.get(resolvedFile) ?? currentFileStart;
+    const start = Math.max(boundary + 1, index - 55);
+    const details = lines.slice(start, index + 1)
       .filter((entry) => entry.trim() !== "")
-      .filter((entry) => !/^\[LUNA (?:DEBUG|INFO|WARN|ERROR)\]/.test(entry));
+      .filter((entry) => !/^\[LUNA (?:DEBUG|INFO|WARN|ERROR)\]/.test(entry))
+      .filter((entry) => !/^\d+\s+tests?\s+failed:\s*$/.test(entry));
 
-    failures.push({
-      file: currentFile,
-      test: testName,
-      details: detailLines,
-    });
-    lastBoundaryByFile.set(currentFile, index);
+    const failure = { file: resolvedFile, test: testName, details };
+    if (existing) {
+      // Si la primera aparición no tenía archivo pero la segunda sí pudo
+      // resolverlo, completar metadata sin duplicar el error.
+      if (existing.file === "desconocido" && resolvedFile !== "desconocido") existing.file = resolvedFile;
+      continue;
+    }
+
+    failures.push(failure);
+    byTestName.set(testName, failure);
+    if (!summaryStarted) lastBoundaryByFile.set(resolvedFile, index);
   }
 
   if (failures.length === 0) {
-    const tail = lines.filter(Boolean).slice(-40);
+    const tail = lines.filter(Boolean).slice(-60);
     return [
-      "No pude identificar una línea ✗ concreta. Últimas líneas de la ejecución:",
+      "No pude identificar un test fallido concreto. Últimas líneas de la ejecución:",
       ...tail,
     ].join("\n");
   }

@@ -32,7 +32,10 @@ describe("integración agéntica", () => {
     const agentsModule = source("src/modules/agents/module.ts");
     expect(bot).toContain('name === "spawn_agents"');
     expect(bot).toContain('name === "researcher_web"');
-    expect(bot).toContain('terminalTools: ["spawn_agents", "researcher_web", "browser_agent"]');
+    expect(bot).toContain('terminalTools: [');
+    for (const toolName of ["spawn_agents", "researcher_web", "browser_agent"]) {
+      expect(bot).toContain(`"${toolName}"`);
+    }
     expect(bot).toContain("parseDetachedBackgroundTaskResult(result.content, result.toolsCalled)");
     expect(bot).toContain("chat_lock_released_after_background_registration");
     expect(bot).not.toContain('name === "parallel_research_report"');

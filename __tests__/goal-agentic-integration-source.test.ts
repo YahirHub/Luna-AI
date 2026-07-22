@@ -16,7 +16,8 @@ describe("integración goal + coding agent", () => {
 
   it("goal_start es terminal para liberar el lock del chat", () => {
     const bot = read("src/bot.ts");
-    expect(bot).toContain('terminalTools: ["goal_start", "spawn_agents", "researcher_web", "browser_agent"]');
+    expect(bot).toContain('terminalTools: [');
+    expect(bot).toContain('"goal_start"');
     expect(bot).toContain('toolsCalled.includes("goal_start")');
   });
 

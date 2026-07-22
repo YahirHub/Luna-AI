@@ -27,9 +27,9 @@ const tool: ToolDefinition = {
 
 describe("requestForcedToolArguments", () => {
   it("fuerza la herramienta indicada y devuelve sus argumentos", async () => {
-    let requestBody: Record<string, unknown> | null = null;
-    globalThis.fetch = async (_input, init) => {
-      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const requestBodies: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(JSON.stringify({
         choices: [{
           finish_reason: "tool_calls",
@@ -46,7 +46,7 @@ describe("requestForcedToolArguments", () => {
           },
         }],
       }), { status: 200, headers: { "content-type": "application/json" } });
-    };
+    }) as unknown as typeof fetch;
 
     const args = await requestForcedToolArguments(
       [{ role: "user", content: "Recuerda el cumpleaños de Ana" }],
@@ -57,6 +57,6 @@ describe("requestForcedToolArguments", () => {
     );
 
     expect(args.title).toBe("Fechas de cumpleaños");
-    expect(requestBody?.tool_choice).toEqual({ type: "function", function: { name: "memory_vault_upsert" } });
+    expect(requestBodies[0]?.tool_choice).toEqual({ type: "function", function: { name: "memory_vault_upsert" } });
   });
 });
