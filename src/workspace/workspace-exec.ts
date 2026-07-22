@@ -59,7 +59,7 @@ export function getRuntimeStatus(force = false): RuntimeState[] {
   return states.map((item) => ({ ...item }));
 }
 
-function getBubblewrapStatus(force = false): { available: boolean; executable?: string; reason?: string } {
+export function getBubblewrapStatus(force = false): { available: boolean; executable?: string; reason?: string } {
   if (platform() !== "linux") return { available: false, reason: `plataforma ${platform()} sin sandbox Linux` };
   if (!force && sandboxCache && Date.now() - sandboxCache.at < 30_000) return { ...sandboxCache };
   const executable = findExecutable(["bwrap"]);
@@ -130,7 +130,7 @@ class BoundedOutput {
   }
 }
 
-function killTree(child: ChildProcess): void {
+export function killProcessTree(child: ChildProcess): void {
   if (!child.pid) return;
   if (platform() === "win32") {
     spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true, timeout: 5_000 });
@@ -151,7 +151,7 @@ function addReadOnlyPath(args: string[], source: string, destination = source): 
   args.push("--ro-bind", source, destination);
 }
 
-function buildBubblewrapArgs(workdir: string, cwdRelative: string, executable: string, runtimeArgs: string[]): string[] {
+export function buildBubblewrapArgs(workdir: string, cwdRelative: string, executable: string, runtimeArgs: string[]): string[] {
   const args = [
     "--die-with-parent",
     "--new-session",
@@ -193,6 +193,83 @@ function runtimeInvocation(runtime: AgenticRuntime, executable: string, code: st
   if (runtime === "python") return { executable, args: ["-c", code, ...args] };
   if (runtime === "node") return { executable, args: ["-e", code, "--", ...args] };
   return { executable, args: ["-e", code, "--", ...args] };
+}
+
+export interface PreparedWorkspaceProcess {
+  executable: string;
+  args: string[];
+  cwd?: string;
+  env: NodeJS.ProcessEnv;
+  sandbox: "bubblewrap" | "none";
+  runtimeExecutable: string;
+  entryHostPath: string;
+  entryDisplayPath: string;
+}
+
+/**
+ * Prepara un proceso persistente basado en un archivo del workdir usando las
+ * mismas garantías de aislamiento que workspace_exec. No inicia el proceso.
+ */
+export function prepareWorkspaceFileProcess(options: {
+  manager: WorkspaceManager;
+  jid: string;
+  runtime: AgenticRuntime;
+  entry: string;
+  cwd?: string;
+  args?: string[];
+}): PreparedWorkspaceProcess {
+  const states = getRuntimeStatus();
+  const state = states.find((item) => item.runtime === options.runtime);
+  if (!state?.available || !state.executable) {
+    throw new Error(`runtime ${options.runtime} no está disponible en este entorno.`);
+  }
+
+  const workdir = options.manager.getWorkdir(options.jid);
+  const entryHostPath = options.manager.resolvePath(options.jid, options.entry, { mustExist: true });
+  const cwdInput = options.cwd?.trim() || ".";
+  const cwdAbsolute = options.manager.resolvePath(options.jid, cwdInput, { mustExist: true, allowDirectory: true });
+  const cwdRelative = options.manager.relativePath(options.jid, cwdAbsolute) || ".";
+  const entryRelative = options.manager.relativePath(options.jid, entryHostPath);
+  mkdirSync(join(workdir, ".home"), { recursive: true });
+  mkdirSync(join(workdir, ".cache"), { recursive: true });
+
+  const userArgs = Array.isArray(options.args) ? options.args.map((item) => String(item)) : [];
+  if (platform() === "linux") {
+    const sandboxStatus = getBubblewrapStatus();
+    if (!sandboxStatus.available || !sandboxStatus.executable) {
+      throw new Error(`ejecución persistente deshabilitada porque bubblewrap no está operativo.${sandboxStatus.reason ? ` Motivo: ${sandboxStatus.reason}` : ""}`);
+    }
+    const sandboxEntry = `/workspace/${entryRelative.replace(/\\/g, "/")}`;
+    return {
+      executable: sandboxStatus.executable,
+      args: buildBubblewrapArgs(workdir, cwdRelative, state.executable, [sandboxEntry, ...userArgs]),
+      env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
+      sandbox: "bubblewrap",
+      runtimeExecutable: state.executable,
+      entryHostPath,
+      entryDisplayPath: entryRelative,
+    };
+  }
+
+  if (process.env.LUNA_ALLOW_UNSANDBOXED_EXEC !== "1") {
+    throw new Error(`ejecución persistente deshabilitada en ${platform()} porque no hay un sandbox de filesystem equivalente configurado.`);
+  }
+  return {
+    executable: state.executable,
+    args: [entryHostPath, ...userArgs],
+    cwd: cwdAbsolute,
+    env: {
+      ...process.env,
+      HOME: join(workdir, ".home"),
+      XDG_CACHE_HOME: join(workdir, ".cache"),
+      TMPDIR: join(workdir, ".cache"),
+      LUNA_WORKDIR: workdir,
+    },
+    sandbox: "none",
+    runtimeExecutable: state.executable,
+    entryHostPath,
+    entryDisplayPath: entryRelative,
+  };
 }
 
 export async function executeSandboxedCode(options: {
@@ -267,11 +344,11 @@ export async function executeSandboxedCode(options: {
       else resolve(value);
     };
     const onAbort = () => {
-      killTree(child);
+      killProcessTree(child);
       finish("", options.signal?.reason ?? new Error("execution-cancelled"));
     };
     timer = setTimeout(() => {
-      killTree(child);
+      killProcessTree(child);
       finish([
         `Error: ejecución excedió ${options.timeoutSeconds}s y fue terminada.`,
         `Runtime: ${options.runtime}`,

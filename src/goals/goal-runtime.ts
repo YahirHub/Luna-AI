@@ -25,6 +25,14 @@ export interface GoalRecord {
   lastSummary?: string;
   verifierFeedback?: string;
   error?: string;
+  currentPhase?: "planning" | "executing" | "delegating" | "verifying" | "waiting_user" | "idle";
+  currentActivity?: string;
+  currentTool?: string;
+  lastEventAt?: string;
+  lastToolResult?: string;
+  pendingInstructions?: string[];
+  instructionHistory?: string[];
+  delegatedTaskIds?: string[];
 }
 
 interface GoalFile { version: 1; goals: GoalRecord[] }
@@ -50,6 +58,7 @@ export interface GoalRuntimeDependencies {
   executeTool: (jid: string, goalId: string, tasklistId: string, name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<string>;
   onProgress?: (jid: string, text: string) => void | Promise<void>;
   onCompleted?: (jid: string, goal: GoalRecord, text: string) => void | Promise<void>;
+  onCancelled?: (jid: string, goal: GoalRecord) => void | Promise<void>;
 }
 
 function shortGoalId(): string {
@@ -170,6 +179,7 @@ export class GoalRuntime {
     const record: GoalRecord = {
       id, jid, objective: clean, status: "queued", tasklistId: tasklist.id,
       createdAt: now, updatedAt: now, iteration: 0,
+      currentPhase: "planning", currentActivity: "Preparando la primera iteración", lastEventAt: now, pendingInstructions: [], instructionHistory: [], delegatedTaskIds: [],
       maxIterations: Math.max(3, Math.min(40, Math.trunc(maxIterations))), noProgressIterations: 0,
     };
     const file = this.load(jid);
@@ -219,11 +229,41 @@ export class GoalRuntime {
     return latest;
   }
 
+  addInstruction(jid: string, instruction: string, id?: string): GoalRecord {
+    const target = this.get(jid, id);
+    if (!target || !isActive(target.status)) throw new Error("No hay un goal activo al cual enviar la instrucción.");
+    const clean = instruction.replace(/\s+/g, " ").trim();
+    if (!clean) throw new Error("La instrucción no puede estar vacía.");
+    const pending = [...(target.pendingInstructions ?? []), clean].slice(-20);
+    return this.patch(jid, target.id, {
+      pendingInstructions: pending,
+      currentActivity: `Nueva instrucción del usuario pendiente de aplicar: ${clean.slice(0, 220)}`,
+      lastEventAt: new Date().toISOString(),
+    })!;
+  }
+
+  noteDelegatedTask(jid: string, id: string, taskId: string): void {
+    const goal = this.get(jid, id);
+    if (!goal) return;
+    const ids = [...new Set([...(goal.delegatedTaskIds ?? []), taskId])].slice(-30);
+    this.patch(jid, id, { delegatedTaskIds: ids, lastEventAt: new Date().toISOString() });
+  }
+
+  noteActivity(jid: string, id: string, activity: string, tool?: string, phase?: GoalRecord["currentPhase"]): void {
+    this.patch(jid, id, {
+      currentActivity: activity.slice(0, 1200),
+      currentTool: tool,
+      currentPhase: phase,
+      lastEventAt: new Date().toISOString(),
+    });
+  }
+
   cancel(jid: string, id?: string): boolean {
     const target = id ? this.get(jid, id) : this.list(jid).find((goal) => isActive(goal.status));
     if (!target || !isActive(target.status)) return false;
     this.active.get(`${jid}:${target.id}`)?.abort(new Error("goal-cancelled"));
-    this.patch(jid, target.id, { status: "cancelled", error: "Cancelado por el usuario.", completedAt: new Date().toISOString() });
+    const cancelled = this.patch(jid, target.id, { status: "cancelled", error: "Cancelado por el usuario.", completedAt: new Date().toISOString(), currentPhase: "idle", currentActivity: "Cancelado por el usuario", currentTool: undefined, lastEventAt: new Date().toISOString() });
+    if (cancelled) void Promise.resolve(this.deps.onCancelled?.(jid, cancelled)).catch(() => undefined);
     return true;
   }
 
@@ -237,6 +277,11 @@ export class GoalRuntime {
       `Estado: ${goal.status}`,
       `Objetivo: ${goal.objective}`,
       `Iteración: ${goal.iteration}/${goal.maxIterations}`,
+      goal.currentPhase ? `Fase: ${goal.currentPhase}` : "",
+      goal.currentActivity ? `Ahora: ${goal.currentActivity}` : "",
+      goal.currentTool ? `Tool activa: ${goal.currentTool}` : "",
+      goal.lastEventAt ? `Última actividad: ${goal.lastEventAt}` : "",
+      goal.pendingInstructions?.length ? `Instrucciones pendientes del usuario: ${goal.pendingInstructions.length}` : "",
       progress ? `Tasklist: ${progress.done}/${progress.total} completados · ${progress.pending} pendientes · ${progress.blocked} bloqueados` : "Tasklist: no disponible",
       goal.verifierFeedback ? `Verifier: ${truncate(goal.verifierFeedback, 1200)}` : "",
       goal.error ? `Error: ${goal.error}` : "",
@@ -251,6 +296,8 @@ export class GoalRuntime {
       "[GOAL ACTIVO — estado autoritativo]",
       `${goal.id} | ${goal.status} | iteración ${goal.iteration}/${goal.maxIterations}`,
       `Objetivo: ${goal.objective}`,
+      goal.currentActivity ? `Actividad actual: ${goal.currentActivity}` : "",
+      goal.pendingInstructions?.length ? `Instrucciones nuevas pendientes: ${goal.pendingInstructions.join(" | ")}` : "",
       tasklist ? this.deps.tasklists.format(tasklist) : "Tasklist no disponible",
       "El goal corre en segundo plano. No bloquees el chat ni lo declares terminado hasta que el verifier lo marque completed.",
     ].join("\n");
@@ -281,7 +328,10 @@ export class GoalRuntime {
       {
         role: "user",
         content: [
-          `OBJETIVO:\n${goal.objective}`,
+          `OBJETIVO ORIGINAL:\n${goal.objective}`,
+          (goal.instructionHistory?.length || goal.pendingInstructions?.length)
+            ? `REQUISITOS/CORRECCIONES POSTERIORES DEL USUARIO — forman parte obligatoria del objetivo efectivo:\n${[...(goal.instructionHistory ?? []), ...(goal.pendingInstructions ?? [])].map((item) => `- ${item}`).join("\n")}`
+            : "",
           `TASKLIST:\n${this.deps.tasklists.format(tasklist)}`,
           `RESPUESTA/RESUMEN DEL EJECUTOR:\n${truncate(finalContent, 8000)}`,
           `TRAZA RECIENTE DE TOOLS:\n${recentTrace || "sin tools"}`,
@@ -318,7 +368,7 @@ export class GoalRuntime {
 
   private async run(initial: GoalRecord, controller: AbortController): Promise<void> {
     const signal = controller.signal;
-    let goal = this.patch(initial.jid, initial.id, { status: "running", startedAt: initial.startedAt ?? new Date().toISOString(), error: undefined })!;
+    let goal = this.patch(initial.jid, initial.id, { status: "running", startedAt: initial.startedAt ?? new Date().toISOString(), error: undefined, currentPhase: "planning", currentActivity: "Preparando ejecución autónoma", currentTool: undefined, lastEventAt: new Date().toISOString() })!;
     let previousSignature = "";
 
     while (!signal.aborted && goal.iteration < goal.maxIterations) {
@@ -328,7 +378,8 @@ export class GoalRuntime {
       const tasklist = this.deps.tasklists.get(goal.jid, goal.tasklistId);
       if (!tasklist) throw new Error(`Tasklist ${goal.tasklistId} no encontrada.`);
       const iteration = goal.iteration + 1;
-      goal = this.patch(goal.jid, goal.id, { iteration, status: "running" })!;
+      goal = this.patch(goal.jid, goal.id, { iteration, status: "running", currentPhase: "executing", currentActivity: `Ejecutando iteración ${iteration}/${goal.maxIterations}`, currentTool: undefined, lastEventAt: new Date().toISOString() })!;
+      const pendingInstructions = [...(goal.pendingInstructions ?? [])];
       const tools = this.deps.getTools(goal.jid);
       const trace: GoalToolTrace[] = [];
       const messages: ChatMessage[] = [
@@ -339,7 +390,8 @@ export class GoalRuntime {
             `Goal: ${goal.id}. Tasklist obligatoria: ${goal.tasklistId}.`,
             "Al inicio inspecciona la tasklist. Si todavía es genérica, reemplázala con tasklist_replace por pasos específicos, verificables y completos.",
             "Actualiza tasklist_update después de cada avance importante. No marques completed sin evidencia concreta en evidence.",
-            "Puedes crear/leer/editar/buscar/mover/copiar archivos en el workdir y ejecutar Bash/Python/Node/Bun cuando el runtime esté disponible. Usa workspace_exec para tests, builds y scripts; no inventes su resultado.",
+            "Puedes crear/leer/editar/buscar/mover/copiar archivos en el workdir y ejecutar Bash/Python/Node/Bun cuando el runtime esté disponible. Usa workspace_exec para tests, builds y scripts finitos; no inventes su resultado.",
+            "Si el objetivo requiere dejar un bot, servidor o servicio ejecutándose después de este turno, usa process_start. Verifica process_status/process_logs, corrige errores y reinicia cuando sea necesario; no mantengas un workspace_exec infinito.",
             "Cuando falte documentación o información actual, delega con spawn_agents. Usa researcher-web si api-search está disponible y browser-web en caso contrario o para navegación/scraping. Pide al investigador guardar documentación útil en Markdown dentro de su carpeta de tarea cuando vaya a ser necesaria para continuar la implementación.",
             "Si después de una investigación aún falta un dato, realiza otra investigación enfocada únicamente en el hueco restante; no abandones el goal por un primer intento incompleto.",
             "Para imágenes útiles a modelos sin visión, delega browser-web hacia páginas de archivo de Wikimedia Commons: conserva URL de la página File:, descripción textual, autor/licencia cuando estén visibles y descarga el recurso si el objetivo lo necesita. No adivines el contenido visual.",
@@ -354,6 +406,7 @@ export class GoalRuntime {
             `OBJETIVO ORIGINAL:\n${goal.objective}`,
             `ESTADO ACTUAL:\n${this.deps.tasklists.format(tasklist)}`,
             goal.verifierFeedback ? `FEEDBACK DEL VERIFIER ANTERIOR:\n${goal.verifierFeedback}` : "",
+            pendingInstructions.length ? `NUEVAS INSTRUCCIONES DEL USUARIO — son obligatorias y corrigen/amplían el objetivo:\n${pendingInstructions.map((item) => `- ${item}`).join("\n")}` : "",
             `WORKDIR (vista parcial):\n${truncate(this.deps.workspace.listRecursive(goal.jid, ".", 180).join("\n"), 10000)}`,
             `ITERACIÓN: ${iteration}/${goal.maxIterations}`,
             "Continúa desde el estado actual. No repitas trabajo ya evidenciado.",
@@ -366,8 +419,24 @@ export class GoalRuntime {
         config,
         tools,
         async (name, args) => {
+          const delegating = name === "spawn_agents" || name === "researcher_web" || name === "browser_agent";
+          this.patch(goal.jid, goal.id, {
+            currentPhase: delegating ? "delegating" : "executing",
+            currentTool: name,
+            currentActivity: delegating
+              ? `Investigando/delegando mediante ${name}`
+              : `Ejecutando ${name}`,
+            lastEventAt: new Date().toISOString(),
+          });
           const toolResult = await this.deps.executeTool(goal.jid, goal.id, goal.tasklistId, name, args, signal);
           trace.push({ name, args: structuredClone(args), result: toolResult });
+          this.patch(goal.jid, goal.id, {
+            currentPhase: "executing",
+            currentTool: undefined,
+            currentActivity: `Procesando resultado de ${name}`,
+            lastToolResult: truncate(toolResult, 1200),
+            lastEventAt: new Date().toISOString(),
+          });
           return toolResult;
         },
         3,
@@ -375,8 +444,22 @@ export class GoalRuntime {
         { maxRounds: 36, maxTokens: 7000, truncationRecoveryAttempts: 2, signal, usage: { jid: goal.jid, purpose: "goal" } },
       );
       if (signal.aborted) break;
+      if (pendingInstructions.length) {
+        const latestForInstructions = this.get(goal.jid, goal.id)!;
+        const remaining = (latestForInstructions.pendingInstructions ?? []).filter((item) => !pendingInstructions.includes(item));
+        goal = this.patch(goal.jid, goal.id, {
+          pendingInstructions: remaining,
+          instructionHistory: [...(latestForInstructions.instructionHistory ?? []), ...pendingInstructions].slice(-50),
+        })!;
+      }
+      // Refrescar el goal justo antes de verificar. Una instrucción puede llegar
+      // mientras la iteración estaba ejecutándose; si no la hemos procesado todavía,
+      // debe impedir que el verifier cierre el objetivo viejo por una carrera.
+      goal = this.get(goal.jid, goal.id) ?? goal;
+      this.patch(goal.jid, goal.id, { currentPhase: "verifying", currentTool: undefined, currentActivity: "Verificando evidencia y requisitos pendientes", lastEventAt: new Date().toISOString() });
       const after = this.deps.tasklists.get(goal.jid, goal.tasklistId)!;
-      const deterministicPending = this.tasklistStillGeneric(after)
+      const deterministicPending = (goal.pendingInstructions?.length ?? 0) > 0
+        || this.tasklistStillGeneric(after)
         || after.items.length < 2
         || after.items.some((item) => item.status === "pending" || item.status === "in_progress" || item.status === "blocked");
       let verifier: GoalVerifierResult;
@@ -400,6 +483,10 @@ export class GoalRuntime {
           lastSummary: result.content.trim() || "Objetivo completado y verificado.",
           verifierFeedback: verifier.reason,
           error: undefined,
+          currentPhase: "idle",
+          currentActivity: "Objetivo completado y verificado",
+          currentTool: undefined,
+          lastEventAt: new Date().toISOString(),
         })!;
         await this.deps.onCompleted?.(goal.jid, goal, [
           `✅ Goal ${goal.id} completado y verificado.`,
@@ -421,6 +508,10 @@ export class GoalRuntime {
         lastSummary: result.content.trim() || goal.lastSummary,
         verifierFeedback: feedback,
         noProgressIterations,
+        currentPhase: "planning",
+        currentActivity: "Verifier encontró pendientes; preparando la siguiente iteración",
+        currentTool: undefined,
+        lastEventAt: new Date().toISOString(),
       })!;
       await this.deps.onProgress?.(goal.jid, `🎯 ${goal.id}: verificación incompleta; continúo automáticamente.\nIteración ${goal.iteration}/${goal.maxIterations} · ${this.deps.tasklists.progress(current).done}/${current.items.length} pasos completados.`);
       if (noProgressIterations >= 3) {

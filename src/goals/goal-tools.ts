@@ -57,4 +57,20 @@ export const GOAL_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "goal_instruction",
+      description: "Añade una corrección, requisito o instrucción nueva al goal activo sin ejecutar el trabajo pesado dentro del turno principal. El GoalRuntime la aplicará en su siguiente oportunidad.",
+      parameters: {
+        type: "object",
+        properties: {
+          instruction: { type: "string" },
+          goal_id: { type: "string" },
+        },
+        required: ["instruction"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];

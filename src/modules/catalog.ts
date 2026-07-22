@@ -12,9 +12,10 @@ import { AGENTS_MODULE } from "./agents/module.ts";
 import { WHISPER_MODULE } from "./whisper/module.ts";
 import { ADMIN_MODULE } from "./admin/module.ts";
 import { GOALS_MODULE } from "./goals/module.ts";
+import { PROCESSES_MODULE } from "./processes/module.ts";
 
 export const moduleRegistry = new ModuleRegistry();
 for (const module of [
   CORE_MODULE, CONTEXT_MODULE, MEMORY_MODULE, AUTOMATION_MODULE, WORKSPACE_MODULE, ARTIFACTS_MODULE,
-  PROVIDER_MODULE, SEARCH_MODULE, BROWSER_MODULE, AGENTS_MODULE, GOALS_MODULE, WHISPER_MODULE, ADMIN_MODULE,
+  PROVIDER_MODULE, SEARCH_MODULE, BROWSER_MODULE, AGENTS_MODULE, GOALS_MODULE, PROCESSES_MODULE, WHISPER_MODULE, ADMIN_MODULE,
 ]) moduleRegistry.register(module);

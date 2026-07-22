@@ -58,6 +58,7 @@ Luna puede convertir trabajos complejos en un **goal autónomo** que se ejecuta 
 /goal estado [id]
 /goal cancelar [id]
 /goal reanudar [id]
+/goal instruccion <cambio o requisito>
 /goal lista
 ```
 
@@ -75,7 +76,11 @@ workspace_glob / workspace_search / workspace_read_files
 workspace_apply_patch / workspace_runtime_status / workspace_exec
 ```
 
-`workspace_exec` acepta Bash, Python, Node.js o Bun únicamente si el runtime existe. En Linux exige un sandbox Bubblewrap operativo y monta como escritura solo el workdir del JID; el resto del filesystem de runtime se expone en solo lectura y `/tmp` es efímero. Si el kernel o el contenedor bloquea los namespaces necesarios, Luna falla de forma segura y no ejecuta código sin aislamiento. En plataformas no Linux la ejecución no aislada permanece deshabilitada salvo habilitación explícita del operador.
+`workspace_exec` acepta Bash, Python, Node.js o Bun únicamente si el runtime existe y está pensado para comandos **finitos** como tests, builds o scripts. En Linux exige un sandbox Bubblewrap operativo y monta como escritura solo el workdir del JID; el resto del filesystem de runtime se expone en solo lectura y `/tmp` es efímero. Si el kernel o el contenedor bloquea los namespaces necesarios, Luna falla de forma segura y no ejecuta código sin aislamiento. En plataformas no Linux la ejecución no aislada permanece deshabilitada salvo habilitación explícita del operador.
+
+Los bots, servidores y servicios que deben permanecer vivos usan el administrador de **procesos persistentes** (`process_start`, `process_list`, `process_status`, `process_logs`, `process_stop`, `process_restart`). Cada proceso obtiene un ID `P-…`, conserva estado por usuario y captura `stdout`, `stderr` y un log combinado cronológico fuera del workdir editable. Luna puede iniciar un bot, comprobar sus logs, corregir el código, reiniciarlo y detenerlo en un turno posterior. Un PID no se considera evidencia suficiente de funcionamiento: el agente debe consultar estado/logs cuando necesite verificar que el servicio arrancó correctamente. Las peticiones directas “detén el bot”, “reinicia el proceso” y consultas puras de logs se resuelven antes del lock conversacional cuando el proceso puede identificarse sin ambigüedad.
+
+Mientras un goal está activo, preguntas como “¿cómo va el goal?” se responden directamente desde GoalRuntime/TaskRuntime sin esperar al LLM. El estado incluye fase, tool actual, actividad, subagentes de investigación activos y procesos persistentes asociados. Las correcciones de requisitos pueden enviarse con `/goal instruccion ...`; el GoalRuntime las incorpora al objetivo efectivo y una instrucción que llegue durante una iteración impide que el verifier cierre el objetivo anterior hasta procesarla.
 
 Para tareas como crear un bot a partir de documentación externa, el flujo esperado es: planificar en la tasklist → investigar lo desconocido con subagentes → conservar el handoff/documentación necesaria → implementar en el workdir → ejecutar tests/builds → corregir → verificar. Para recursos visuales cuando el modelo no tiene visión, `browser-agent` puede consultar páginas `File:` de Wikimedia Commons y conservar la descripción textual, URL de archivo, autor/licencia y fuente antes de reutilizar o descargar el recurso.
 
@@ -698,7 +703,7 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!id` | Muestra el JID de WhatsApp. |
 | `!cambiar-password` | Cambia la contraseña de la cuenta autenticada; si no se incluye el valor, inicia una captura segura. |
 | `/cancelar` | Cancela el flujo interactivo, goal, compactación o tarea activa del usuario. |
-| `/goal <objetivo>` | Inicia un objetivo autónomo en segundo plano; `estado`, `cancelar`, `reanudar` y `lista` administran el runtime. |
+| `/goal <objetivo>` | Inicia un objetivo autónomo en segundo plano; `estado`, `cancelar`, `reanudar`, `instruccion` y `lista` administran el runtime. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
 | `!clear-workdir confirmar` | Limpia todo el workdir privado del usuario sin borrar conversación, memoria ni configuración. |
 | `!limpiar-workdir confirmar` | Alias en español de `!clear-workdir`. |
@@ -888,6 +893,8 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 30. Ejecutar `/goal crea un proyecto pequeño, pruébalo y corrige hasta que pase`, comprobar que el chat siga respondiendo mientras trabaja, que la tasklist no tenga comando público y que el verifier impida completar pasos sin evidencia.
 31. Dentro de un goal forzar una falta de documentación, comprobar que delegue a `api-search` o `browser-agent`, espere esa investigación dentro del runtime background y continúe después con la implementación.
 32. Ejecutar `workspace_runtime_status` y `workspace_exec` en Docker con Bash/Python/Node; comprobar que `cwd=../otro-usuario` y rutas mediante symlink sean rechazadas y que cancelar termine el árbol de procesos.
+33. Iniciar un bot Node con `process_start`, comprobar `process_status` y `process_logs`, provocar un error, corregirlo y usar `process_restart`; después detenerlo desde lenguaje natural y verificar que el proceso termina.
+34. Con un `/goal` activo, preguntar “¿cómo va el goal?” mientras un browser-agent/api-search sigue investigando; la respuesta debe ser inmediata y mencionar el subagente. Enviar una corrección de requisitos durante esa iteración y confirmar que el verifier no complete el goal hasta procesarla.
 33. Pedir un recurso visual con fuente y comprobar que `browser-agent` use una página `File:` de Wikimedia Commons, conserve descripción/autor/licencia/URL y no invente contenido visual.
 
 ## Estado actual de ejecución delegada

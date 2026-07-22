@@ -140,6 +140,8 @@ import {
   executeAgenticWorkspaceTool,
 } from "./workspace/workspace-agentic-tools.ts";
 import { getRuntimeStatus, formatRuntimeStatus } from "./workspace/workspace-exec.ts";
+import { UserProcessManager } from "./processes/process-manager.ts";
+import { PROCESS_TOOLS, executeProcessTool } from "./processes/process-tools.ts";
 import {
   TasklistManager,
   TASKLIST_TOOLS,
@@ -223,6 +225,7 @@ const alarmManager = new AlarmManager();
 
 /** Workdir privado y herramientas extendidas por usuario. */
 const workspaceManager = new WorkspaceManager();
+const processManager = new UserProcessManager(workspaceManager);
 const taskRuntime = new TaskRuntime(workspaceManager);
 const tasklistManager = new TasklistManager(workspaceManager);
 let goalRuntime: GoalRuntime | null = null;
@@ -262,6 +265,7 @@ const BASE_TOOLS = [
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
   ...AGENTIC_WORKSPACE_TOOLS,
+  ...PROCESS_TOOLS,
   ...TASKLIST_TOOLS,
   ...GOAL_TOOLS,
   ...ARTIFACT_TOOLS,
@@ -327,6 +331,11 @@ moduleRegistry.bindContextProvider("workspace", () => {
   return formatRuntimeStatus(getRuntimeStatus());
 });
 
+moduleRegistry.bindContextProvider("processes", (_message, session) => {
+  if (!session.jid) return "No hay sesión de usuario.";
+  return processManager.buildContextSummary(session.jid);
+});
+
 moduleRegistry.bindContextProvider("goals", (_message, session) => {
   if (!session.jid || !goalRuntime) return "No hay goal activo.";
   return goalRuntime.buildContextSummary(session.jid);
@@ -342,6 +351,7 @@ function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
     ...TASKLIST_TOOLS,
     ...WORKSPACE_TOOLS,
     ...AGENTIC_WORKSPACE_TOOLS,
+    ...PROCESS_TOOLS,
     ...ARTIFACT_TOOLS,
     ...MESSAGING_TOOLS,
     ...agentTools,
@@ -369,6 +379,9 @@ async function executeGoalRuntimeTool(
   }
   if (AGENTIC_WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
     return executeAgenticWorkspaceTool(name, args, workspaceManager, jid, signal);
+  }
+  if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
+    return executeProcessTool(name, args, processManager, jid, goalId);
   }
   if (ARTIFACT_TOOLS.some((tool) => tool.function.name === name)) {
     return executeArtifactTool(name, args, workspaceManager, jid);
@@ -400,11 +413,16 @@ async function executeGoalRuntimeTool(
         if (currentTransport) await sendWorkspacePath(currentTransport, jid, workspaceManager, path, caption);
       },
       onProgress: async (event) => {
-        if (!currentTransport) return;
         if (event.type === "task_registered") {
-          await sendWhatsAppMessage(currentTransport, jid, { text: `🔎 ${goalId}: tarea de investigación ${event.taskId} registrada.` }, { waitForDelivery: false });
+          goalRuntime?.noteDelegatedTask(jid, goalId, event.taskId);
+          goalRuntime?.noteActivity(jid, goalId, `Investigación ${event.taskId} registrada; esperando que arranquen los subagentes.`, "spawn_agents", "delegating");
+          if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text: `🔎 ${goalId}: tarea de investigación ${event.taskId} registrada.` }, { waitForDelivery: false });
         } else if (event.type === "agent_started") {
-          await sendWhatsAppMessage(currentTransport, jid, { text: `🚀 ${event.agentType === "browser-web" ? "browser-agent" : "api-search"} ${event.agentId} trabajando para ${goalId} — ${event.agentName}` }, { waitForDelivery: false });
+          const backend = event.agentType === "browser-web" ? "browser-agent" : "api-search";
+          goalRuntime?.noteActivity(jid, goalId, `${backend} ${event.agentId} investigando: ${event.agentName}`, "spawn_agents", "delegating");
+          if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text: `🚀 ${backend} ${event.agentId} trabajando para ${goalId} — ${event.agentName}` }, { waitForDelivery: false });
+        } else if (event.type === "task_completed") {
+          goalRuntime?.noteActivity(jid, goalId, `Investigación ${event.taskId} terminó con estado ${event.status}; integrando resultados.`, "spawn_agents", "executing");
         }
       },
     });
@@ -424,6 +442,9 @@ goalRuntime = new GoalRuntime({
   executeTool: executeGoalRuntimeTool,
   onProgress: async (jid, text) => {
     if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
+  },
+  onCancelled: async (jid, goal) => {
+    processManager.stopOwnedByGoal(jid, goal.id);
   },
   onCompleted: async (jid, goal, text) => {
     if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
@@ -470,6 +491,10 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
   ["message_send", "📤 Preparando envío por el transporte activo..."],
   ["workspace_clear", "🧹 Limpiando tu workdir..."],
+  ["process_start", "⚙️ Iniciando proceso persistente..."],
+  ["process_logs", "📜 Revisando logs del proceso..."],
+  ["process_stop", "⛔ Deteniendo proceso..."],
+  ["process_restart", "🔄 Reiniciando proceso..."],
   ["goal_start", "🎯 Preparando goal autónomo..."],
   ["model_list", "📋 Actualizando modelos disponibles..."],
   ["model_set", "🧠 Cambiando modelo de la conversación..."],
@@ -1140,6 +1165,131 @@ function isTaskProgressQuestion(value: string): boolean {
     || /^(?:como|cómo) va(?:n)?(?: el| la| los| las)? (?:proceso|procesos|tarea|tareas|agente|agentes)/iu.test(normalized);
 }
 
+function isGoalProgressQuestion(value: string, jid: string): boolean {
+  const activeGoal = goalRuntime?.list(jid).find((goal) => ["queued", "running", "waiting_user"].includes(goal.status));
+  if (!activeGoal) return false;
+  const normalized = normalizeNaturalText(value);
+  if (/(?:goal|objetivo).{0,40}(?:como va|cómo va|estado|avance|progreso|haciendo|en que va|en qué va)/iu.test(normalized)) return true;
+  if (/(?:como va|cómo va|estado|avance|progreso|que esta haciendo|qué está haciendo|en que vas|en qué vas).{0,45}(?:goal|objetivo)/iu.test(normalized)) return true;
+  if (/^(?:como|cómo) va(?: el| la)? (?:bot|proyecto|trabajo)(?:\?|$)/iu.test(normalized)) return true;
+  return false;
+}
+
+function formatGoalProgressForUser(jid: string): string {
+  const goal = goalRuntime?.list(jid).find((item) => ["queued", "running", "waiting_user"].includes(item.status)) ?? goalRuntime?.get(jid);
+  if (!goal || !goalRuntime) return "🎯 No hay un goal activo.";
+  const lines = [goalRuntime.formatStatus(jid, goal.id)];
+
+  const delegatedIds = new Set(goal.delegatedTaskIds ?? []);
+  const activeAgents = taskRuntime.listAgents(jid).filter((agent) =>
+    ["queued", "running", "waiting_user"].includes(agent.status)
+    && (delegatedIds.size === 0 || delegatedIds.has(agent.taskId))
+  );
+  if (activeAgents.length) {
+    lines.push("", "🔎 Investigación/subagentes activos:");
+    for (const agent of activeAgents.slice(0, 10)) {
+      const state = agent.status === "waiting_user"
+        ? `esperando ${agent.waitingFieldName ?? "un dato"}`
+        : agent.status === "queued" ? "en cola" : "trabajando";
+      lines.push(`• ${agentBackendLabel(agent.agentType)} ${agent.id} — ${agent.name}`, `  Estado: ${state}`, `  Ahora: ${agent.activity ?? "sin actividad detallada"}`, `  Último evento: ${formatAgentEventAge(agent.lastEventAt)}`);
+    }
+  }
+
+  const goalProcesses = processManager.list(jid).filter((process) => process.ownerGoalId === goal.id && ["starting", "running", "stopping"].includes(process.status));
+  if (goalProcesses.length) {
+    lines.push("", "⚙️ Procesos iniciados por este goal:");
+    for (const process of goalProcesses.slice(0, 8)) {
+      lines.push(`• ${process.id} — ${process.name}: ${process.status}${process.pid ? ` (PID ${process.pid})` : ""}`, `  ${process.runtime} ${process.entry}`, "  Logs disponibles con process_logs.");
+    }
+  }
+  return lines.join("\n");
+}
+
+function isManagedProcessProgressQuestion(value: string, jid: string): boolean {
+  const active = processManager.list(jid).some((process) => ["starting", "running", "stopping"].includes(process.status));
+  if (!active) return false;
+  const normalized = normalizeNaturalText(value);
+  return /(?:como|cómo) va(?: el| la)? (?:bot|servidor|servicio|proceso)(?:\?|$)/iu.test(normalized)
+    || /(?:estado|sigue corriendo|esta corriendo|está corriendo).{0,25}(?:bot|servidor|servicio|proceso)/iu.test(normalized);
+}
+
+function formatManagedProcessProgressForUser(jid: string): string {
+  const active = processManager.list(jid).filter((process) => ["starting", "running", "stopping"].includes(process.status));
+  if (!active.length) return "⚙️ No hay procesos persistentes activos.";
+  return [
+    "⚙️ PROCESOS ACTIVOS",
+    ...active.slice(0, 10).flatMap((process) => [
+      `• ${process.id} — ${process.name}`,
+      `  Estado: ${process.status}${process.pid ? ` · PID ${process.pid}` : ""}`,
+      `  Runtime: ${process.runtime} ${process.entry}`,
+      process.ownerGoalId ? `  Iniciado por goal: ${process.ownerGoalId}` : "",
+      process.lastLogAt ? `  Último log: ${formatAgentEventAge(process.lastLogAt)}` : "  Aún sin salida registrada",
+    ].filter(Boolean)),
+    "Puedes pedirme revisar los logs, detener o reiniciar cualquiera de estos procesos.",
+  ].join("\n");
+}
+
+
+type NaturalProcessControl = "stop" | "restart" | "logs";
+
+function detectNaturalProcessControl(value: string): NaturalProcessControl | null {
+  const normalized = normalizeNaturalText(value);
+  if (/\b(?:corrige|corrígelo|arregla|soluciona|fix)\b/iu.test(normalized)) return null;
+  if (/^(?:deten|detén|detener|para|parar|apaga|apagar)\s+(?:el\s+)?(?:bot|servidor|servicio|proceso)(?:\s+.+)?$/iu.test(normalized)) return "stop";
+  if (/^(?:reinicia|reiniciar|rearranca|rearrancar)\s+(?:el\s+)?(?:bot|servidor|servicio|proceso)(?:\s+.+)?$/iu.test(normalized)) return "restart";
+  if (/^(?:muestra|mostrar|dame|ver|revisa|revisar|lee|leer)\s+(?:los\s+)?logs(?:\s+(?:del|de|para)\s+(?:el\s+)?(?:bot|servidor|servicio|proceso))?(?:\s+.+)?$/iu.test(normalized)) return "logs";
+  return null;
+}
+
+function resolveManagedProcessFromText(jid: string, value: string) {
+  const records = processManager.list(jid);
+  if (!records.length) return { process: undefined, ambiguity: "⚙️ No hay procesos persistentes registrados." };
+  const normalized = normalizeNaturalText(value);
+  const explicit = records.find((record) => normalized.includes(record.id.toLowerCase()) || normalized.includes(normalizeNaturalText(record.name)));
+  if (explicit) return { process: explicit, ambiguity: undefined };
+  const active = records.filter((record) => ["starting", "running", "stopping"].includes(record.status));
+  if (active.length === 1) return { process: active[0], ambiguity: undefined };
+  if (active.length > 1) {
+    return {
+      process: undefined,
+      ambiguity: ["⚙️ Hay varios procesos activos. Indica el nombre o ID:", ...active.slice(0, 10).map((record) => `• ${record.id} — ${record.name} (${record.status})`)].join("\\n"),
+    };
+  }
+  if (records.length === 1) return { process: records[0], ambiguity: undefined };
+  return {
+    process: undefined,
+    ambiguity: ["⚙️ No hay un único proceso que pueda inferir. Indica el nombre o ID:", ...records.slice(0, 10).map((record) => `• ${record.id} — ${record.name} (${record.status})`)].join("\\n"),
+  };
+}
+
+async function tryHandleNaturalProcessControl(sock: MessagingTransport, jid: string, value: string): Promise<boolean> {
+  const action = detectNaturalProcessControl(value);
+  if (!action) return false;
+  const resolved = resolveManagedProcessFromText(jid, value);
+  if (!resolved.process) {
+    await sendWithTyping(sock, jid, resolved.ambiguity ?? "⚙️ No pude identificar el proceso.");
+    return true;
+  }
+  const record = resolved.process;
+  if (action === "logs") {
+    await sendWithTyping(sock, jid, processManager.logs(jid, record.id, "all", 160));
+    return true;
+  }
+  if (action === "restart") {
+    const restarted = await processManager.restart(jid, record.id);
+    await sendWithTyping(sock, jid, `🔄 ${restarted.name} reiniciado como ${restarted.id}${restarted.pid ? ` · PID ${restarted.pid}` : ""}.`);
+    return true;
+  }
+  const stopped = processManager.stop(jid, record.id);
+  if (record.ownerGoalId) {
+    try {
+      goalRuntime?.addInstruction(jid, `El usuario detuvo explícitamente el proceso ${record.name} (${record.id}). No lo reinicies ni inicies otra instancia equivalente salvo que el usuario lo pida después.`, record.ownerGoalId);
+    } catch { /* el goal puede haber terminado */ }
+  }
+  await sendWithTyping(sock, jid, `⛔ ${stopped.name} (${stopped.id}) se está deteniendo.`);
+  return true;
+}
+
 function formatTaskProgressForUser(jid: string): string {
   const tasks = taskRuntime.list(jid);
   const agents = taskRuntime.listAgents(jid);
@@ -1696,6 +1846,16 @@ registerCommand(
         return { text: `❌ ${error instanceof Error ? error.message : String(error)}` };
       }
     }
+    if (["instruccion", "instrucción", "instruction", "decir"].includes(sub)) {
+      const instruction = cmd.args.slice(1).join(" ").trim();
+      if (!instruction) return { text: "Uso: /goal instruccion <cambio o requisito>" };
+      try {
+        const updated = goalRuntime.addInstruction(senderJid, instruction);
+        return { text: `🧭 Instrucción enviada a ${updated.id}. El goal la aplicará sin bloquear esta conversación.` };
+      } catch (error) {
+        return { text: `❌ ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
     if (["lista", "list"].includes(sub)) {
       const goals = goalRuntime.list(senderJid);
       return { text: goals.length ? ["🎯 GOALS RECIENTES", ...goals.map((goal) => `- ${goal.id} | ${goal.status} | ${goal.objective.slice(0, 100)}`)].join("\n") : "🎯 No hay goals registrados." };
@@ -1729,8 +1889,9 @@ const clearWorkdirCommandHandler = (cmd: import("./commands.ts").ParsedCommand, 
   }
   const hasActiveTask = taskRuntime.list(senderJid).some((task) => task.status === "queued" || task.status === "running" || task.status === "synthesizing");
   const activeGoal = goalRuntime?.list(senderJid).some((goal) => ["queued", "running", "waiting_user"].includes(goal.status)) ?? false;
-  if (hasActiveTask || activeGoal) {
-    return { text: "❌ No se puede limpiar el workdir mientras hay una tarea de subagentes o un /goal activo. Cancélalo o espera a que termine." };
+  const activeProcess = processManager.list(senderJid).some((process) => ["starting", "running", "stopping"].includes(process.status));
+  if (hasActiveTask || activeGoal || activeProcess) {
+    return { text: "❌ No se puede limpiar el workdir mientras hay una tarea, /goal o proceso persistente activo. Detén/cancela lo activo primero." };
   }
   workspaceManager.clearWorkdir(senderJid);
   return { text: "🧹 Workdir limpiado por completo. Se recrearon tasks, inbox y exports." };
@@ -2705,6 +2866,18 @@ export async function handleMessage(
 
   if (authManager.isLoggedIn(remoteJid)) {
     retryPendingBackgroundReviews(sock, remoteJid);
+    // Controles operativos puros de procesos tampoco deben esperar al LLM.
+    if (await tryHandleNaturalProcessControl(sock, remoteJid, text)) return;
+    // Las consultas de progreso no deben esperar al LLM ni al lock del chat.
+    // Se responden desde estado autoritativo de GoalRuntime/TaskRuntime.
+    if (isGoalProgressQuestion(text, remoteJid)) {
+      await sendWithTyping(sock, remoteJid, formatGoalProgressForUser(remoteJid));
+      return;
+    }
+    if (isManagedProcessProgressQuestion(text, remoteJid)) {
+      await sendWithTyping(sock, remoteJid, formatManagedProcessProgressForUser(remoteJid));
+      return;
+    }
     if (isTaskProgressQuestion(text)) {
       await sendWithTyping(sock, remoteJid, formatTaskProgressForUser(remoteJid));
       return;
@@ -3385,6 +3558,17 @@ ${supervisorContext}`;
           result = goalRuntime.cancel(remoteJid, goalId)
             ? `Goal${goalId ? ` ${goalId}` : " activo"} cancelado.`
             : "Error: no hay un goal activo con ese identificador.";
+        } else if (name === "goal_instruction") {
+          const instruction = typeof args.instruction === "string" ? args.instruction.trim() : "";
+          if (!instruction) result = "Error: instruction es obligatorio.";
+          else {
+            try {
+              const updated = goalRuntime.addInstruction(remoteJid, instruction, typeof args.goal_id === "string" ? args.goal_id : undefined);
+              result = `Instrucción añadida al goal ${updated.id}; el runtime la aplicará en segundo plano.`;
+            } catch (error) {
+              result = `Error: ${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
         } else {
           try {
             const resumed = goalRuntime.resume(remoteJid, typeof args.goal_id === "string" ? args.goal_id : undefined);
@@ -3409,14 +3593,21 @@ ${supervisorContext}`;
         return result;
       }
 
+      if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeProcessTool(name, args, processManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
         if (name === "workspace_clear") {
           const hasActiveTask = taskRuntime.list(remoteJid).some(
             (task) => task.status === "queued" || task.status === "running" || task.status === "synthesizing",
           );
           const hasActiveGoal = goalRuntime?.list(remoteJid).some((goal) => ["queued", "running", "waiting_user"].includes(goal.status)) ?? false;
-          if (hasActiveTask || hasActiveGoal) {
-            result = "Error: no se puede limpiar el workdir mientras hay una tarea de subagentes o un /goal activo. Cancélalo o espera a que termine.";
+          const hasActiveProcess = processManager.list(remoteJid).some((process) => ["starting", "running", "stopping"].includes(process.status));
+          if (hasActiveTask || hasActiveGoal || hasActiveProcess) {
+            result = "Error: no se puede limpiar el workdir mientras hay una tarea, /goal o proceso persistente activo. Detén/cancela lo activo primero.";
             await recordToolResult(name, result);
             return result;
           }
@@ -3640,7 +3831,7 @@ ${supervisorContext}`;
         // en la superficie pública siempre crean tareas background. Una vez
         // registrada la tarea no se hace otra llamada al LLM dentro del lock de
         // conversación; el supervisor/revisor continuará por fuera.
-        terminalTools: ["goal_start", "spawn_agents", "researcher_web", "browser_agent"],
+        terminalTools: ["goal_start", "goal_instruction", "spawn_agents", "researcher_web", "browser_agent"],
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
