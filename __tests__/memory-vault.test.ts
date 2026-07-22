@@ -165,6 +165,32 @@ describe("herramientas memory_vault", () => {
     expect(read).toContain("Ana — 1995-12-08");
   });
 
+  it("agrega por defecto a una nota temática existente y evita duplicados exactos", async () => {
+    const { vault } = createVault();
+    await executeMemoryVaultTool("memory_vault_upsert", {
+      title: "Fechas de cumpleaños",
+      content: "# Fechas de cumpleaños\n\n- Mamá — 12 de enero (año desconocido)",
+      type: "dates",
+    }, vault, "user");
+
+    await executeMemoryVaultTool("memory_vault_upsert", {
+      title: "Fechas de cumpleaños",
+      content: "- Yahir — 18 de enero (año desconocido)",
+      type: "dates",
+    }, vault, "user");
+    await executeMemoryVaultTool("memory_vault_upsert", {
+      title: "Fechas de cumpleaños",
+      content: "- Yahir — 18 de enero (año desconocido)",
+      mode: "append",
+      type: "dates",
+    }, vault, "user");
+
+    const note = vault.read("user", "Fechas de cumpleaños");
+    expect(note.content).toContain("Mamá — 12 de enero");
+    expect(note.content).toContain("Yahir — 18 de enero");
+    expect(note.content.split("Yahir — 18 de enero")).toHaveLength(2);
+  });
+
   it("exige confirmación antes de eliminar", async () => {
     const { vault } = createVault();
     vault.upsert("user", { title: "Temporal", content: "Dato" });

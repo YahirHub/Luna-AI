@@ -114,6 +114,10 @@ interface RawRequestOptions {
   model: string;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
+  tool_choice?: "auto" | "required" | {
+    type: "function";
+    function: { name: string };
+  };
   temperature?: number;
   max_tokens?: number;
   signal?: AbortSignal;
@@ -147,7 +151,7 @@ async function rawChatRequest(
 
   if (body.tools && body.tools.length > 0) {
     requestBody.tools = body.tools;
-    requestBody.tool_choice = "auto";
+    requestBody.tool_choice = body.tool_choice ?? "auto";
   }
 
   // Normalizar mensajes: assistant con tool_calls debe tener content=null
@@ -251,6 +255,55 @@ async function rawChatRequest(
 
   const finalError = lastError ?? new Error("Error desconocido en chat completion");
   throw new LlmRetriesExhaustedError(attempts, finalError);
+}
+
+/**
+ * Solicita argumentos para una herramienta concreta. Se usa como red de
+ * seguridad cuando una intención transaccional explícita no produjo el tool
+ * call obligatorio en la ronda normal.
+ */
+export async function requestForcedToolArguments(
+  messages: ChatMessage[],
+  model: string,
+  config: LlmConfig,
+  tool: ToolDefinition,
+  instruction: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const forcedMessages: ChatMessage[] = [
+    ...messages,
+    { role: "user", content: instruction },
+  ];
+  const choices: RawRequestOptions["tool_choice"][] = [
+    { type: "function", function: { name: tool.function.name } },
+    "required",
+    "auto",
+  ];
+  let lastError: Error | null = null;
+
+  for (const toolChoice of choices) {
+    try {
+      const result = await rawChatRequest({
+        model,
+        messages: forcedMessages,
+        tools: [tool],
+        tool_choice: toolChoice,
+        max_tokens: 1_500,
+        signal,
+      }, config, 1);
+      const call = result.tool_calls?.find((candidate) => candidate.function.name === tool.function.name);
+      if (!call) throw new Error(`El proveedor no devolvió la llamada obligatoria ${tool.function.name}.`);
+      const parsed = JSON.parse(call.function.arguments) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Los argumentos de ${tool.function.name} no son un objeto válido.`);
+      }
+      return parsed as Record<string, unknown>;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  throw lastError ?? new Error(`No se pudieron generar argumentos para ${tool.function.name}.`);
 }
 
 /**

@@ -113,10 +113,11 @@ export const MEMORY_TOOLS = [
     function: {
       name: "memory_write",
       description:
-        "Escribe o actualiza la memoria persistente del bot. " +
-        "Usa esto para recordar informacion importante del usuario como su nombre, " +
-        "preferencias, datos relevantes, o como debe comportarse con el. " +
-        "El contenido se conserva incluso despues de usar !clear.",
+        "Escribe o actualiza el perfil persistente compacto del usuario. " +
+        "Es OBLIGATORIA cuando el usuario pide guardar su nombre, número, correo, forma de trato o preferencias estables. " +
+        "No basta con responder que fue recordado: solo el éxito de esta herramienta confirma la escritura. " +
+        "Para cumpleaños, fechas, personas, proyectos o colecciones usa memory_vault_upsert/edit. " +
+        "El contenido se conserva incluso después de usar !clear.",
       parameters: {
         type: "object",
         properties: {

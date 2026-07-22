@@ -35,4 +35,12 @@ describe("integración de la bóveda persistente", () => {
       "memory_vault_restore",
     ]) expect(confirmations).toContain(`"${tool}"`);
   });
+
+  it("fuerza una mutación cuando el modelo solo buscó o afirmó guardar", () => {
+    const bot = source("src/bot.ts");
+    expect(bot).toContain("detectMemoryPersistenceIntent(userText)");
+    expect(bot).toContain("requestForcedToolArguments(");
+    expect(bot).toContain("mutation_missing_after_primary_round");
+    expect(bot).toContain("buildUnconfirmedMemoryResponse");
+  });
 });

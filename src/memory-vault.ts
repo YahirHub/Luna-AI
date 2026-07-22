@@ -539,9 +539,14 @@ export class PersistentMemoryVault {
       updated: now,
       source: existing?.source ?? "user",
     };
+    const incoming = input.content.trim();
+    const appendAlreadyPresent = existing && input.mode === "append" && incoming &&
+      normalizeText(existing.content).includes(normalizeText(incoming));
     const body = existing && input.mode === "append"
-      ? `${existing.content.replace(/\s+$/, "")}\n\n${input.content.trim()}\n`
-      : `${input.content.trim()}\n`;
+      ? appendAlreadyPresent
+        ? `${existing.content.replace(/\s+$/, "")}\n`
+        : `${existing.content.replace(/\s+$/, "")}\n\n${incoming}\n`
+      : `${incoming}\n`;
     if (body.length > MEMORY_VAULT_MAX_NOTE_CHARS) {
       throw new Error(`La nota excede el límite de ${MEMORY_VAULT_MAX_NOTE_CHARS} caracteres.`);
     }
@@ -763,7 +768,7 @@ export const MEMORY_VAULT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "memory_vault_upsert",
-      description: "Crea una nota temática Markdown o actualiza una existente. Usa una nota por tema estable, por ejemplo fechas-cumpleanos.md, proyectos.md o preferencias-tecnicas.md. No almacena secretos.",
+      description: "Crea una nota temática Markdown o actualiza una existente. Es OBLIGATORIA cuando el usuario pide recordar fechas, cumpleaños, personas, proyectos, decisiones o colecciones. Buscar o leer NO guarda nada. Usa una nota por tema estable; para cumpleaños prefiere el título 'Fechas de cumpleaños'. Si la nota existe, conserva sus entradas y usa note + mode=append para un dato nuevo, o replace solo después de leer/reconstruir todo el contenido. No almacena secretos.",
       parameters: {
         type: "object",
         properties: {
@@ -907,11 +912,21 @@ export async function executeMemoryVaultTool(
     if (name === "memory_vault_upsert") {
       const title = typeof args.title === "string" ? args.title : "";
       const content = typeof args.content === "string" ? args.content : "";
+      const explicitNote = typeof args.note === "string" ? args.note : undefined;
+      const titleExists = !explicitNote && title.trim()
+        ? vault.search(jid, title, { limit: 1 })
+          .some((result) => normalizeText(result.note.title) === normalizeText(title))
+        : false;
+      const mode = args.mode === "replace"
+        ? "replace"
+        : args.mode === "append" || titleExists
+          ? "append"
+          : "replace";
       const result = vault.upsert(jid, {
-        note: typeof args.note === "string" ? args.note : undefined,
+        note: explicitNote,
         title,
         content,
-        mode: args.mode === "append" ? "append" : "replace",
+        mode,
         folder: typeof args.folder === "string" ? args.folder : undefined,
         type: typeof args.type === "string" ? args.type : undefined,
         tags: Array.isArray(args.tags) ? args.tags.filter((item): item is string => typeof item === "string") : undefined,

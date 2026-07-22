@@ -26,6 +26,7 @@ import {
   fetchModels,
   chatCompletion,
   chatCompletionWithTools,
+  requestForcedToolArguments,
   LlmRetriesExhaustedError,
 } from "./ai.ts";
 import {
@@ -52,6 +53,13 @@ import {
   MEMORY_VAULT_TOOLS,
   executeMemoryVaultTool,
 } from "./memory-vault.ts";
+import {
+  buildConfirmedMemoryResponse,
+  buildMemoryTransactionInstruction,
+  buildUnconfirmedMemoryResponse,
+  detectMemoryPersistenceIntent,
+  hasConfirmedMemoryMutation,
+} from "./memory-intent.ts";
 import {
   ReminderManager,
   REMINDER_TOOLS,
@@ -2667,6 +2675,7 @@ async function handleAiChat(
   await ensureContextCompaction(sock, remoteJid);
 
   const messages = cm.getMessages(remoteJid);
+  const memoryIntent = detectMemoryPersistenceIntent(userText);
 
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
   // usando shallow clone para no contaminar el contexto persistido
@@ -2679,7 +2688,10 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
   const apiMessages = messages.map((m) => ({ ...m }));
   const lastMsg = apiMessages[apiMessages.length - 1];
   if (lastMsg && lastMsg.role === "user") {
-    lastMsg.content = `${dynamicCtx}\n\n---\n\n${lastMsg.content}`;
+    const memoryTransaction = memoryIntent
+      ? `\n\n${buildMemoryTransactionInstruction(userText, memoryIntent)}`
+      : "";
+    lastMsg.content = `${dynamicCtx}${memoryTransaction}\n\n---\n\n${lastMsg.content}`;
   }
 
   // Mantener el estado escribiendo durante toda la operación real.
@@ -2996,7 +3008,7 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
       return result;
     };
 
-    const result = await chatCompletionWithTools(
+    let result = await chatCompletionWithTools(
       apiMessages,
       model,
       cfg,
@@ -3021,11 +3033,70 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
       throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
     }
 
+    let memoryRecoveryError = "";
+    if (memoryIntent && !hasConfirmedMemoryMutation(confirmedTools, memoryIntent.target)) {
+      const forcedToolName = memoryIntent.target === "profile"
+        ? "memory_write"
+        : "memory_vault_upsert";
+      const forcedTool = [...MEMORY_TOOLS, ...MEMORY_VAULT_TOOLS]
+        .find((tool) => tool.function.name === forcedToolName);
+      debugWarn("memory.persistence", "mutation_missing_after_primary_round", {
+        jid: remoteJid,
+        target: memoryIntent.target,
+        toolsCalled: result.toolsCalled,
+        forcedTool: forcedToolName,
+      });
+
+      if (forcedTool) {
+        try {
+          const forcedArgs = await requestForcedToolArguments(
+            apiMessages,
+            model,
+            cfg,
+            forcedTool,
+            [
+              buildMemoryTransactionInstruction(userText, memoryIntent, true),
+              "Resultados de memoria obtenidos en la primera ronda (son consulta, no confirmación de escritura):",
+              ...toolResults
+                .filter((entry) => entry.name.startsWith("memory_"))
+                .map((entry) => `${entry.name}: ${entry.result}`),
+            ].join("\n\n"),
+            runController.signal,
+          );
+          const forcedResult = await toolExecutor(forcedToolName, forcedArgs);
+          if (hasConfirmedMemoryMutation(confirmedTools, memoryIntent.target)) {
+            result = {
+              content: buildConfirmedMemoryResponse(memoryIntent.target, forcedResult),
+              toolsCalled: [...result.toolsCalled, forcedToolName],
+            };
+            debugInfo("memory.persistence", "forced_mutation_confirmed", {
+              jid: remoteJid,
+              target: memoryIntent.target,
+              tool: forcedToolName,
+            });
+          } else {
+            memoryRecoveryError = forcedResult;
+          }
+        } catch (error) {
+          memoryRecoveryError = error instanceof Error ? error.message : String(error);
+          debugError("memory.persistence", "forced_mutation_failed", error, {
+            jid: remoteJid,
+            target: memoryIntent.target,
+            tool: forcedToolName,
+          });
+        }
+      } else {
+        memoryRecoveryError = `No se encontró la herramienta ${forcedToolName}.`;
+      }
+    }
+
     const latestUsefulToolResult = [...toolResults]
       .reverse()
       .find((entry) => !entry.result.startsWith("Error:"))?.result;
-    const rawFinalContent = result.content.trim() || latestUsefulToolResult ||
-      "No pude generar una respuesta útil en esta ronda.";
+    const rawFinalContent = memoryIntent && !hasConfirmedMemoryMutation(confirmedTools, memoryIntent.target)
+      ? buildUnconfirmedMemoryResponse(memoryIntent.target, memoryRecoveryError || undefined)
+      : result.content.trim() || latestUsefulToolResult ||
+        "No pude generar una respuesta útil en esta ronda.";
     const guardedContent = guardUnconfirmedScheduledCreationClaim(
       rawFinalContent,
       confirmedTools,
