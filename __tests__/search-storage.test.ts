@@ -9,6 +9,7 @@ import {
 import {
   loadWebSearchAuth,
   loadWebSearchSettings,
+  isApiSearchAvailable,
   removeSearchProviderApiKey,
   saveSearchProviderApiKey,
   setDefaultSearchProvider,
@@ -26,6 +27,7 @@ describe("search storage", () => {
       loadWebSearchSettings(TEST_DIR),
       loadWebSearchAuth(TEST_DIR),
     )).toEqual([]);
+    expect(isApiSearchAvailable(TEST_DIR)).toBe(false);
   });
 
   it("separa la API key de las preferencias y activa el primer motor", () => {
@@ -36,6 +38,7 @@ describe("search storage", () => {
     expect(auth.apiKeys.tavily).toBe("tvly-secret");
     expect(settings.defaultProvider).toBe("tavily");
     expect(resolveSearchProviderState("tavily", settings, auth).enabled).toBe(true);
+    expect(isApiSearchAvailable(TEST_DIR)).toBe(true);
   });
 
   it("cambia el predeterminado y recupera fallback al deshabilitarlo", () => {
@@ -53,4 +56,13 @@ describe("search storage", () => {
     expect(auth.apiKeys.tavily).toBeUndefined();
     expect(auth.apiKeys.exa).toBe("exa-secret");
   });
+  it("considera api-search no disponible si todas las credenciales están deshabilitadas", () => {
+    const isolated = join(TEST_DIR, "availability-disabled");
+    mkdirSync(isolated, { recursive: true });
+    saveSearchProviderApiKey("brave", "brave-secret", isolated);
+    expect(isApiSearchAvailable(isolated)).toBe(true);
+    setSearchProviderEnabled("brave", false, isolated);
+    expect(isApiSearchAvailable(isolated)).toBe(false);
+  });
+
 });

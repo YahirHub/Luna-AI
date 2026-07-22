@@ -1,4 +1,4 @@
-<!-- codewolf:auto-context:record -->
+﻿<!-- codewolf:auto-context:record -->
 # 001 — Actualizar implementación del proyecto
 
 # Fecha

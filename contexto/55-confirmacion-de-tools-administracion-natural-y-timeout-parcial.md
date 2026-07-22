@@ -1,4 +1,4 @@
-# 55 — Confirmación de herramientas, administración natural y timeout parcial
+﻿# 55 — Confirmación de herramientas, administración natural y timeout parcial
 
 ## Fecha
 

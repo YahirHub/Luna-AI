@@ -1,4 +1,4 @@
-# 42 — Mascota y configuración LLM independiente
+﻿# 42 — Mascota y configuración LLM independiente
 
 > Estado: decisiones de proveedor sustituidas por `43-configuracion-proveedor-desde-whatsapp.md` y `44-restaurar-opencode-free.md`.
 

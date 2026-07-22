@@ -27,11 +27,14 @@ describe("integración agéntica", () => {
     expect(definition).not.toContain("ALARM_TOOLS");
   });
 
-  it("el agente principal usa spawn_agents no terminal y conserva herramientas de artefactos", () => {
+  it("el agente principal desacopla los lanzadores background y conserva herramientas de artefactos", () => {
     const bot = source("src/bot.ts");
     const agentsModule = source("src/modules/agents/module.ts");
     expect(bot).toContain('name === "spawn_agents"');
     expect(bot).toContain('name === "researcher_web"');
+    expect(bot).toContain('terminalTools: ["spawn_agents", "researcher_web", "browser_agent"]');
+    expect(bot).toContain("parseDetachedBackgroundTaskResult(result.content, result.toolsCalled)");
+    expect(bot).toContain("chat_lock_released_after_background_registration");
     expect(bot).not.toContain('name === "parallel_research_report"');
     expect(bot).toContain("executeArtifactTool");
     expect(bot).toContain("executeMessagingTool");
@@ -88,4 +91,15 @@ describe("integración agéntica", () => {
     expect(spawn).toContain("registerAgentTerminator");
     expect(bot).toContain("taskRuntime.buildContextSummary(remoteJid)");
   });
+});
+
+it("la revisión background genera la síntesis fuera del lock conversacional", () => {
+  const bot = source("src/bot.ts");
+  const reviewStart = bot.indexOf("async function reviewBackgroundTask");
+  const reviewEnd = bot.indexOf("function formatAgentEventAge", reviewStart);
+  const review = bot.slice(reviewStart, reviewEnd);
+  const llmReview = review.indexOf("summary = (await chatCompletion");
+  const persistLock = review.indexOf("await cm.withLock");
+  expect(llmReview).toBeGreaterThanOrEqual(0);
+  expect(persistLock).toBeGreaterThan(llmReview);
 });

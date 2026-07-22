@@ -10,6 +10,7 @@ import { deduplicateSpawnAgentRequests } from "./spawn-deduper.ts";
 import type { AgentEvent, SpawnAgentReport, SpawnAgentRequest } from "./agent-types.ts";
 import { BrowserAgentExecution } from "../browser/browser-runtime.ts";
 import type { BrowserCredentialStore } from "../browser/browser-credentials.ts";
+import { buildDogpileSearchFallbackPrompt } from "../search/search-routing.ts";
 
 const MAX_AGENTS_PER_CALL = 8;
 const MAX_PARENT_RESULT_CHARS = 8_000;
@@ -24,7 +25,7 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
       "Úsala para delegar dos o más investigaciones independientes en paralelo; por ejemplo un researcher-web por proveedor, producto o tema.",
       "Cada subagente puede usar sus propias herramientas y devuelve únicamente su respuesta final compacta.",
       "La herramienta NO crea PDFs ni entrega archivos: cuando termine, tú recuperas el control, revisas los resultados, puedes lanzar investigaciones adicionales si algo falta y después debes crear/sintetizar los archivos solicitados con las herramientas normales.",
-      "Usa researcher-web/api-search para búsquedas rápidas, noticias, comparaciones o verificación pública en múltiples fuentes cuando existan motores configurados.",
+      "Usa researcher-web/api-search para búsquedas rápidas, noticias, comparaciones o verificación pública solo cuando existan motores configurados. Si api-search no está disponible, las solicitudes researcher-web se enrutan automáticamente a browser-web usando Dogpile como buscador de respaldo.",
       "Usa browser-web/browser-agent para analizar, scrapear o inventariar un dominio concreto, recorrer sus páginas internas, inspeccionar HTML/DOM/consola/red, iniciar sesión, tomar capturas o descargar imágenes, favicon y archivos.",
     ].join(" "),
     parameters: {
@@ -200,9 +201,28 @@ export const AGENT_TASK_TOOLS: ToolDefinition[] = [
   { type: "function", function: { name: "agent_cancel", description: "Cancela un agente activo concreto por ID o nombre sin afectar a los demás ni a la conversación.", parameters: { type: "object", properties: { agent: { type: "string" } }, required: ["agent"], additionalProperties: false } } },
 ];
 
-export function getMainAgentTools(config: AgentConfig): ToolDefinition[] {
-  const tools: ToolDefinition[] = [SPAWN_AGENTS_TOOL, BROWSER_WEB_DIRECT_TOOL, BROWSER_CREDENTIAL_REQUEST_TOOL, ...BROWSER_CREDENTIAL_CONTROL_TOOLS];
-  if (config.webSearchEnabled && config.researchSubagentEnabled) tools.push(RESEARCHER_WEB_DIRECT_TOOL);
+function getSpawnAgentsTool(apiSearchAvailable: boolean): ToolDefinition {
+  if (apiSearchAvailable) return SPAWN_AGENTS_TOOL;
+  const tool = JSON.parse(JSON.stringify(SPAWN_AGENTS_TOOL)) as ToolDefinition;
+  tool.function.description = [
+    "Crea subagentes de navegador con contexto aislado y los ejecuta en segundo plano para no bloquear el chat.",
+    "api-search no está disponible en esta ejecución, por lo que solo browser-web puede delegarse.",
+    "Para búsquedas públicas generales, browser-web usa Dogpile como buscador de descubrimiento y después verifica las fuentes originales.",
+    "Para dominios concretos puede navegar, scrapear, inspeccionar HTML/DOM/consola/red, iniciar sesión, tomar capturas y descargar archivos.",
+  ].join(" ");
+  const parameters = tool.function.parameters as Record<string, any>;
+  const items = parameters?.properties?.agents?.items as Record<string, any> | undefined;
+  const agentType = items?.properties?.agent_type as Record<string, any> | undefined;
+  if (agentType) {
+    agentType.enum = ["browser-web"];
+    agentType.description = "Tipo de subagente disponible. api-search está deshabilitado hasta configurar un proveedor.";
+  }
+  return tool;
+}
+
+export function getMainAgentTools(config: AgentConfig, apiSearchAvailable = true): ToolDefinition[] {
+  const tools: ToolDefinition[] = [getSpawnAgentsTool(apiSearchAvailable), BROWSER_WEB_DIRECT_TOOL, BROWSER_CREDENTIAL_REQUEST_TOOL, ...BROWSER_CREDENTIAL_CONTROL_TOOLS];
+  if (apiSearchAvailable && config.webSearchEnabled && config.researchSubagentEnabled) tools.push(RESEARCHER_WEB_DIRECT_TOOL);
   return [...tools, ...AGENT_TASK_TOOLS];
 }
 
@@ -235,6 +255,8 @@ export interface SpawnAgentsDependencies {
   onSystemArtifact?: (path: string, caption: string) => void | Promise<void>;
   /** Activa la revisión automática del orquestador al terminar una tarea background. */
   onBackgroundCompleted?: (taskId: string) => void | Promise<void>;
+  /** Estado autoritativo de api-search para esta ejecución. En producción lo resuelve /setup-search. */
+  apiSearchAvailable?: boolean;
 }
 
 function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
@@ -261,14 +283,24 @@ export function shouldUseBrowserAgentForPrompt(prompt: string): boolean {
   return hasDomain && domainInspection;
 }
 
-function routeAgentRequest(request: SpawnAgentRequest): SpawnAgentRequest {
+function routeAgentRequest(request: SpawnAgentRequest, apiSearchAvailable: boolean): SpawnAgentRequest {
   if (normalizeAgentType(request.agent_type) !== "researcher-web") return request;
-  if (!shouldUseBrowserAgentForPrompt(request.prompt ?? "")) return request;
-  return {
-    ...request,
-    agent_type: "browser-web",
-    name: request.name || "Análisis completo del dominio",
-  };
+  if (shouldUseBrowserAgentForPrompt(request.prompt ?? "")) {
+    return {
+      ...request,
+      agent_type: "browser-web",
+      name: request.name || "Análisis completo del dominio",
+    };
+  }
+  if (!apiSearchAvailable) {
+    return {
+      ...request,
+      agent_type: "browser-web",
+      name: request.name || "Búsqueda web con navegador",
+      prompt: buildDogpileSearchFallbackPrompt(request.prompt ?? ""),
+    };
+  }
+  return request;
 }
 
 function safeSegment(value: string): string {
@@ -670,7 +702,8 @@ export async function executeSpawnAgentsTool(
   args: Record<string, unknown>,
   dependencies: SpawnAgentsDependencies,
 ): Promise<string> {
-  let requested = parseRequests(args).map(routeAgentRequest);
+  const apiSearchAvailable = dependencies.apiSearchAvailable ?? true;
+  let requested = parseRequests(args).map((request) => routeAgentRequest(request, apiSearchAvailable));
   if (requested.length === 0) return "Error: agents debe contener al menos un subagente con agent_type y prompt.";
   if (requested.length > MAX_AGENTS_PER_CALL) return `Error: solo se permiten ${MAX_AGENTS_PER_CALL} subagentes por llamada.`;
   if (dependencies.filterRequests) requested = dependencies.filterRequests(requested);
@@ -731,6 +764,13 @@ export async function executeResearcherWebTool(
     return await executeBrowserWebTool({
       name: name || "Análisis completo del dominio",
       prompt,
+      background,
+    }, dependencies);
+  }
+  if (dependencies.apiSearchAvailable === false) {
+    return await executeBrowserWebTool({
+      name: name || "Búsqueda web con navegador",
+      prompt: buildDogpileSearchFallbackPrompt(prompt),
       background,
     }, dependencies);
   }

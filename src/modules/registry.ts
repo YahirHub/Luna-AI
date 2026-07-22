@@ -10,10 +10,23 @@ function normalize(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+function conditionPasses(condition: ((session: ModuleSession) => boolean) | undefined, session: ModuleSession): boolean {
+  if (!condition) return true;
+  try { return condition(session); } catch { return false; }
+}
+
+function moduleAvailable(module: LunaModule, session: ModuleSession): boolean {
+  return allowed(module.access, session) && conditionPasses(module.availableWhen, session);
+}
+
+function promptAvailable(module: LunaModule, session: ModuleSession): boolean {
+  return Boolean(module.prompt) && moduleAvailable(module, session) && conditionPasses(module.prompt?.availableWhen, session);
+}
+
 export class ModuleRegistry {
   private readonly modules = new Map<string, LunaModule>();
   private readonly commands = new Map<string, ResolvedModuleCommand>();
-  private readonly tools = new Map<string, { moduleId: string; access: ModuleAccess }>();
+  private readonly tools = new Map<string, { moduleId: string; access: ModuleAccess; availableWhen?: (session: ModuleSession) => boolean }>();
   private readonly contextProviders = new Map<string, (message: string, session: ModuleSession) => string | Promise<string>>();
 
   register(module: LunaModule): void {
@@ -36,18 +49,18 @@ export class ModuleRegistry {
     }
     for (const tool of module.tools ?? []) {
       if (this.tools.has(tool.name)) throw new Error(`Tool duplicada: ${tool.name}`);
-      this.tools.set(tool.name, { moduleId: module.id, access: tool.access ?? module.access });
+      this.tools.set(tool.name, { moduleId: module.id, access: tool.access ?? module.access, availableWhen: tool.availableWhen });
     }
   }
 
   listModules(session: ModuleSession): LunaModule[] {
     if (!session.authenticated) return [];
-    return [...this.modules.values()].filter((module) => allowed(module.access, session));
+    return [...this.modules.values()].filter((module) => moduleAvailable(module, session));
   }
 
   resolveCommand(name: string, session: ModuleSession): ResolvedModuleCommand | null {
     const command = this.commands.get(name.toLowerCase());
-    if (!command || !allowed(command.access, session)) return null;
+    if (!command || !allowed(command.access, session) || !conditionPasses(command.availableWhen, session)) return null;
     return command;
   }
 
@@ -55,7 +68,7 @@ export class ModuleRegistry {
     if (!session.authenticated) return [];
     const unique = new Map<string, ResolvedModuleCommand>();
     for (const command of this.commands.values()) {
-      if (allowed(command.access, session)) unique.set(command.name, command);
+      if (allowed(command.access, session) && conditionPasses(command.availableWhen, session)) unique.set(command.name, command);
     }
     return [...unique.values()].sort((a, b) => a.moduleName.localeCompare(b.moduleName) || a.name.localeCompare(b.name));
   }
@@ -68,7 +81,8 @@ export class ModuleRegistry {
       const binding = this.tools.get(definition.function.name);
       // Una tool no declarada en un módulo se rechaza por defecto. Esto hace que
       // añadir una tool nueva requiera declarar explícitamente su superficie de acceso.
-      if (!binding || !allowed(binding.access, session)) {
+      const owner = binding ? this.modules.get(binding.moduleId) : undefined;
+      if (!binding || !owner || !moduleAvailable(owner, session) || !allowed(binding.access, session) || !conditionPasses(binding.availableWhen, session)) {
         rejected.push(definition.function.name);
         continue;
       }
@@ -106,8 +120,11 @@ export class ModuleRegistry {
     const normalized = normalize(message);
     return modules.filter((module) => {
       const prompt = module.prompt;
-      if (!prompt) return false;
+      if (!prompt || !promptAvailable(module, session)) return false;
       if (prompt.always) return true;
+      if (prompt.activateWhen) {
+        try { if (prompt.activateWhen(message, session)) return true; } catch { /* capability unavailable */ }
+      }
       if (prompt.keywords?.some((keyword) => normalized.includes(normalize(keyword)))) return true;
       return prompt.patterns?.some((pattern) => { pattern.lastIndex = 0; return pattern.test(message); }) ?? false;
     });
@@ -119,7 +136,7 @@ export class ModuleRegistry {
 
     const lines = [
       "=== CAPACIDADES MODULARES DISPONIBLES ===",
-      ...modules.filter((module) => module.prompt).map((module) => `- ${module.id}: ${module.prompt!.summary}`),
+      ...modules.filter((module) => promptAvailable(module, session)).map((module) => `- ${module.id}: ${module.prompt!.summary}`),
     ];
     if (active.length > 0) {
       lines.push("", "=== INSTRUCCIONES DE MÓDULOS ACTIVOS ===");
@@ -136,12 +153,15 @@ export class ModuleRegistry {
     if (!session.authenticated) return "🔒 Debes iniciar sesión primero. Envía !login";
     const requested = moduleId?.trim().toLowerCase();
     const availableModules = this.listModules(session);
+    const commands = this.getCommands(session);
+    const visibleModules = availableModules.filter((module) =>
+      promptAvailable(module, session) || commands.some((command) => command.moduleId === module.id)
+    );
     const selectedModules = requested
-      ? availableModules.filter((module) => module.id === requested)
-      : availableModules;
+      ? visibleModules.filter((module) => module.id === requested)
+      : visibleModules;
     if (requested && selectedModules.length === 0) return `❓ El módulo '${requested}' no está disponible para esta sesión.`;
 
-    const commands = this.getCommands(session);
     const lines = ["🤖 COMANDOS Y MÓDULOS DISPONIBLES"];
     for (const module of selectedModules) {
       const moduleCommands = commands.filter((command) => command.moduleId === module.id);

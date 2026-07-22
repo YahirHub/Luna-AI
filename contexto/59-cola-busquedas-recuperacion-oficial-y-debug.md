@@ -1,4 +1,4 @@
-# 59 — Cola de búsquedas, recuperación oficial y depuración completa
+﻿# 59 — Cola de búsquedas, recuperación oficial y depuración completa
 
 # Fecha
 

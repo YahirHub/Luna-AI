@@ -114,6 +114,7 @@ import {
   setSearchFallbackOrder,
   setSearchProviderEnabled,
 } from "./search/search-storage.ts";
+import { isApiSearchCapabilityAvailable } from "./search/search-routing.ts";
 import { testSearchProvider } from "./search/search-runtime.ts";
 import {
   ADMIN_TOOLS,
@@ -261,7 +262,7 @@ function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
   if (!session.authenticated) return [];
   const pool = [
     ...BASE_TOOLS,
-    ...getMainAgentTools(agentConfig),
+    ...getMainAgentTools(agentConfig, isApiSearchCapabilityAvailable()),
     ...ADMIN_TOOLS,
     ...ADMIN_CONTROL_TOOLS,
   ];
@@ -295,7 +296,7 @@ moduleRegistry.bindContextProvider("whisper", () => {
 moduleRegistry.bindContextProvider("agents", (_message, _session) => {
   const config = loadAgentConfig();
   return [
-    `api-search: ${config.webSearchEnabled && config.researchSubagentEnabled ? "habilitado" : "deshabilitado"}`,
+    `api-search: ${config.webSearchEnabled && config.researchSubagentEnabled && isApiSearchCapabilityAvailable() ? "disponible" : "no disponible"}`,
     `Profundidad predeterminada: ${config.defaultSearchDepth}`,
     `Timeout researcher: ${Math.round(config.researcherTimeoutMs / 60_000)} min`,
   ].join("\n");
@@ -2930,6 +2931,31 @@ export async function handleMessage(
  * Procesa un mensaje como chat AI: construye contexto, llama a la API
  * con soporte de function calling (tools), responde.
  */
+function parseDetachedBackgroundTaskResult(
+  content: string,
+  toolsCalled: string[],
+): { taskId: string; title?: string; status: string } | null {
+  if (!toolsCalled.some((name) => name === "spawn_agents" || name === "researcher_web" || name === "browser_agent")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(content) as {
+      task_id?: unknown;
+      title?: unknown;
+      status?: unknown;
+      background?: unknown;
+    };
+    if (parsed.background !== true || typeof parsed.task_id !== "string" || !parsed.task_id.trim()) return null;
+    return {
+      taskId: parsed.task_id.trim(),
+      title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
+      status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function handleAiChat(
   sock: MessagingTransport,
   remoteJid: string,
@@ -3160,13 +3186,16 @@ ${supervisorContext}`;
           model,
           llmConfig: cfg,
           agentConfig: agentConfigSnapshot,
+          apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
+            // Mensaje emitido por una tarea background: no depende del typing
+            // session del turno que la lanzó, porque ese turno puede haber
+            // terminado hace tiempo.
             await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
           },
           onSystemArtifact: async (path, caption) => {
             await sendWorkspacePath(sock, remoteJid, workspaceManager, path, caption);
@@ -3180,7 +3209,8 @@ ${supervisorContext}`;
             for (const progressText of progressMessages) {
               await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            // El progreso pertenece al runtime background y no debe reactivar
+            // el estado de escritura del turno principal ya liberado.
           },
         });
         toolResults.push({ name, result });
@@ -3193,13 +3223,16 @@ ${supervisorContext}`;
           model,
           llmConfig: cfg,
           agentConfig: agentConfigSnapshot,
+          apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
+            // Mensaje emitido por una tarea background: no depende del typing
+            // session del turno que la lanzó, porque ese turno puede haber
+            // terminado hace tiempo.
             await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
           },
           onSystemArtifact: async (path, caption) => {
             await sendWorkspacePath(sock, remoteJid, workspaceManager, path, caption);
@@ -3213,7 +3246,8 @@ ${supervisorContext}`;
             for (const progressText of progressMessages) {
               await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            // El progreso pertenece al runtime background y no debe reactivar
+            // el estado de escritura del turno principal ya liberado.
           },
         });
         toolResults.push({ name, result });
@@ -3259,13 +3293,16 @@ ${supervisorContext}`;
           model,
           llmConfig: cfg,
           agentConfig: agentConfigSnapshot,
+          apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
           onSystemMessage: async (text) => {
+            // Mensaje emitido por una tarea background: no depende del typing
+            // session del turno que la lanzó, porque ese turno puede haber
+            // terminado hace tiempo.
             await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
-            await typingSession.refresh();
           },
           onSystemArtifact: async (path, caption) => {
             await sendWorkspacePath(sock, remoteJid, workspaceManager, path, caption);
@@ -3279,7 +3316,8 @@ ${supervisorContext}`;
             for (const progressText of progressMessages) {
               await sendWhatsAppMessage(sock, remoteJid, { text: progressText }, { minDelayMs: 800, maxDelayMs: 1_800, waitForDelivery: false });
             }
-            if (progressMessages.length > 0) await typingSession.refresh();
+            // El progreso pertenece al runtime background y no debe reactivar
+            // el estado de escritura del turno principal ya liberado.
           },
         });
         toolResults.push({ name, result });
@@ -3346,6 +3384,11 @@ ${supervisorContext}`;
         truncationRecoveryAttempts: 1,
         signal: runController.signal,
         usage: { jid: remoteJid, purpose: "chat" },
+        // Los lanzadores de subagentes son terminales para el turno principal:
+        // en la superficie pública siempre crean tareas background. Una vez
+        // registrada la tarea no se hace otra llamada al LLM dentro del lock de
+        // conversación; el supervisor/revisor continuará por fuera.
+        terminalTools: ["spawn_agents", "researcher_web", "browser_agent"],
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
@@ -3356,6 +3399,24 @@ ${supervisorContext}`;
 
     if (runController.signal.aborted) {
       throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
+    }
+
+    // Una tarea background ya fue registrada y su progreso visible se envió
+    // desde onProgress. No pedimos un segundo cierre al LLM ni enviamos el JSON
+    // interno como respuesta: persistimos solo un acuse compacto y liberamos el
+    // lock inmediatamente para que el siguiente mensaje del usuario pueda entrar.
+    const detachedBackgroundTask = parseDetachedBackgroundTaskResult(result.content, result.toolsCalled);
+    if (detachedBackgroundTask) {
+      cm.addMessage(remoteJid, {
+        role: "assistant",
+        content: `[Tarea de fondo registrada por el sistema: ${detachedBackgroundTask.taskId}${detachedBackgroundTask.title ? ` — ${detachedBackgroundTask.title}` : ""}. Estado inicial: ${detachedBackgroundTask.status}. El supervisor notificará progreso y resultado; la conversación quedó libre para nuevos mensajes.]`,
+      });
+      debugInfo("agents.spawn", "chat_lock_released_after_background_registration", {
+        jid: remoteJid,
+        taskId: detachedBackgroundTask.taskId,
+        toolsCalled: result.toolsCalled,
+      });
+      return;
     }
 
     let memoryRecoveryError = "";

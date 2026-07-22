@@ -145,6 +145,48 @@ describe("spawn_agents", () => {
     expect(disabled).toContain("browser_request_credential");
     expect(disabled).not.toContain("researcher_web");
     expect(disabled).toContain("task_list");
+
+    const withoutApi = getMainAgentTools(DEFAULT_AGENT_CONFIG, false);
+    expect(withoutApi.map((tool) => tool.function.name)).not.toContain("researcher_web");
+    const spawnTool = withoutApi.find((tool) => tool.function.name === "spawn_agents");
+    const parameters = spawnTool?.function.parameters as Record<string, any>;
+    expect(parameters.properties.agents.items.properties.agent_type.enum).toEqual(["browser-web"]);
+  });
+
+  it("redirige researcher-web a browser-web con Dogpile cuando api-search no está disponible", async () => {
+    const { workspace, tasks } = setup();
+    const observed: Array<{ type: string; prompt: string }> = [];
+    const raw = await executeSpawnAgentsTool({
+      background: false,
+      agents: [{ agent_type: "researcher-web", prompt: "Busca el precio actual de un producto" }],
+    }, {
+      jid: "fallback-browser-user",
+      model: "model",
+      llmConfig,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      apiSearchAvailable: false,
+      workspace,
+      tasks,
+      agentRunner: async (options) => {
+        observed.push({ type: options.definition.id, prompt: options.prompt });
+        return {
+          agentType: options.definition.id,
+          agentName: options.definition.displayName,
+          prompt: options.prompt,
+          runId: options.runId,
+          status: "completed" as const,
+          result: "resultado por navegador",
+          toolsCalled: ["browser_open"],
+        };
+      },
+    });
+
+    const parsed = JSON.parse(raw) as { status: string };
+    expect(parsed.status).toBe("completed");
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.type).toBe("browser-web");
+    expect(observed[0]?.prompt).toContain("https://www.dogpile.com/");
+    expect(observed[0]?.prompt).toContain("fuentes originales");
   });
 
   it("limita el handoff total al agente padre sin truncar los archivos completos del workdir", async () => {

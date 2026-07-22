@@ -133,3 +133,41 @@ it("detiene herramientas adicionales después de una herramienta terminal", asyn
   expect(result.content).toBe("✅ Trabajo terminal completado.");
   expect(calls).toBe(1);
 });
+
+it("no hace una segunda llamada al LLM después de registrar un subagente background terminal", async () => {
+  const backgroundTools: ToolDefinition[] = [{
+    type: "function",
+    function: {
+      name: "browser_agent",
+      description: "Lanza navegador background",
+      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+    },
+  }];
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls > 1) {
+      throw new Error("El orquestador no debe pedir una continuación después del lanzamiento background");
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [
+        { id: "bg-1", type: "function", function: { name: "browser_agent", arguments: JSON.stringify({ prompt: "Investiga el clima" }) } },
+      ] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
+
+  const result = await chatCompletionWithTools(
+    [{ role: "user", content: "Investiga el clima" }],
+    "test-model",
+    config,
+    backgroundTools,
+    async () => JSON.stringify({ task_id: "T-123", status: "queued", background: true }),
+    1,
+    undefined,
+    { maxRounds: 8, terminalTools: ["browser_agent"] },
+  );
+
+  expect(calls).toBe(1);
+  expect(result.toolsCalled).toEqual(["browser_agent"]);
+  expect(JSON.parse(result.content).background).toBe(true);
+});

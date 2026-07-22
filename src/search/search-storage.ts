@@ -9,6 +9,7 @@ import {
   normalizeWebSearchAuth,
   normalizeWebSearchSettings,
   resolveSearchProviderState,
+  hasAvailableSearchProvider,
 } from "./search-config.ts"
 
 import type {
@@ -61,6 +62,16 @@ export function loadWebSearchAuth(
   } catch {
     return normalizeWebSearchAuth({ version: 1, apiKeys: {} })
   }
+}
+
+
+export function isApiSearchAvailable(
+  configDir = getWebSearchConfigDir(),
+): boolean {
+  return hasAvailableSearchProvider(
+    loadWebSearchSettings(configDir),
+    loadWebSearchAuth(configDir),
+  )
 }
 
 export function saveWebSearchSettings(

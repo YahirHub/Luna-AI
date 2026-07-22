@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { moduleRegistry } from "../src/modules/catalog.ts";
+import { ModuleRegistry } from "../src/modules/registry.ts";
 import type { ToolDefinition } from "../src/ai.ts";
+import { isApiSearchCapabilityAvailable } from "../src/search/search-routing.ts";
 
 const user = { authenticated: true, isAdmin: false };
 const admin = { authenticated: true, isAdmin: true };
@@ -39,11 +41,50 @@ describe("registro modular", () => {
     ]);
   });
 
-  it("inyecta resumen de capacidades y solo instrucciones detalladas relevantes", () => {
-    const search = moduleRegistry.buildCapabilityPrompt("Busca el precio actual de GPT", user);
-    expect(search).toContain("search: api-search");
-    expect(search).toContain("[search] Búsqueda API");
-    expect(search).not.toContain("[whisper] Whisper");
+  it("permite condiciones dinámicas independientes para prompt y tools", () => {
+    let backendReady = false;
+    const registry = new ModuleRegistry();
+    registry.register({
+      id: "dynamic-test",
+      name: "Dynamic test",
+      description: "capacidad condicional",
+      category: "test",
+      access: "authenticated",
+      scope: "global",
+      commands: [{ name: "setup-dynamic", description: "configura el backend", access: "admin" }],
+      tools: [{ name: "dynamic_tool", availableWhen: () => backendReady }],
+      prompt: {
+        summary: "backend dinámico disponible",
+        availableWhen: () => backendReady,
+        keywords: ["dinámico"],
+        instructions: ["usa dynamic_tool"],
+      },
+    });
+
+    expect(registry.filterTools([tool("dynamic_tool")], user).tools).toEqual([]);
+    expect(registry.buildCapabilityPrompt("usa dinámico", user)).not.toContain("backend dinámico disponible");
+    expect(registry.resolveCommand("setup-dynamic", admin)?.moduleId).toBe("dynamic-test");
+
+    backendReady = true;
+    expect(registry.filterTools([tool("dynamic_tool")], user).tools.map((entry) => entry.function.name)).toEqual(["dynamic_tool"]);
+    expect(registry.buildCapabilityPrompt("usa dinámico", user)).toContain("[dynamic-test] Dynamic test");
+  });
+
+  it("inyecta api-search solo cuando existe un proveedor y activa browser como fallback", () => {
+    const prompt = moduleRegistry.buildCapabilityPrompt("Busca el precio actual de GPT", user);
+    const searchTool = moduleRegistry.filterTools([tool("researcher_web")], user).tools;
+    if (isApiSearchCapabilityAvailable()) {
+      expect(prompt).toContain("search: api-search");
+      expect(prompt).toContain("[search] Búsqueda API");
+      expect(searchTool.map((entry) => entry.function.name)).toEqual(["researcher_web"]);
+    } else {
+      expect(prompt).not.toContain("search: api-search");
+      expect(prompt).not.toContain("[search] Búsqueda API");
+      expect(prompt).toContain("[browser] Navegador");
+      expect(prompt).toContain("dogpile.com");
+      expect(searchTool).toEqual([]);
+    }
+    expect(prompt).not.toContain("[whisper] Whisper");
 
     const browser = moduleRegistry.buildCapabilityPrompt("Analiza https://example.com y descarga su favicon", user);
     expect(browser).toContain("[browser] Navegador");
