@@ -47,7 +47,7 @@ jobs:
 
       - name: Instalar y validar
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun run typecheck
           bun test
 
@@ -87,7 +87,7 @@ jobs:
 
       - name: Instalar y validar
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun run typecheck
           bun test
 
@@ -128,7 +128,7 @@ jobs:
       - name: Instalar y validar
         shell: pwsh
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun run typecheck
           bun test
 

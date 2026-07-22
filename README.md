@@ -47,7 +47,7 @@ bun install
 bun run start --qr
 ```
 
-`bun install` debe generar `bun.lock`. Versiona el lockfile para que desarrollo, CI y Docker resuelvan las mismas dependencias. El `postinstall` del proyecto ejecuta automáticamente `prepare:browser`: prepara el binario nativo exacto de la plataforma/arquitectura y guarda un manifest para no reutilizar por accidente un runtime de otra arquitectura. En Windows x64, Linux x64 y macOS puede reutilizar Chrome for Testing; en Linux ARM64 usa Chromium/Chrome del sistema porque Google no publica Chrome for Testing para esa plataforma. No es necesario ejecutar manualmente `bunx agent-browser install`.
+`bun install` resuelve las dependencias directamente desde `package.json`; `bun.lock` no se versiona y está ignorado por Git. El `postinstall` del proyecto ejecuta automáticamente `prepare:browser`: prepara el binario nativo exacto de la plataforma/arquitectura y guarda un manifest para no reutilizar por accidente un runtime de otra arquitectura. En Windows x64, Linux x64 y macOS puede reutilizar Chrome for Testing; en Linux ARM64 usa Chromium/Chrome del sistema porque Google no publica Chrome for Testing para esa plataforma. No es necesario ejecutar manualmente `bunx agent-browser install`.
 
 ## Primera configuración
 

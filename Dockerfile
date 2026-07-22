@@ -15,12 +15,11 @@ RUN apt-get update \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json bun.lock ./
-COPY patches ./patches
+COPY package.json ./
 # El postinstall del proyecto necesita scripts/ y src/. Se omiten lifecycle
 # scripts en esta capa para conservar el cache de dependencias y la preparación
 # real se ejecuta después mediante bun run build.
-RUN bun install --production --frozen-lockfile --ignore-scripts
+RUN bun install --production --ignore-scripts
 
 COPY scripts ./scripts
 COPY assets ./assets
