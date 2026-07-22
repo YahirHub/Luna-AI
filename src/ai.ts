@@ -695,7 +695,9 @@ export async function chatCompletionWithTools(
     if (finalContent) return { content: finalContent, toolsCalled };
   } catch (error) {
     if (runtimeOptions.signal?.aborted) throw error;
-    console.warn("[ai] No se pudo generar el cierre después del límite de tools:", error);
+    if (process.env.LUNA_TEST_QUIET !== "1") {
+      console.warn("[ai] No se pudo generar el cierre después del límite de tools:", error);
+    }
   }
 
   return {

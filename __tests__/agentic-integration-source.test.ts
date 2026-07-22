@@ -29,13 +29,13 @@ describe("integración agéntica", () => {
 
   it("el agente principal usa spawn_agents no terminal y conserva herramientas de artefactos", () => {
     const bot = source("src/bot.ts");
-    const context = source("src/context.ts");
+    const agentsModule = source("src/modules/agents/module.ts");
     expect(bot).toContain('name === "spawn_agents"');
     expect(bot).toContain('name === "researcher_web"');
     expect(bot).not.toContain('name === "parallel_research_report"');
     expect(bot).toContain("executeArtifactTool");
     expect(bot).toContain("executeMessagingTool");
-    expect(context).toContain("spawn_agents puede ejecutarse en segundo plano");
+    expect(agentsModule).toContain("las tareas de fondo no bloquean el chat");
     expect(source("src/artifacts/artifact-tools.ts")).toContain('name: "gitzip"');
   });
 
@@ -55,18 +55,17 @@ describe("integración agéntica", () => {
 
   it("deja la selección de browser_agent al orquestador y usa detección local solo para proteger secretos", () => {
     const bot = source("src/bot.ts");
-    const context = source("src/context.ts");
+    const browserModule = source("src/modules/browser/module.ts");
     const pendingCalls = bot.match(/browserCredentialStore\.setPendingInput\(/g) ?? [];
     expect(pendingCalls.length).toBe(1); // únicamente el agente/sistema inicia una espera explícita; detectar una URL no lo hace
     expect(bot).toContain("const activeTools = getAvailableTools(remoteJid)");
     expect(bot).not.toContain("secureBrowserTask");
     expect(bot).toContain("inlineBrowserCredential.password");
-    expect(context).toContain("una solicitud de revisar íntegramente ese dominio");
+    expect(browserModule).toContain("recorrer un dominio específico");
     expect(source("src/agents/spawn-agents-tool.ts")).toContain("shouldUseBrowserAgentForPrompt");
-    expect(context).toContain("No pidas una contraseña por adelantado");
-    expect(context).toContain("pausa la misma ejecución");
-    expect(context).toContain("browser_auth_profiles");
-    expect(context).toContain("browser_request_user_input");
+    expect(browserModule).toContain("No pidas contraseñas por adelantado");
+    expect(browserModule).toContain("solicite datos humanos");
+    expect(browserModule).toContain("referencias opacas");
   });
 
   it("mantiene validaciones autoritativas para controles de cuenta sin usarlas como router del navegador", () => {

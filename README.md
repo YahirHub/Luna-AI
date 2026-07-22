@@ -860,3 +860,39 @@ La cancelación (`!cancelar`, `/cancelar`, «cancela todo» y herramientas de su
 La mensajería está desacoplada mediante `MessagingTransport`. El adaptador Baileys conserva su propia cola resiliente, presencia y simulación de escritura. El núcleo usa `message_send`, que entrega texto o rutas del workdir mediante el transporte activo y permite registrar posteriormente adaptadores como Telegram sin reescribir el orquestador.
 
 La configuración LLM personalizada solicita solamente la URL base y la API key. Luna deriva `/models` y `/chat/completions`, consulta el catálogo y pide seleccionar por número el modelo global que usarán chats, tareas y subagentes existentes y futuros.
+
+## Arquitectura modular de capacidades
+
+Luna registra sus capacidades mediante `src/modules/`. La unidad de extensión ya no es una tool aislada: cada módulo declara su nombre, alcance, permisos, comandos, tools y prompt contextual. El registro central vive en `src/modules/registry.ts` y el catálogo activo en `src/modules/catalog.ts`.
+
+```text
+src/modules/
+├── types.ts
+├── registry.ts
+├── catalog.ts
+├── core/
+├── context/
+├── memory/
+├── automation/
+├── workspace/
+├── artifacts/
+├── provider/
+├── search/
+├── browser/
+├── agents/
+├── whisper/
+└── admin/
+```
+
+La autenticación es una frontera anterior a los módulos. Antes de iniciar sesión no se exponen comandos, tools, agentes ni prompts modulares; las únicas operaciones de bootstrap son `!setup`, cuando aún no existe administrador, y `!login`. Después del login los módulos `authenticated` están disponibles para usuarios y administradores, mientras que los módulos/comandos/tools `admin` solo se incluyen para administradores.
+
+`!ayuda` se construye desde el catálogo modular y agrupa las capacidades por módulo. `!ayuda search`, `!ayuda browser`, `!ayuda memory`, etc. permiten inspeccionar una capacidad concreta. Los módulos sin comando directo aparecen como utilizables mediante lenguaje natural.
+
+Las tools también se filtran desde el registro. Una tool nueva que no esté declarada explícitamente en algún módulo queda rechazada por defecto y no se envía al provider. Esto evita exposiciones accidentales y permite que la superficie de tools dependa del rol autenticado.
+
+Cada módulo puede aportar dos niveles de contexto al orquestador:
+
+1. Un resumen pequeño de capacidad para que Luna conozca qué módulos están disponibles.
+2. Instrucciones detalladas y contexto dinámico solo cuando el mensaje activa ese módulo.
+
+Por ejemplo, una búsqueda rápida activa `search`; una auditoría de un dominio activa `browser`; una petición de memoria activa `memory`. El system prompt estático conserva únicamente personalidad, seguridad, veracidad, reglas generales de orquestación y formato, reduciendo el crecimiento del prompt global.

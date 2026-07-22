@@ -19,10 +19,10 @@ describe("flujo autoritativo de tools", () => {
     expect(botSource).toContain("No se creó ninguna alarma ni recordatorio");
   });
 
-  it("ofrece tools administrativas solo según el JID autenticado", () => {
+  it("ofrece tools según el registro modular y la sesión autenticada", () => {
     expect(botSource).toContain("getAvailableTools(remoteJid)");
-    expect(botSource).toContain("if (jid && isAdminSession(jid))");
-    expect(botSource).toContain("tools.push(...ADMIN_TOOLS)");
+    expect(botSource).toContain("moduleRegistry.filterTools(pool, session)");
+    expect(botSource).toContain("if (!session.authenticated) return []");
   });
 
   it("borra mensajes de contraseña en flujos pendientes", () => {
@@ -30,9 +30,10 @@ describe("flujo autoritativo de tools", () => {
     expect(botSource).toContain("deleteSensitiveIncomingMessage(sock, message)");
   });
 
-  it("el prompt reconoce solo resultados confirmados como evidencia", () => {
-    expect(contextSource).toContain("Resultado de herramienta confirmado por el sistema");
-    expect(contextSource).toContain("usa list_alarms o list_reminders antes de responder");
+  it("el prompt base y módulos reconocen solo resultados confirmados como evidencia", async () => {
+    const automation = await Bun.file(new URL("../src/modules/automation/module.ts", import.meta.url)).text();
+    expect(contextSource).toContain("Solo un resultado confirmado de herramienta");
+    expect(automation).toContain("lista primero antes de crear duplicados");
     expect(contextSource).toContain("Respeta con prioridad las negaciones");
   });
 });

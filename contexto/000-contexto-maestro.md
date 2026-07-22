@@ -2,7 +2,7 @@
 
 # Fecha
 
-2026-07-21
+2026-07-22
 
 # Fuente de verdad
 
@@ -32,6 +32,7 @@ Este archivo es la entrada canónica. Después deben leerse los registros numera
 - Orquestador y subagentes pueden crear, leer, añadir, editar y eliminar archivos dentro de sus workdirs autorizados; la eliminación global exige confirmación y los agentes quedan confinados a su carpeta.
 - La memoria tiene dos niveles: `memory.md` conserva el perfil compacto y `persistent/contexts/<jid>/vault/` guarda notas temáticas Markdown compatibles con Obsidian, con propiedades YAML, tags, alias, wikilinks, backlinks, búsqueda ponderada, caché, renombrado seguro y papelera recuperable.
 - El orquestador dispone de herramientas `memory_vault_*`; cuando enumera datos guardados debe consultar la bóveda real. Fragmentos relevantes se recuperan automáticamente sin inyectar todas las notas en cada turno.
+- Las capacidades se registran en `src/modules/`: cada módulo declara permisos, comandos, tools, prompt y contexto. Antes del login no se exponen capacidades; `!setup`/`!login` son únicamente bootstrap. Una tool no declarada en un módulo se rechaza por defecto y `!ayuda` se genera desde el catálogo según el rol.
 
 # Seguridad
 
@@ -42,4 +43,4 @@ Este archivo es la entrada canónica. Después deben leerse los registros numera
 
 # Último registro
 
-- `contexto/80-boveda-personal-markdown-y-memoria-estructurada.md`
+- `contexto/81-arquitectura-modular-de-capacidades.md`

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UsageStore } from "../src/usage/usage-store.ts";
@@ -11,6 +11,7 @@ import { estimateTokensAccurate, type ChatMessage } from "../src/ai.ts";
 const roots: string[] = [];
 function tempRoot(): string {
   const root = join(tmpdir(), `luna-usage-${Date.now()}-${crypto.randomUUID()}`);
+  mkdirSync(root, { recursive: true });
   roots.push(root);
   return root;
 }

@@ -53,6 +53,13 @@ describe("parseCommand", () => {
     expect(parseCommand("!setup-whisper")?.name).toBe("setup-whisper");
   });
 
+  it("tolera espacios entre el prefijo y comandos bootstrap o de ayuda", () => {
+    expect(parseCommand("! setup")?.name).toBe("setup");
+    expect(parseCommand("/ setup")?.name).toBe("setup");
+    expect(parseCommand("! login")?.name).toBe("login");
+    expect(parseCommand("! ayuda")?.name).toBe("ayuda");
+  });
+
   it("parses command with arguments", () => {
     const result = parseCommand("!ping extra arg");
     expect(result).not.toBeNull();
@@ -174,9 +181,9 @@ describe("configuración administrativa de Whisper", () => {
 
     expect(hasRegisteredCommand(source, "setup-whisper")).toBe(true);
     expect(source).toContain("Solo el administrador puede configurar Whisper");
-    expect(
-      /registerCommand\s*\(\s*["']setup-whisper["'][\s\S]*?\n\s*true,\s*\n\s*\);/.test(source),
-    ).toBe(true);
+    const moduleSource = await Bun.file(new URL("../src/modules/whisper/module.ts", import.meta.url)).text();
+    expect(moduleSource).toContain('name: "setup-whisper"');
+    expect(moduleSource).toContain('access: "admin"');
   });
 });
 

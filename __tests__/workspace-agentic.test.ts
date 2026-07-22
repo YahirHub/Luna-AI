@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager } from "../src/workspace/workspace-manager.ts";
@@ -39,10 +39,23 @@ describe("WorkspaceManager", () => {
 
   it("detecta enlaces simbólicos que salen del workdir", () => {
     const { root, workspace } = createWorkspace();
+    const workdir = workspace.getWorkdir("user");
+    const escapeLink = join(workdir, "escape-link");
+
+    if (process.platform === "win32") {
+      // Windows suele bloquear symlinks de archivo sin Developer Mode/elevación,
+      // pero los junctions de directorio permiten probar la misma frontera realpath.
+      const externalDir = join(root, "external-dir");
+      mkdirSync(externalDir, { recursive: true });
+      writeFileSync(join(externalDir, "secret.txt"), "secreto");
+      symlinkSync(externalDir, escapeLink, "junction");
+      expect(() => workspace.resolvePath("user", "escape-link", { mustExist: true, allowDirectory: true })).toThrow(/enlace simbólico/i);
+      return;
+    }
+
     const external = join(root, "external.txt");
     writeFileSync(external, "secreto");
-    const workdir = workspace.getWorkdir("user");
-    symlinkSync(external, join(workdir, "escape-link"));
+    symlinkSync(external, escapeLink);
     expect(() => workspace.resolvePath("user", "escape-link", { mustExist: true })).toThrow(/enlace simbólico/i);
   });
 

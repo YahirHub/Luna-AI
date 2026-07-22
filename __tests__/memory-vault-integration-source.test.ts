@@ -19,10 +19,10 @@ describe("integración de la bóveda persistente", () => {
   });
 
   it("distingue el perfil compacto de las notas temáticas", () => {
-    const context = source("src/context.ts");
-    expect(context).toContain("memory.md es el perfil compacto");
-    expect(context).toContain("memory_vault_list o memory_vault_search");
-    expect(context).toContain("No guardes contraseñas, tokens, API keys, OTP ni secretos");
+    const module = source("src/modules/memory/module.ts");
+    expect(module).toContain("memory.md es para nombre");
+    expect(module).toContain("memory_vault_search/list/read solo consultan");
+    expect(module).toContain("No guardes contraseñas, tokens, API keys ni OTP");
   });
 
   it("registra mutaciones de la bóveda como resultados confirmados", () => {

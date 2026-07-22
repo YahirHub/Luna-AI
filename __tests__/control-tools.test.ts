@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { USER_CONTROL_TOOLS, ADMIN_CONTROL_TOOLS } from "../src/control-tools.ts";
 import { SearchSetupManager } from "../src/search/search-setup.ts";
 import { loadWebSearchAuth } from "../src/search/search-storage.ts";
+import { moduleRegistry } from "../src/modules/catalog.ts";
 
 describe("control natural de comandos existentes", () => {
   it("expone comandos funcionales de usuario como tools", () => {
@@ -61,11 +62,22 @@ describe("control natural de comandos existentes", () => {
     ).toBe("fc-8d49b39928b8479d914a974e4c21cada");
   });
 
-  it("mantiene las tools administrativas separadas de las tools de usuario", async () => {
-    const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
-    expect(source).toContain("...USER_CONTROL_TOOLS");
-    expect(source).toContain("tools.push(...ADMIN_TOOLS)");
-    expect(source).toContain("tools.push(...ADMIN_CONTROL_TOOLS)");
+  it("mantiene las tools administrativas separadas de las tools de usuario", () => {
+    const pool = [...USER_CONTROL_TOOLS, ...ADMIN_CONTROL_TOOLS];
+    const user = moduleRegistry.filterTools(pool, { authenticated: true, isAdmin: false });
+    const admin = moduleRegistry.filterTools(pool, { authenticated: true, isAdmin: true });
+
+    const userNames = user.tools.map((tool) => tool.function.name);
+    const adminNames = admin.tools.map((tool) => tool.function.name);
+    const expectedUserNames = USER_CONTROL_TOOLS.map((tool) => tool.function.name);
+    const expectedAdminNames = ADMIN_CONTROL_TOOLS.map((tool) => tool.function.name);
+
+    for (const name of expectedUserNames) expect(userNames).toContain(name);
+    for (const name of expectedAdminNames) {
+      expect(userNames).not.toContain(name);
+      expect(user.rejected).toContain(name);
+      expect(adminNames).toContain(name);
+    }
   });
 
   it("reconoce login/setup/cancelación natural localmente sin enviar credenciales al LLM", async () => {

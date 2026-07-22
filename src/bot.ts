@@ -3,7 +3,6 @@ import { debugError, debugInfo, debugWarn } from "./debug.ts";
 import { isWhatsAppGroupJid } from "./whatsapp-message-guard.ts";
 import {
   registerCommand,
-  getCommands,
   parseCommand,
   dispatchCommand,
   isPositiveInteger,
@@ -169,6 +168,8 @@ import {
 import { UsageStore, type ContextUsageBreakdownSnapshot } from "./usage/usage-store.ts";
 import { buildContextUsageSnapshot } from "./usage/context-usage.ts";
 import { renderUsageCard } from "./usage/usage-card.ts";
+import { moduleRegistry } from "./modules/catalog.ts";
+import type { ModuleSession } from "./modules/types.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -250,15 +251,59 @@ const BASE_TOOLS = [
   ...USER_CONTROL_TOOLS,
 ];
 
-function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
-  const tools = [...BASE_TOOLS];
-  tools.push(...getMainAgentTools(agentConfig));
-  if (jid && isAdminSession(jid)) {
-    tools.push(...ADMIN_TOOLS);
-    tools.push(...ADMIN_CONTROL_TOOLS);
-  }
-  return tools;
+function getModuleSession(jid?: string): ModuleSession {
+  if (!jid || !authManager.isLoggedIn(jid)) return { authenticated: false, isAdmin: false };
+  return { authenticated: true, isAdmin: isAdminSession(jid) };
 }
+
+function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
+  const session = getModuleSession(jid);
+  if (!session.authenticated) return [];
+  const pool = [
+    ...BASE_TOOLS,
+    ...getMainAgentTools(agentConfig),
+    ...ADMIN_TOOLS,
+    ...ADMIN_CONTROL_TOOLS,
+  ];
+  const filtered = moduleRegistry.filterTools(pool, session);
+  if (filtered.rejected.length > 0) {
+    debugInfo("modules.tools", "filtered", { jid, isAdmin: session.isAdmin, rejected: filtered.rejected });
+  }
+  return filtered.tools;
+}
+
+moduleRegistry.bindContextProvider("provider", () => [
+  `Proveedor activo: ${llmProviderMode}`,
+  `Modelo global: ${llmConfig?.defaultModel ?? "no disponible"}`,
+].join("\n"));
+
+moduleRegistry.bindContextProvider("search", () => {
+  const settings = loadWebSearchSettings();
+  const auth = loadWebSearchAuth();
+  const states = SEARCH_PROVIDER_IDS.map((provider) => {
+    const state = resolveSearchProviderState(provider, settings, auth);
+    return `${SEARCH_PROVIDER_LABELS[provider]}=${state.enabled ? "activo" : state.configured ? "desactivado" : "sin credencial"}`;
+  });
+  return [`Predeterminado: ${settings.defaultProvider ? SEARCH_PROVIDER_LABELS[settings.defaultProvider] : "ninguno"}`, `Motores: ${states.join(", ")}`].join("\n");
+});
+
+moduleRegistry.bindContextProvider("whisper", () => {
+  const config = loadWhisperConfig();
+  return `Modelo: ${config.modelId}\nIdioma: ${config.language}\nThreads: ${config.threads === 0 ? "automático" : config.threads}`;
+});
+
+moduleRegistry.bindContextProvider("agents", (_message, _session) => {
+  const config = loadAgentConfig();
+  return [
+    `api-search: ${config.webSearchEnabled && config.researchSubagentEnabled ? "habilitado" : "deshabilitado"}`,
+    `Profundidad predeterminada: ${config.defaultSearchDepth}`,
+    `Timeout researcher: ${Math.round(config.researcherTimeoutMs / 60_000)} min`,
+  ].join("\n");
+});
+
+moduleRegistry.bindContextProvider("context", (_message, _session) => {
+  return "La compactación manual y automática se ejecuta en segundo plano; /uso distingue contexto actual de consumo histórico.";
+});
 
 const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["create_reminder", "⏰ Creando recordatorio..."],
@@ -801,6 +846,8 @@ const SLASH_COMMANDS = new Set([
   "setup-provider",
   "setup-search",
   "config",
+  "compact",
+  "uso",
 ]);
 
 function formatCommandName(name: string): string {
@@ -1042,18 +1089,7 @@ async function deleteSensitiveIncomingMessage(
 }
 
 function buildHelpText(jid: string): string {
-  const username = authManager.getUsername(jid);
-  const admin = username ? authManager.isAdmin(username) : false;
-  const commands = getCommands(admin)
-    .map((item) => `${formatCommandName(item.name)} — ${item.description}`)
-    .join("\n");
-  return [
-    "🤖 COMANDOS DISPONIBLES",
-    "",
-    commands,
-    "",
-    "💬 También puedes pedirme estas acciones con lenguaje natural.",
-  ].join("\n");
+  return moduleRegistry.renderHelp(getModuleSession(jid), undefined, formatCommandName);
 }
 
 function cancelCurrentOperation(jid: string): string {
@@ -1354,25 +1390,13 @@ async function executeAdminControlTool(
 registerCommand(
   "ayuda",
   "Muestra todos los comandos disponibles",
-  (_cmd, senderJid) => {
-    const sessionUsername = authManager.getUsername(senderJid);
-    const isAdmin = sessionUsername ? authManager.isAdmin(sessionUsername) : false;
-    const cmds = getCommands(isAdmin);
-    const lista = cmds
-      .map((c) => `${formatCommandName(c.name)} — ${c.description}`)
-      .join("\n");
-
-    return {
-      text: [
-        "🤖 COMANDOS DISPONIBLES",
-        "",
-        lista,
-        "",
-        "💬 También puedes hablarme directamente.",
-        "   ¡Recuerdo la conversación!",
-      ].join("\n"),
-    };
-  },
+  (cmd, senderJid) => ({
+    text: moduleRegistry.renderHelp(
+      getModuleSession(senderJid),
+      cmd.args[0],
+      formatCommandName,
+    ),
+  }),
 );
 
 registerCommand(
@@ -2833,19 +2857,41 @@ export async function handleMessage(
     if (command.name === "cambiar-password" && command.body.trim()) {
       await deleteSensitiveIncomingMessage(sock, message);
     }
-    const result = await dispatchCommand(command, remoteJid, sock);
+
+    // `setup` y `login` son comandos bootstrap de autenticación, no capacidades
+    // modulares. Deben poder ejecutarse precisamente cuando todavía no existe
+    // una sesión, por lo que nunca se someten al filtro de ModuleRegistry.
+    // La puerta de autenticación anterior ya decide cuál de los dos es válido:
+    // - sin cuentas: solo setup;
+    // - con cuentas y sin sesión: solo login.
+    if (command.name === "setup" || command.name === "login") {
+      const result = await dispatchCommand(command, remoteJid, sock);
+      if (result?.text.trim()) await sendWithTyping(sock, remoteJid, result.text);
+      return;
+    }
+
+    const moduleCommand = moduleRegistry.resolveCommand(command.name, getModuleSession(remoteJid));
+    if (!moduleCommand) {
+      const known = moduleRegistry.getCommands(getModuleSession(remoteJid)).map((c) => formatCommandName(c.name)).join(", ");
+      await sendWithTyping(sock, remoteJid, [
+        `❓ Comando no disponible: ${formatCommandName(command.name)}`,
+        "",
+        known ? `Comandos permitidos: ${known}` : "No hay comandos disponibles para esta sesión.",
+        "",
+        "Escribe !ayuda para verlos por módulo.",
+      ].join("\n"));
+      return;
+    }
+    const canonicalCommand = moduleCommand.name === command.name
+      ? command
+      : { ...command, name: moduleCommand.name };
+    const result = await dispatchCommand(canonicalCommand, remoteJid, sock);
 
     if (result) {
       if (result.text.trim()) await sendWithTyping(sock, remoteJid, result.text);
     } else {
-      const sessionUsername = authManager.getUsername(remoteJid);
-      const isAdmin = sessionUsername
-        ? authManager.isAdmin(sessionUsername)
-        : false;
-      const cmds = getCommands(isAdmin);
-      const lista = cmds
-        .map((c) => formatCommandName(c.name))
-        .join(", ");
+      const cmds = moduleRegistry.getCommands(getModuleSession(remoteJid));
+      const lista = cmds.map((c) => formatCommandName(c.name)).join(", ");
       await sendWithTyping(
         sock,
         remoteJid,
@@ -2932,7 +2978,14 @@ async function handleAiChat(
   const profileMemory = getMemoryContent(remoteJid);
   const compactedSummary = cm.getCompactionSummaryText(remoteJid);
   const supervisorContext = taskRuntime.buildContextSummary(remoteJid);
+  const moduleSession = getModuleSession(remoteJid);
+  const modularContext = moduleRegistry.buildCapabilityPrompt(userText, moduleSession);
+  const modularRuntimeContext = await moduleRegistry.buildRuntimeContext(userText, moduleSession);
   const dynamicCtx = `${cm.buildDynamicContext(remoteJid)}
+
+${modularContext}
+
+${modularRuntimeContext}
 
 ${relatedVaultContext}
 
@@ -3003,6 +3056,13 @@ ${supervisorContext}`;
       if (runController.signal.aborted) {
         throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
       }
+      const toolModule = moduleRegistry.getModuleForTool(name);
+      debugInfo("modules.tools", "execute", {
+        jid: remoteJid,
+        moduleId: toolModule?.id ?? "unregistered",
+        moduleName: toolModule?.name ?? "Sin módulo",
+        tool: name,
+      });
       if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
         shownNotifs.add(name);
         const notification = name === "researcher_web"
