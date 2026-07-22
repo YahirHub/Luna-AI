@@ -197,6 +197,7 @@ async function runAgentInternal(options: RunAgentOptions): Promise<SpawnAgentRep
         maxTokens: options.definition.maxOutputTokens,
         truncationRecoveryAttempts: 2,
         signal,
+        usage: options.jid ? { jid: options.jid, purpose: options.backend === "browser-agent" ? "browser-agent" : "api-search" } : undefined,
       },
     );
 

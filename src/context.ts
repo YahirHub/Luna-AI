@@ -471,6 +471,54 @@ export class ContextManager {
     this.saveContextAtomically(jid);
   }
 
+  /**
+   * Aplica una compactación generada desde un snapshot sin perder mensajes que
+   * hayan llegado mientras el LLM resumía. Si el prefijo cambió por !clear u
+   * otra compactación, rechaza el resultado como obsoleto.
+   */
+  applyCompactionSnapshot(
+    jid: string,
+    snapshotMessages: ChatMessage[],
+    messagesToKeep: ChatMessage[],
+    summary: import("./compaction.ts").CompactedSummary,
+    tokensBefore: number,
+    compactedCount: number,
+    estimateTokens: (messages: ChatMessage[]) => number,
+  ): { applied: boolean; tokensAfter: number; appendedMessages: number } {
+    const ctx = this.loadContext(jid);
+    if (ctx.messages.length < snapshotMessages.length) {
+      return { applied: false, tokensAfter: estimateTokens(ctx.messages), appendedMessages: 0 };
+    }
+    for (let index = 0; index < snapshotMessages.length; index++) {
+      if (JSON.stringify(ctx.messages[index]) !== JSON.stringify(snapshotMessages[index])) {
+        return { applied: false, tokensAfter: estimateTokens(ctx.messages), appendedMessages: 0 };
+      }
+    }
+
+    const appended = ctx.messages.slice(snapshotMessages.length);
+    const merged = [...messagesToKeep, ...appended];
+    const tokensAfter = estimateTokens(merged);
+    const prev = ctx.compaction;
+    ctx.messages = merged;
+    ctx.compaction = {
+      version: 1,
+      count: (prev?.count ?? 0) + 1,
+      summary,
+      lastCompactedAt: new Date().toISOString(),
+      messagesCompacted: (prev?.messagesCompacted ?? 0) + compactedCount,
+      estimatedTokensBefore: tokensBefore,
+      estimatedTokensAfter: tokensAfter,
+    };
+    this.saveContextAtomically(jid);
+    return { applied: true, tokensAfter, appendedMessages: appended.length };
+  }
+
+  /** Retorna los metadatos completos de compactación, o null. */
+  getCompactionMetadata(jid: string): CompactionMetadata | null {
+    const value = this.loadContext(jid).compaction;
+    return value ? structuredClone(value) : null;
+  }
+
   /** Retorna el resumen compactado del usuario, o null si nunca se compactó. */
   getCompactionSummary(jid: string): import("./compaction.ts").CompactedSummary | null {
     return this.loadContext(jid).compaction?.summary ?? null;

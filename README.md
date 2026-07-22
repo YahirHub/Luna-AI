@@ -30,6 +30,23 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
 
+## Gestión de contexto y métricas
+
+Luna permite inspeccionar y compactar manualmente el contexto de cada usuario sin bloquear el chat:
+
+```text
+/compact          # Inicia compactación manual en segundo plano
+/compact estado   # Muestra la compactación activa y estadísticas históricas
+/uso              # Envía una tarjeta PNG con el uso actual
+/uso texto        # Devuelve el mismo reporte en texto
+```
+
+La compactación trabaja sobre un snapshot del historial. Mientras el LLM genera el resumen, Luna sigue procesando mensajes normalmente; al terminar fusiona los mensajes nuevos antes de reemplazar el tramo antiguo. Si el usuario ejecuta `!clear` o el prefijo del contexto cambia de forma incompatible, el snapshot se descarta sin sobrescribir la conversación. `/cancelar` también puede abortar una compactación en curso.
+
+Las métricas se guardan por usuario en `persistent/contexts/<jid>/usage.json`. Cuando el proveedor devuelve `usage.prompt_tokens`/`completion_tokens` o `input_tokens`/`output_tokens`, Luna registra esos valores como reales. Los proveedores que no devuelven métricas siguen siendo compatibles: Luna calcula una estimación local a partir de mensajes, tool calls y esquemas de herramientas. Las respuestas parciales se marcan como métricas mixtas. `/uso` diferencia explícitamente requests con métricas reales, mixtas y estimadas.
+
+El reporte separa conversación, system prompt, herramientas, `memory.md`, resumen compactado, supervisor y otros datos dinámicos. La recuperación de la bóveda depende de la consulta concreta, por lo que `/uso` mide el contexto base del próximo request y no inventa una recuperación semántica de notas.
+
 ## Requisitos
 
 - Bun 1.3.14 para desarrollo o compilación local.

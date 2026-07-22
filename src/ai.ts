@@ -32,6 +32,69 @@ export interface ToolCall {
 
 // ─── Internal raw request helper ────────────────────────────────
 
+export type LlmUsageSource = "provider" | "estimated" | "mixed";
+
+export interface LlmUsageEvent {
+  jid: string;
+  model: string;
+  purpose: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  source: LlmUsageSource;
+  providerPromptTokens?: number;
+  providerCompletionTokens?: number;
+  providerTotalTokens?: number;
+  estimatedPromptTokens: number;
+  estimatedCompletionTokens: number;
+  timestamp: string;
+}
+
+export interface LlmUsageContext {
+  jid?: string;
+  purpose?: string;
+}
+
+type LlmUsageObserver = (event: LlmUsageEvent) => void | Promise<void>;
+let llmUsageObserver: LlmUsageObserver | null = null;
+
+export function setLlmUsageObserver(observer: LlmUsageObserver | null): void {
+  llmUsageObserver = observer;
+}
+
+function positiveUsageNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return Math.round(parsed);
+}
+
+function estimateRawPromptTokens(messages: ChatMessage[], tools?: ToolDefinition[]): number {
+  let total = estimateTokensAccurate(messages);
+  if (tools && tools.length > 0) total += estimateTextTokens(JSON.stringify(tools)) + tools.length * 60;
+  return Math.max(1, total);
+}
+
+function estimateRawCompletionTokens(content: string | null, toolCalls?: ToolCall[]): number {
+  let total = estimateTextTokens(content ?? "");
+  for (const call of toolCalls ?? []) {
+    total += 40 + estimateTextTokens(call.function.name) + estimateTextTokens(call.function.arguments);
+  }
+  return Math.max(1, total);
+}
+
+function emitLlmUsage(event: LlmUsageEvent): void {
+  if (!llmUsageObserver) return;
+  try {
+    const result = llmUsageObserver(event);
+    if (result && typeof (result as Promise<void>).catch === "function") {
+      void (result as Promise<void>).catch((error) => debugWarn("ai.usage", "observer_failed", { error: error instanceof Error ? error.message : String(error) }));
+    }
+  } catch (error) {
+    debugWarn("ai.usage", "observer_failed", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+
 
 class HttpStatusError extends Error {
   readonly status: number;
@@ -121,6 +184,7 @@ interface RawRequestOptions {
   temperature?: number;
   max_tokens?: number;
   signal?: AbortSignal;
+  usage?: LlmUsageContext;
 }
 
 /**
@@ -194,6 +258,13 @@ async function rawChatRequest(
             tool_calls?: ToolCall[];
           };
         }>;
+        usage?: {
+          prompt_tokens?: number | string;
+          completion_tokens?: number | string;
+          total_tokens?: number | string;
+          input_tokens?: number | string;
+          output_tokens?: number | string;
+        };
       };
 
       const choice = data.choices?.[0];
@@ -205,6 +276,40 @@ async function rawChatRequest(
       const toolCalls = choice.message?.tool_calls;
       if ((!toolCalls || toolCalls.length === 0) && !content?.trim()) {
         throw new Error("La API devolvió una respuesta vacía sin tool calls");
+      }
+
+      const usageContext = body.usage;
+      if (usageContext?.jid) {
+        const estimatedPromptTokens = estimateRawPromptTokens(body.messages, body.tools);
+        const estimatedCompletionTokens = estimateRawCompletionTokens(content, toolCalls);
+        const providerPromptTokens = positiveUsageNumber(data.usage?.prompt_tokens ?? data.usage?.input_tokens);
+        const providerCompletionTokens = positiveUsageNumber(data.usage?.completion_tokens ?? data.usage?.output_tokens);
+        const providerTotalTokens = positiveUsageNumber(data.usage?.total_tokens);
+        const hasPrompt = providerPromptTokens !== undefined;
+        const hasCompletion = providerCompletionTokens !== undefined;
+        const promptTokens = providerPromptTokens ?? estimatedPromptTokens;
+        const completionTokens = providerCompletionTokens ?? estimatedCompletionTokens;
+        const totalTokens = providerTotalTokens ?? (promptTokens + completionTokens);
+        const source: LlmUsageSource = hasPrompt && hasCompletion
+          ? "provider"
+          : hasPrompt || hasCompletion || providerTotalTokens !== undefined
+            ? "mixed"
+            : "estimated";
+        emitLlmUsage({
+          jid: usageContext.jid,
+          model: body.model,
+          purpose: usageContext.purpose ?? "chat",
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          source,
+          providerPromptTokens,
+          providerCompletionTokens,
+          providerTotalTokens,
+          estimatedPromptTokens,
+          estimatedCompletionTokens,
+          timestamp: new Date().toISOString(),
+        });
       }
 
       return {
@@ -269,6 +374,7 @@ export async function requestForcedToolArguments(
   tool: ToolDefinition,
   instruction: string,
   signal?: AbortSignal,
+  usage?: LlmUsageContext,
 ): Promise<Record<string, unknown>> {
   const forcedMessages: ChatMessage[] = [
     ...messages,
@@ -290,6 +396,7 @@ export async function requestForcedToolArguments(
         tool_choice: toolChoice,
         max_tokens: 1_500,
         signal,
+        usage,
       }, config, 1);
       const call = result.tool_calls?.find((candidate) => candidate.function.name === tool.function.name);
       if (!call) throw new Error(`El proveedor no devolvió la llamada obligatoria ${tool.function.name}.`);
@@ -316,9 +423,11 @@ export async function chatCompletion(
   config: LlmConfig,
   maxRetries = 3,
   maxTokens?: number,
+  usage?: LlmUsageContext,
+  signal?: AbortSignal,
 ): Promise<string> {
   const result = await rawChatRequest(
-    { model, messages, max_tokens: maxTokens },
+    { model, messages, max_tokens: maxTokens, usage, signal },
     config,
     maxRetries,
   );
@@ -343,6 +452,8 @@ export interface ToolChatRuntimeOptions {
    * ejecución exitosa se solicita el cierre final sin exponer más tools.
    */
   terminalTools?: string[];
+  /** Asocia las métricas del provider/estimador con un usuario y propósito. */
+  usage?: LlmUsageContext;
 }
 
 
@@ -401,6 +512,7 @@ async function recoverTruncatedFinalResponse(
       messages,
       max_tokens: runtimeOptions.maxTokens,
       signal: runtimeOptions.signal,
+      usage: runtimeOptions.usage,
     }, config, maxRetries);
     const content = recovered.content?.trim() ?? "";
     if (!content) return null;
@@ -442,6 +554,7 @@ export async function chatCompletionWithTools(
           tools,
           max_tokens: runtimeOptions.maxTokens,
           signal: runtimeOptions.signal,
+          usage: runtimeOptions.usage,
         },
         config,
         maxRetries,
@@ -466,6 +579,7 @@ export async function chatCompletionWithTools(
             tools,
             max_tokens: runtimeOptions.maxTokens,
             signal: runtimeOptions.signal,
+            usage: runtimeOptions.usage,
           },
           config,
           maxRetries,
@@ -572,6 +686,7 @@ export async function chatCompletionWithTools(
         messages: currentMessages,
         max_tokens: runtimeOptions.maxTokens,
         signal: runtimeOptions.signal,
+        usage: runtimeOptions.usage,
       },
       config,
       maxRetries,

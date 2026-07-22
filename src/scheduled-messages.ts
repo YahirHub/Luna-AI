@@ -81,7 +81,7 @@ export async function deliverScheduledMessage(
     ];
 
     try {
-      const generated = await chatCompletion(messages, options.model, options.llmConfig);
+      const generated = await chatCompletion(messages, options.model, options.llmConfig, 3, undefined, { jid: options.jid, purpose: "scheduled-message" });
       body = selectScheduledMessageBody(generated, fallbackBody, options.title);
     } catch (err) {
       console.error(

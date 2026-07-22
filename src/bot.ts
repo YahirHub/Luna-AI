@@ -28,6 +28,7 @@ import {
   chatCompletionWithTools,
   requestForcedToolArguments,
   LlmRetriesExhaustedError,
+  setLlmUsageObserver,
 } from "./ai.ts";
 import {
   ProviderSetupManager,
@@ -165,6 +166,9 @@ import {
   extractBrowserLoginIntent,
   sanitizeBrowserCredentialText,
 } from "./browser/browser-credentials.ts";
+import { UsageStore, type ContextUsageBreakdownSnapshot } from "./usage/usage-store.ts";
+import { buildContextUsageSnapshot } from "./usage/context-usage.ts";
+import { renderUsageCard } from "./usage/usage-card.ts";
 
 // ─── Estado global ───────────────────────────────────────────────
 
@@ -210,8 +214,21 @@ const taskRuntime = new TaskRuntime(workspaceManager);
 // Variable para guardar el socket actual (para alarmas)
 let currentTransport: MessagingTransport | null = null;
 
-/** JIDs actualmente en proceso de compactación (para ignorar mensajes entrantes). */
-const compactingJids = new Set<string>();
+/** Métricas persistentes por usuario. */
+const usageStore = new UsageStore();
+setLlmUsageObserver((event) => usageStore.recordLlmRequest(event));
+
+interface CompactionJobState {
+  mode: "automatic" | "manual";
+  startedAt: string;
+  tokensBefore: number;
+  triggerTokens: number;
+  promise: Promise<void>;
+  controller: AbortController;
+}
+
+/** Una compactación por usuario; nunca bloquea el procesamiento normal del chat. */
+const compactionJobs = new Map<string, CompactionJobState>();
 
 /** Ejecución principal activa por usuario. !cancelar aborta también al orquestador,
  * no solo al subagente, para impedir que el modelo lance tareas de seguimiento
@@ -294,117 +311,265 @@ function getMemoryContent(jid: string): string {
   }
 }
 
-/**
- * Verifica si el contexto del usuario necesita compactación y la ejecuta
- * usando el modelo LLM para generar un resumen estructurado.
- * Mientras compacta, ignora mensajes entrantes del mismo JID.
- */
-async function ensureContextCompaction(sock: MessagingTransport, jid: string): Promise<void> {
-  if (!contextManager || !llmConfig) return;
+function getUsageSnapshotForDisplay(jid: string): ContextUsageBreakdownSnapshot | null {
+  const cm = contextManager;
+  if (!cm) return usageStore.get(jid).lastContext;
+  const model = cm.getModel(jid);
+  const persistedMessages: import("./ai.ts").ChatMessage[] = structuredClone(cm.getMessages(jid));
+  const tools = getAvailableTools(jid);
+  const profileMemory = getMemoryContent(jid);
+  const compactedSummary = cm.getCompactionSummaryText(jid);
+  const supervisorContext = taskRuntime.buildContextSummary(jid);
+  const dynamicContext = `${cm.buildDynamicContext(jid)}\n\n${supervisorContext}`;
+  const apiMessages = persistedMessages.map((message) => ({ ...message }));
+  // /uso no se guarda en el historial. Simulamos un próximo mensaje mínimo para
+  // medir cuánto contexto base tendría el siguiente request sin inventar una
+  // recuperación de bóveda que depende semánticamente de la consulta real.
+  apiMessages.push({ role: "user", content: `${dynamicContext}\n\n---\n\n[medición local de contexto]` });
+  return buildContextUsageSnapshot({
+    model,
+    persistedMessages: [...persistedMessages, { role: "user", content: "[medición local de contexto]" }],
+    apiMessages,
+    tools,
+    rawCurrentMessage: "[medición local de contexto]",
+    profileMemory,
+    vaultContext: "",
+    compactedSummary,
+    supervisorContext,
+  });
+}
 
+function formatUsageText(jid: string): string {
+  const data = usageStore.get(jid);
+  const ctx = getUsageSnapshotForDisplay(jid);
+  if (!ctx) return "⚠️ Todavía no hay contexto disponible para medir.";
+  const last = data.lastRequest;
+  const source = !last
+    ? "sin muestras todavía"
+    : last.source === "provider"
+      ? "métricas reales del provider"
+      : last.source === "mixed"
+        ? "provider + estimación local"
+        : "estimación local (el provider no devolvió usage)";
+  const compaction = contextManager?.getCompactionMetadata(jid);
+  const compactCount = Math.max(data.compaction.count, compaction?.count ?? 0);
+  const messagesCompacted = Math.max(data.compaction.messagesCompacted, compaction?.messagesCompacted ?? 0);
+  const lastBefore = data.compaction.estimatedTokensBefore || compaction?.estimatedTokensBefore || 0;
+  const lastAfter = data.compaction.estimatedTokensAfter || compaction?.estimatedTokensAfter || 0;
+  const reduction = lastBefore > 0 ? ((lastBefore - lastAfter) / lastBefore) * 100 : 0;
+  return [
+    "📊 USO DEL CONTEXTO",
+    "",
+    `Modelo: ${ctx.model}`,
+    `Contexto estimado: ~${ctx.estimatedTotalTokens.toLocaleString("es-MX")} / ${ctx.effectiveInputBudget.toLocaleString("es-MX")} tokens (${ctx.percentOfInputBudget.toFixed(1)}%)`,
+    `Ventana del modelo: ${ctx.maxContextTokens.toLocaleString("es-MX")} tokens`,
+    `Auto-compactación: ${ctx.autoCompactTriggerTokens.toLocaleString("es-MX")} tokens (85% del presupuesto de entrada)`,
+    "",
+    "Desglose estimado del próximo request base:",
+    `- Conversación: ${(ctx.conversationTokens + ctx.currentMessageTokens).toLocaleString("es-MX")}`,
+    `- Herramientas: ${ctx.toolTokens.toLocaleString("es-MX")}`,
+    `- System prompt: ${ctx.systemTokens.toLocaleString("es-MX")}`,
+    `- Memoria de perfil: ${ctx.profileMemoryTokens.toLocaleString("es-MX")}`,
+    `- Bóveda recuperada: ${ctx.vaultMemoryTokens.toLocaleString("es-MX")}`,
+    `- Resumen compactado: ${ctx.compactedSummaryTokens.toLocaleString("es-MX")}`,
+    `- Supervisor: ${ctx.supervisorTokens.toLocaleString("es-MX")}`,
+    `- Otros dinámicos: ${ctx.otherDynamicTokens.toLocaleString("es-MX")}`,
+    "",
+    "Consumo API acumulado:",
+    `- Entrada: ${data.lifetime.promptTokens.toLocaleString("es-MX")}`,
+    `- Salida: ${data.lifetime.completionTokens.toLocaleString("es-MX")}`,
+    `- Total: ${data.lifetime.totalTokens.toLocaleString("es-MX")}`,
+    `- Requests: ${data.lifetime.requests.toLocaleString("es-MX")}`,
+    `- Fuente del último request: ${source}`,
+    `- Requests con métricas reales: ${data.lifetime.providerReportedRequests}`,
+    `- Mixtos: ${data.lifetime.mixedRequests}`,
+    `- Estimados: ${data.lifetime.estimatedRequests}`,
+    "",
+    `Compactaciones: ${compactCount}`,
+    `Mensajes compactados: ${messagesCompacted}`,
+    lastBefore > 0 ? `Última reducción: ~${lastBefore.toLocaleString("es-MX")} → ~${lastAfter.toLocaleString("es-MX")} (${Math.max(0, reduction).toFixed(1)}%)` : "Última reducción: todavía no registrada",
+  ].join("\n");
+}
+
+interface CompactionPlan {
+  snapshot: import("./ai.ts").ChatMessage[];
+  currentTokens: number;
+  effectiveBudget: number;
+  triggerTokens: number;
+  split: ReturnType<typeof selectMessagesForCompaction>;
+  modelId: string;
+}
+
+function buildCompactionPlan(jid: string, mode: "automatic" | "manual"): CompactionPlan | null {
+  if (!contextManager || !llmConfig) return null;
+  const snapshot = structuredClone(contextManager.getMessages(jid));
+  if (snapshot.length <= 2) return null;
   const modelId = contextManager.getModel(jid);
-  const messages = contextManager.getMessages(jid);
-
-  if (messages.length <= 2) return; // Solo system + 1 msg
-
-  // Estimar tokens actuales (incluyendo tools)
-  const currentTokens = estimateTokensAccurate(messages);
+  const currentTokens = estimateTokensAccurate(snapshot);
   const toolsTokens = estimateRequestTokens([], getAvailableTools(jid));
-
-  // Obtener presupuesto efectivo del modelo
   const effectiveBudget = modelCatalog.getEffectiveBudget(modelId, toolsTokens);
   const triggerTokens = Math.floor(effectiveBudget * 0.85);
+  if (mode === "automatic" && currentTokens < triggerTokens) return null;
+  const split = selectMessagesForCompaction({
+    messages: snapshot,
+    preserveRecentTurns: 10,
+    targetTokens: Math.floor(effectiveBudget * 0.55),
+  });
+  if (split.messagesToCompact.length === 0) return null;
+  return { snapshot, currentTokens, effectiveBudget, triggerTokens, split, modelId };
+}
 
-  if (currentTokens < triggerTokens) {
-    return; // No necesita compactación
+function formatCompactionCompletion(options: {
+  mode: "automatic" | "manual";
+  before: number;
+  after: number;
+  messages: number;
+  appended: number;
+}): string {
+  const reduction = options.before > 0 ? Math.max(0, ((options.before - options.after) / options.before) * 100) : 0;
+  return [
+    options.mode === "manual" ? "✅ COMPACTACIÓN MANUAL COMPLETADA" : "✅ Compactación automática completada",
+    "",
+    `Antes: ~${options.before.toLocaleString("es-MX")} tokens`,
+    `Después: ~${options.after.toLocaleString("es-MX")} tokens`,
+    `Reducción: ${reduction.toFixed(1)}%`,
+    `Mensajes compactados: ${options.messages}`,
+    options.appended > 0 ? `Mensajes nuevos preservados durante el proceso: ${options.appended}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+/**
+ * Inicia una compactación sobre un snapshot y devuelve inmediatamente. El LLM
+ * resume fuera del lock; al confirmar el resultado se fusiona cualquier cola de
+ * mensajes nueva que haya llegado mientras tanto.
+ */
+function startContextCompaction(
+  transport: MessagingTransport,
+  jid: string,
+  mode: "automatic" | "manual",
+): { started: boolean; reason?: string; tokensBefore?: number; triggerTokens?: number } {
+  if (!contextManager || !llmConfig) return { started: false, reason: "El proveedor LLM todavía no está disponible." };
+  const active = compactionJobs.get(jid);
+  if (active) {
+    return { started: false, reason: "Ya hay una compactación en curso.", tokensBefore: active.tokensBefore, triggerTokens: active.triggerTokens };
+  }
+  const plan = buildCompactionPlan(jid, mode);
+  if (!plan) {
+    const messages = contextManager.getMessages(jid);
+    const tokens = estimateTokensAccurate(messages);
+    return {
+      started: false,
+      reason: mode === "manual" ? "No hay suficientes mensajes antiguos para compactar todavía." : "No se alcanzó el umbral automático.",
+      tokensBefore: tokens,
+    };
   }
 
-  // Marcar como "compactando" para ignorar mensajes entrantes
-  compactingJids.add(jid);
-  try {
-    // Notificar al usuario
-    void sendWhatsAppMessage(sock, jid, { text: "🧹 Espera un momento, estoy limpiando mi memoria..." }, { waitForDelivery: false });
+  const cm = contextManager;
+  const cfg = llmConfig;
+  const persistentMemory = getMemoryContent(jid);
+  const previousSummary = cm.getCompactionSummary(jid);
+  const compactionMessages = buildCompactionPrompt({
+    previousSummary: previousSummary ?? null,
+    messagesToCompact: plan.split.messagesToCompact,
+    persistentMemory,
+  });
+  const startedAt = new Date().toISOString();
+  const controller = new AbortController();
 
-    console.log(
-      `[compact] Contexto de ${jid}: ~${currentTokens} tokens, ` +
-      `presupuesto ${effectiveBudget}, activando compactación...`,
-    );
-
-    // 1. Seleccionar mensajes para compactar
-    const split = selectMessagesForCompaction({
-      messages,
-      preserveRecentTurns: 10,
-      targetTokens: Math.floor(effectiveBudget * 0.55),
-    });
-
-    if (split.messagesToCompact.length === 0) {
-      console.log("[compact] No hay mensajes que compactar");
-      return;
-    }
-
-    // 2. Obtener memoria persistente para el prompt de compactación
-    const persistentMemory = getMemoryContent(jid);
-
-    // 3. Construir prompt para el LLM compactador
-    const previousSummary = contextManager.getCompactionSummary(jid);
-    const compactionMessages = buildCompactionPrompt({
-      previousSummary: previousSummary ?? null,
-      messagesToCompact: split.messagesToCompact,
-      persistentMemory,
-    });
-
-    // 4. Llamar al LLM para que genere el resumen
-    // max_tokens generoso para que el modelo pueda completar el JSON
+  const promise = (async () => {
     try {
+      debugInfo("context.compaction", "started", {
+        jid,
+        mode,
+        tokensBefore: plan.currentTokens,
+        effectiveBudget: plan.effectiveBudget,
+        messagesToCompact: plan.split.messagesToCompact.length,
+      });
       const compactRaw = await chatCompletion(
         compactionMessages,
-        modelId,
-        llmConfig,
+        plan.modelId,
+        cfg,
         2,
         4096,
+        { jid, purpose: "compaction" },
+        controller.signal,
       );
-
       const parsedSummary = parseCompactedResponse(compactRaw);
-
-      if (parsedSummary) {
-        const tokensAfter = estimateTokensAccurate(split.messagesToKeep);
-        contextManager.applyCompaction(
-          jid,
-          split.messagesToKeep,
-          parsedSummary,
-          currentTokens,
-          tokensAfter,
-          split.messagesToCompact.length,
-        );
-
-        console.log(
-          `[compact] Compactación exitosa para ${jid}: ` +
-          `${currentTokens} → ~${tokensAfter} tokens ` +
-          `(${split.messagesToCompact.length} mensajes compactados)`,
-        );
-      } else {
-        console.warn(
-          "[compact] No se pudo parsear el resumen del LLM, " +
-          "conservando contexto original",
-        );
-        // Log del raw response para debugging (truncado a 500 chars)
-        console.warn(
-          "[compact] Raw response (primeros 500 chars):",
-          compactRaw.slice(0, 500),
-        );
-        console.warn(
-          "[compact] Raw response (últimos 200 chars):",
-          compactRaw.slice(-200),
-        );
+      if (!parsedSummary) {
+        debugWarn("context.compaction", "invalid_summary", { jid, mode, responseChars: compactRaw.length });
+        if (mode === "manual") {
+          await sendWhatsAppMessage(transport, jid, { text: "⚠️ No pude validar el resumen de compactación. Conservé intacta la conversación." }, { waitForDelivery: false });
+        }
+        return;
       }
-    } catch (err) {
-      console.error("[compact] Error al compactar con LLM:", err);
-      // Si falla la compactación, no borramos mensajes — el contexto original
-      // se conserva intacto
+
+      const applied = await cm.withLock(jid, async () => cm.applyCompactionSnapshot(
+        jid,
+        plan.snapshot,
+        plan.split.messagesToKeep,
+        parsedSummary,
+        plan.currentTokens,
+        plan.split.messagesToCompact.length,
+        estimateTokensAccurate,
+      ));
+      if (!applied.applied) {
+        debugWarn("context.compaction", "stale_snapshot", { jid, mode });
+        if (mode === "manual") {
+          await sendWhatsAppMessage(transport, jid, { text: "⚠️ La conversación cambió de forma incompatible durante la compactación. No reemplacé ningún mensaje; puedes ejecutar /compact nuevamente." }, { waitForDelivery: false });
+        }
+        return;
+      }
+
+      usageStore.recordCompaction(jid, {
+        messagesCompacted: plan.split.messagesToCompact.length,
+        tokensBefore: plan.currentTokens,
+        tokensAfter: applied.tokensAfter,
+      });
+      debugInfo("context.compaction", "completed", {
+        jid,
+        mode,
+        tokensBefore: plan.currentTokens,
+        tokensAfter: applied.tokensAfter,
+        appendedMessages: applied.appendedMessages,
+      });
+      await sendWhatsAppMessage(transport, jid, {
+        text: formatCompactionCompletion({
+          mode,
+          before: plan.currentTokens,
+          after: applied.tokensAfter,
+          messages: plan.split.messagesToCompact.length,
+          appended: applied.appendedMessages,
+        }),
+      }, { waitForDelivery: false });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        debugInfo("context.compaction", "cancelled", { jid, mode });
+        return;
+      }
+      debugError("context.compaction", "failed", error, { jid, mode });
+      if (mode === "manual") {
+        await sendWhatsAppMessage(transport, jid, { text: "❌ La compactación falló y conservé intacta la conversación." }, { waitForDelivery: false });
+      }
     }
-  } finally {
-    compactingJids.delete(jid);
-  }
+  })().finally(() => {
+    const current = compactionJobs.get(jid);
+    if (current?.promise === promise) compactionJobs.delete(jid);
+  });
+
+  compactionJobs.set(jid, {
+    mode,
+    startedAt,
+    tokensBefore: plan.currentTokens,
+    triggerTokens: plan.triggerTokens,
+    promise,
+    controller,
+  });
+  return { started: true, tokensBefore: plan.currentTokens, triggerTokens: plan.triggerTokens };
+}
+
+function maybeStartAutomaticCompaction(transport: MessagingTransport, jid: string): void {
+  if (compactionJobs.has(jid)) return;
+  startContextCompaction(transport, jid, "automatic");
 }
 
 /** Actualiza modelos desde el endpoint y aplica el fallback del proveedor activo. */
@@ -748,7 +913,7 @@ async function reviewBackgroundTask(sock: MessagingTransport, jid: string, taskI
         summary = (await chatCompletion([
           { role: "system", content: `${STATIC_SYSTEM_PROMPT_CONTENT}\n\nREVISIÓN AUTOMÁTICA DE TAREA:\n- Revisa resultados, errores, carpeta y artefactos reales.\n- No afirmes que sigue activa si el estado es terminal.\n- Explica exactamente qué se logró y qué faltó.\n- No lances nuevas tareas ni inventes contenido.` },
           { role: "user", content: `[Resultado de tarea de fondo confirmado por el sistema]\n\n${payload}` },
-        ], cm.getModel(jid), cfg, 3, 3500)).trim();
+        ], cm.getModel(jid), cfg, 3, 3500, { jid, purpose: "task-review" })).trim();
       } catch (error) {
         debugError("agents.review", "llm_review_failed", error, { jid, taskId });
       }
@@ -902,6 +1067,12 @@ function cancelCurrentOperation(jid: string): string {
 
   cancelledTasks = taskRuntime.cancelAll(jid);
   if (cancelledTasks > 0) cancelledSomething = true;
+
+  const compactionJob = compactionJobs.get(jid);
+  if (compactionJob && !compactionJob.controller.signal.aborted) {
+    compactionJob.controller.abort(new Error("user-cancelled-compaction"));
+    cancelledSomething = true;
+  }
 
   const activeRun = activeAiRuns.get(jid);
   if (activeRun && !activeRun.signal.aborted) {
@@ -1255,6 +1426,90 @@ registerCommand(
   (_cmd, senderJid) => {
     contextManager?.clearConversation(senderJid);
     return { text: "🧹 Conversación reiniciada. Empezamos de cero." };
+  },
+);
+
+registerCommand(
+  "compact",
+  "Compacta manualmente la conversación o muestra el estado con /compact estado",
+  (cmd, senderJid, transport) => {
+    const sub = cmd.args[0]?.toLowerCase() ?? "";
+    if (sub === "estado" || sub === "status") {
+      const job = compactionJobs.get(senderJid);
+      const metadata = contextManager?.getCompactionMetadata(senderJid);
+      const lines = ["🧹 ESTADO DE COMPACTACIÓN", ""];
+      if (job) {
+        lines.push(
+          `Estado: en curso (${job.mode === "manual" ? "manual" : "automática"})`,
+          `Inicio: ${job.startedAt}`,
+          `Snapshot: ~${job.tokensBefore.toLocaleString("es-MX")} tokens`,
+        );
+      } else {
+        lines.push("Estado: sin compactación activa");
+      }
+      lines.push(
+        "",
+        `Compactaciones completadas: ${metadata?.count ?? 0}`,
+        `Mensajes compactados: ${metadata?.messagesCompacted ?? 0}`,
+        metadata?.lastCompactedAt ? `Última: ${metadata.lastCompactedAt}` : "Última: ninguna",
+      );
+      if (metadata?.estimatedTokensBefore) {
+        const reduction = metadata.estimatedTokensBefore > 0
+          ? ((metadata.estimatedTokensBefore - metadata.estimatedTokensAfter) / metadata.estimatedTokensBefore) * 100
+          : 0;
+        lines.push(`Última reducción: ~${metadata.estimatedTokensBefore.toLocaleString("es-MX")} → ~${metadata.estimatedTokensAfter.toLocaleString("es-MX")} (${Math.max(0, reduction).toFixed(1)}%)`);
+      }
+      return { text: lines.join("\n") };
+    }
+
+    const started = startContextCompaction(transport, senderJid, "manual");
+    if (!started.started) {
+      return { text: `🧹 ${started.reason ?? "No se pudo iniciar la compactación."}` };
+    }
+    return {
+      text: [
+        "🧹 Compactación manual iniciada en segundo plano.",
+        "",
+        `Snapshot: ~${started.tokensBefore?.toLocaleString("es-MX") ?? "?"} tokens`,
+        "Puedes seguir hablando conmigo mientras termina; los mensajes nuevos se preservarán.",
+      ].join("\n"),
+    };
+  },
+);
+
+registerCommand(
+  "uso",
+  "Muestra métricas de contexto y consumo; usa /uso texto para formato textual",
+  async (cmd, senderJid, transport) => {
+    const report = formatUsageText(senderJid);
+    if ((cmd.args[0]?.toLowerCase() ?? "") === "texto") return { text: report };
+    const ctx = getUsageSnapshotForDisplay(senderJid);
+    if (!ctx) return { text: report };
+    const data = usageStore.get(senderJid);
+    const displayData = structuredClone(data);
+    const metadata = contextManager?.getCompactionMetadata(senderJid);
+    if (metadata && metadata.count > displayData.compaction.count) {
+      displayData.compaction.count = metadata.count;
+      displayData.compaction.messagesCompacted = metadata.messagesCompacted;
+      displayData.compaction.lastCompactedAt = metadata.lastCompactedAt;
+      displayData.compaction.estimatedTokensBefore = metadata.estimatedTokensBefore;
+      displayData.compaction.estimatedTokensAfter = metadata.estimatedTokensAfter;
+      displayData.compaction.lastReductionPercent = metadata.estimatedTokensBefore > 0
+        ? Math.max(0, ((metadata.estimatedTokensBefore - metadata.estimatedTokensAfter) / metadata.estimatedTokensBefore) * 100)
+        : 0;
+    }
+    const image = renderUsageCard(displayData, ctx);
+    const source = data.lastRequest?.source === "provider"
+      ? "métricas del provider"
+      : data.lastRequest?.source === "mixed"
+        ? "métricas mixtas"
+        : "estimación local";
+    await transport.send(senderJid, {
+      image,
+      mimetype: "image/png",
+      caption: `📊 Uso de contexto — ${ctx.percentOfInputBudget.toFixed(1)}% del presupuesto de entrada · ${source}`,
+    });
+    return { text: "" };
   },
 );
 
@@ -2581,7 +2836,7 @@ export async function handleMessage(
     const result = await dispatchCommand(command, remoteJid, sock);
 
     if (result) {
-      await sendWithTyping(sock, remoteJid, result.text);
+      if (result.text.trim()) await sendWithTyping(sock, remoteJid, result.text);
     } else {
       const sessionUsername = authManager.getUsername(remoteJid);
       const isAdmin = sessionUsername
@@ -2609,13 +2864,6 @@ export async function handleMessage(
   // ── Procesamiento local de audio e imágenes ────────────────────
   if (mediaKind) {
     await handleMediaMessage(sock, message, remoteJid, mediaKind);
-    return;
-  }
-
-  // ── Ignorar mensajes si el JID está en compactación ─────────────
-  if (compactingJids.has(remoteJid)) {
-    // El usuario ya recibió una notificación de "espera", ignoramos
-    // mensajes adicionales hasta que termine la compactación
     return;
   }
 
@@ -2671,8 +2919,9 @@ async function handleAiChat(
   const userMessage = { role: "user" as const, content: userText };
   cm.addMessage(remoteJid, userMessage);
 
-  // Verificar si necesita compactación antes de llamar a la API
-  await ensureContextCompaction(sock, remoteJid);
+  // La compactación automática se ejecuta sobre un snapshot y nunca bloquea
+  // esta conversación. El turno actual continúa mientras el resumen se genera.
+  maybeStartAutomaticCompaction(sock, remoteJid);
 
   const messages = cm.getMessages(remoteJid);
   const memoryIntent = detectMemoryPersistenceIntent(userText);
@@ -2680,11 +2929,14 @@ async function handleAiChat(
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
   // usando shallow clone para no contaminar el contexto persistido
   const relatedVaultContext = memoryVault.buildRelevantContext(remoteJid, userText);
+  const profileMemory = getMemoryContent(remoteJid);
+  const compactedSummary = cm.getCompactionSummaryText(remoteJid);
+  const supervisorContext = taskRuntime.buildContextSummary(remoteJid);
   const dynamicCtx = `${cm.buildDynamicContext(remoteJid)}
 
 ${relatedVaultContext}
 
-${taskRuntime.buildContextSummary(remoteJid)}`;
+${supervisorContext}`;
   const apiMessages = messages.map((m) => ({ ...m }));
   const lastMsg = apiMessages[apiMessages.length - 1];
   if (lastMsg && lastMsg.role === "user") {
@@ -2693,6 +2945,18 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
       : "";
     lastMsg.content = `${dynamicCtx}${memoryTransaction}\n\n---\n\n${lastMsg.content}`;
   }
+
+  usageStore.recordContext(remoteJid, buildContextUsageSnapshot({
+    model,
+    persistedMessages: messages,
+    apiMessages,
+    tools: activeTools,
+    rawCurrentMessage: userText,
+    profileMemory,
+    vaultContext: relatedVaultContext,
+    compactedSummary,
+    supervisorContext,
+  }));
 
   // Mantener el estado escribiendo durante toda la operación real.
   const typingSession = await startContinuousTyping(sock, remoteJid);
@@ -3021,6 +3285,7 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
         maxTokens: 4096,
         truncationRecoveryAttempts: 1,
         signal: runController.signal,
+        usage: { jid: remoteJid, purpose: "chat" },
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
@@ -3062,6 +3327,7 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
                 .map((entry) => `${entry.name}: ${entry.result}`),
             ].join("\n\n"),
             runController.signal,
+            { jid: remoteJid, purpose: "memory-recovery" },
           );
           const forcedResult = await toolExecutor(forcedToolName, forcedArgs);
           if (hasConfirmedMemoryMutation(confirmedTools, memoryIntent.target)) {
