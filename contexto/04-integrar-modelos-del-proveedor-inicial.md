@@ -1,4 +1,4 @@
-﻿<!-- codewolf:auto-context:record -->
+<!-- codewolf:auto-context:record -->
 # 003 — Integrar modelos del proveedor inicial
 
 # Fecha

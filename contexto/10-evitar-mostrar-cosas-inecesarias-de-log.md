@@ -1,4 +1,4 @@
-﻿<!-- codewolf:auto-context:record -->
+<!-- codewolf:auto-context:record -->
 # 008 — Evitar mostrar cosas inecesarias de log
 
 # Fecha

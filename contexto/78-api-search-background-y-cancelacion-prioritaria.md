@@ -1,4 +1,4 @@
-﻿# 78 — api-search en segundo plano y cancelación prioritaria
+# 78 — api-search en segundo plano y cancelación prioritaria
 
 # Problema
 

@@ -29,6 +29,8 @@ interface ArtifactFile {
   artifacts: WorkspaceArtifact[];
 }
 
+const RESERVED_ROOT_WORKDIR_FILES = new Set(["tasks.json", "artifacts.json"]);
+
 const MIME_BY_EXTENSION: Record<string, string> = {
   ".pdf": "application/pdf",
   ".md": "text/markdown; charset=utf-8",
@@ -105,6 +107,9 @@ export class WorkspaceManager {
   resolvePath(jid: string, inputPath: string, options: { mustExist?: boolean; allowDirectory?: boolean } = {}): string {
     const root = this.getWorkdir(jid);
     const normalized = normalizeRelativePath(inputPath);
+    if (RESERVED_ROOT_WORKDIR_FILES.has(normalized.toLowerCase())) {
+      throw new Error(`"${normalized}" es metadato interno de Luna y no puede manipularse mediante herramientas de workspace.`);
+    }
     const candidate = resolve(root, normalized);
     if (!isInside(root, candidate)) {
       throw new Error("La ruta solicitada está fuera del workdir del usuario.");
@@ -114,14 +119,30 @@ export class WorkspaceManager {
       throw new Error(`No existe "${normalized}" en el workdir.`);
     }
 
+    const realRoot = realpathSync(root);
     if (existsSync(candidate)) {
-      const realRoot = realpathSync(root);
       const realCandidate = realpathSync(candidate);
       if (!isInside(realRoot, realCandidate)) {
         throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");
       }
       if (!options.allowDirectory && statSync(candidate).isDirectory()) {
         throw new Error("La operación requiere un archivo, no una carpeta.");
+      }
+    } else {
+      // También valida el ancestro existente más cercano. Sin esta comprobación,
+      // una escritura en `symlink-afuera/nuevo.txt` podría atravesar un enlace
+      // aunque el archivo final todavía no existiera.
+      let ancestor = dirname(candidate);
+      while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
+        ancestor = dirname(ancestor);
+      }
+      const realAncestor = realpathSync(ancestor);
+      if (!isInside(realRoot, realAncestor)) {
+        throw new Error("La ruta resuelve fuera del workdir mediante un enlace simbólico.");
+      }
+      const projected = resolve(realAncestor, relative(ancestor, candidate));
+      if (!isInside(realRoot, projected)) {
+        throw new Error("La ruta proyectada saldría del workdir mediante un enlace simbólico.");
       }
     }
 

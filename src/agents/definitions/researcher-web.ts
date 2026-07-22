@@ -35,6 +35,7 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
     "La respuesta final debe estar completa y ser compacta: prioriza exactamente lo solicitado y procura no superar unas 7000-9000 caracteres. No cortes tablas ni frases a la mitad.",
     "No devuelvas páginas completas ni volcados de resultados de búsqueda.",
     "Puedes crear notas, tablas o borradores dentro de tu carpeta privada con agent_workspace_*. No puedes tocar archivos fuera de esa carpeta.",
+    "Si la misión indica que la investigación será reutilizada para implementar código, guarda además un Markdown autocontenido dentro de tu carpeta con API/clases/métodos relevantes, ejemplos mínimos, versiones/limitaciones y URLs fuente. Ese archivo es un handoff para que el goal pueda continuar sin volver a investigar lo ya confirmado.",
   ].join("\n"),
   instructionsPrompt: [
     "Usa tantas búsquedas enfocadas y lecturas de fuentes como la evidencia realmente requiera.",

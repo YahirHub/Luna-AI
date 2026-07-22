@@ -1,4 +1,4 @@
-﻿# 62 — Control natural de comandos y limpieza del workdir
+# 62 — Control natural de comandos y limpieza del workdir
 
 # Fecha
 

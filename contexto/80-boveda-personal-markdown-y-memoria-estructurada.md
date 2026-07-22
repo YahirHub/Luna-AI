@@ -1,4 +1,4 @@
-﻿# 80 — Bóveda personal Markdown y memoria estructurada
+# 80 — Bóveda personal Markdown y memoria estructurada
 
 # Fecha
 

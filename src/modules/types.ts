@@ -8,6 +8,8 @@ export type ModuleActivationCondition = (message: string, session: ModuleSession
 export interface ModuleSession {
   authenticated: boolean;
   isAdmin: boolean;
+  /** JID actual cuando existe una sesión autenticada. Permite contexto dinámico por usuario sin globales duplicadas. */
+  jid?: string;
 }
 
 export interface ModuleCommandDefinition {

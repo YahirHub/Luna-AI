@@ -25,10 +25,12 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
 - OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
-- Luna compila como binario standalone y se distribuye junto al runtime oficial de whisper.cpp; sin FFmpeg, Python ni APIs multimedia.
+- Luna compila como binario standalone y se distribuye junto a sus runtimes multimedia y de navegador. La imagen Docker añade Bash, Python 3, Node.js/npm, Git y Bubblewrap para ejecución agéntica confinada al workdir.
 - Administrador, usuarios, sesiones y bloqueo de cuentas, también gestionables por lenguaje natural con herramientas restringidas a administradores.
 - Persistencia atómica para archivos JSON críticos.
 - Ejecución local, binaria o mediante Docker.
+- Goals autónomos en segundo plano con tasklist interna persistente, verificación independiente y continuación automática hasta completar el objetivo o detectar un bloqueo real.
+- Herramientas agénticas de filesystem y ejecución de Bash/Python/Node/Bun dentro del workdir privado del usuario, con detección de runtimes, timeout, salida acotada y cancelación de procesos.
 
 ## Gestión de contexto y métricas
 
@@ -46,6 +48,36 @@ La compactación trabaja sobre un snapshot del historial. Mientras el LLM genera
 Las métricas se guardan por usuario en `persistent/contexts/<jid>/usage.json`. Cuando el proveedor devuelve `usage.prompt_tokens`/`completion_tokens` o `input_tokens`/`output_tokens`, Luna registra esos valores como reales. Los proveedores que no devuelven métricas siguen siendo compatibles: Luna calcula una estimación local a partir de mensajes, tool calls y esquemas de herramientas. Las respuestas parciales se marcan como métricas mixtas. `/uso` diferencia explícitamente requests con métricas reales, mixtas y estimadas.
 
 El reporte separa conversación, system prompt, herramientas, `memory.md`, resumen compactado, supervisor y otros datos dinámicos. La recuperación de la bóveda depende de la consulta concreta, por lo que `/uso` mide el contexto base del próximo request y no inventa una recuperación semántica de notas.
+
+## Goals, tasklist interna y ejecución agéntica
+
+Luna puede convertir trabajos complejos en un **goal autónomo** que se ejecuta en segundo plano sin bloquear la conversación:
+
+```text
+/goal <objetivo>
+/goal estado [id]
+/goal cancelar [id]
+/goal reanudar [id]
+/goal lista
+```
+
+La tasklist **no es un comando de usuario**. Es estado interno y autoritativo del agente, persistido fuera del workdir editable. El ejecutor debe convertir el objetivo en pasos específicos, mantener como máximo un paso `in_progress` por lista y aportar evidencia antes de marcar un paso como `completed`. Cuando cree haber terminado, un verifier separado revisa objetivo, tasklist, resultados de tools, archivos y validaciones. Si faltan requisitos, añade pasos de corrección y el goal continúa automáticamente. Existen límites de iteraciones y detección de falta de progreso para evitar bucles infinitos.
+
+Un goal puede usar las mismas capacidades modulares de Luna: inspeccionar y modificar archivos, ejecutar pruebas/builds/scripts, delegar investigación a `api-search` o `browser-agent`, crear artefactos y enviar resultados. Si necesita documentación vigente, espera el resultado de los subagentes dentro de su propio runtime background y después continúa; esto no toma el lock del chat principal. La cancelación del goal propaga `AbortSignal` a procesos y subagentes descendientes.
+
+Herramientas de filesystem disponibles para el orquestador y el GoalRuntime:
+
+```text
+workspace_list / workspace_read_text / workspace_write_text
+workspace_append_text / workspace_edit_text / workspace_delete
+workspace_mkdir / workspace_stat / workspace_move / workspace_copy
+workspace_glob / workspace_search / workspace_read_files
+workspace_apply_patch / workspace_runtime_status / workspace_exec
+```
+
+`workspace_exec` acepta Bash, Python, Node.js o Bun únicamente si el runtime existe. En Linux exige un sandbox Bubblewrap operativo y monta como escritura solo el workdir del JID; el resto del filesystem de runtime se expone en solo lectura y `/tmp` es efímero. Si el kernel o el contenedor bloquea los namespaces necesarios, Luna falla de forma segura y no ejecuta código sin aislamiento. En plataformas no Linux la ejecución no aislada permanece deshabilitada salvo habilitación explícita del operador.
+
+Para tareas como crear un bot a partir de documentación externa, el flujo esperado es: planificar en la tasklist → investigar lo desconocido con subagentes → conservar el handoff/documentación necesaria → implementar en el workdir → ejecutar tests/builds → corregir → verificar. Para recursos visuales cuando el modelo no tiene visión, `browser-agent` puede consultar páginas `File:` de Wikimedia Commons y conservar la descripción textual, URL de archivo, autor/licencia y fuente antes de reutilizar o descargar el recurso.
 
 ## Requisitos
 
@@ -421,7 +453,7 @@ create_pdf_from_markdown
 message_send
 ```
 
-`spawn_agents` no es terminal y no crea PDFs por sí mismo. Después de terminar, el agente principal sigue razonando normalmente. Esto permite que una investigación fallida se repita de forma enfocada sin reiniciar las demás y evita convertir la investigación en una mega-herramienta rígida.
+En el chat principal, `spawn_agents`, `researcher_web` y `browser_agent` son terminales cuando registran una tarea `background=true`: el turno se cierra inmediatamente y libera el lock conversacional. La revisión automática entrega el resultado después. Dentro de un `/goal`, el GoalRuntime ya está desacoplado del chat y puede invocar `spawn_agents` internamente con `background=false` para **esperar esa investigación y continuar el mismo objetivo** sin bloquear al usuario.
 
 Las solicitudes de subagentes se deduplican semánticamente dentro de la misma respuesta del modelo. Si un proveedor OpenAI-compatible repite accidentalmente la misma llamada con otro `tool_call_id`, el trabajo se ejecuta una sola vez.
 
@@ -465,7 +497,7 @@ El detalle completo de `web_search`, `read_url`, tiempos y errores permanece en 
 
 ### Escritura y edición del workdir
 
-El orquestador dispone de `workspace_write_text`, `workspace_append_text`, `workspace_edit_text` y `workspace_delete` para crear, ampliar, modificar o eliminar contenido dentro del workdir privado del usuario. La eliminación exige `confirmed=true`. Cada subagente dispone de las variantes `agent_workspace_*`, confinadas a su propia carpeta de ejecución; no puede eliminar la raíz de la tarea ni acceder a rutas externas. Todas las rutas pasan por las defensas existentes contra traversal y enlaces simbólicos.
+El orquestador dispone tanto de operaciones simples (`workspace_write_text`, `workspace_append_text`, `workspace_edit_text`, `workspace_delete`) como de herramientas agénticas para `mkdir`, `stat`, mover/copiar, glob, búsqueda de código, lectura múltiple, patch prevalidado y ejecución de runtimes. La eliminación exige `confirmed=true`. Cada subagente dispone de las variantes `agent_workspace_*`, confinadas a su propia carpeta de ejecución; no puede eliminar la raíz de la tarea ni acceder a rutas externas. Todas las rutas pasan por defensas contra traversal y enlaces simbólicos; además `tasks.json` y `artifacts.json` quedan reservados como metadata interna y no pueden manipularse mediante las tools del workdir.
 
 Al finalizar una tarea se eliminan del runtime los `AbortController`, terminadores y referencias efímeras de sus agentes. Los archivos de resultado y eventos permanecen disponibles para revisión, pero una tarea `api-search` terminada no conserva procesos, timers o controladores vivos.
 
@@ -629,6 +661,8 @@ El `Dockerfile` inicia el binario con `--qr`. Una instalación nueva muestra el 
 docker build -t luna-ai .
 docker run --rm -it \
   --name luna-ai \
+  --security-opt no-new-privileges=true \
+  --security-opt seccomp=unconfined \
   -v luna-ai-data:/data/persistent \
   luna-ai
 ```
@@ -639,11 +673,13 @@ docker run --rm -it \
 docker build -t luna-ai .
 docker run --rm -it `
   --name luna-ai `
+  --security-opt no-new-privileges=true `
+  --security-opt seccomp=unconfined `
   -v luna-ai-data:/data/persistent `
   luna-ai
 ```
 
-El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda, credenciales y la configuración global de Whisper. Los modelos Whisper descargados por `!setup-whisper` también permanecen en el volumen. Docker instala Chromium y las bibliotecas Linux necesarias mediante APT para la arquitectura de la imagen, por lo que el mismo Dockerfile funciona en amd64 y ARM64 sin intentar Chrome for Testing en ARM64. El entrypoint mantiene `/data/bot` y `/data/runtime` de solo lectura para `appuser` y ubica HOME, caché, estado y sockets XDG bajo `/data/persistent`. Los audios e imágenes originales se procesan temporalmente y no se conservan. No es necesario montar archivos adicionales.
+El volumen conserva la sesión de WhatsApp, usuarios, contextos, memoria, alarmas, configuración LLM, motores de búsqueda, credenciales y la configuración global de Whisper. Los modelos Whisper descargados por `!setup-whisper` también permanecen en el volumen. `workspace_exec` usa Bubblewrap y necesita crear namespaces internos; los ejemplos desactivan el perfil seccomp predeterminado del contenedor para permitir esa operación y mantienen `no-new-privileges`. Luna corre finalmente como `appuser` y vuelve a comprobar Bubblewrap antes de cada ejecución. Si el host bloquea user namespaces por otra política, la terminal se deshabilita de forma segura mientras el resto de Luna continúa funcionando. Docker instala Chromium y las bibliotecas Linux necesarias mediante APT para la arquitectura de la imagen, por lo que el mismo Dockerfile funciona en amd64 y ARM64 sin intentar Chrome for Testing en ARM64. El entrypoint mantiene `/data/bot` y `/data/runtime` de solo lectura para `appuser` y ubica HOME, caché, estado y sockets XDG bajo `/data/persistent`. Los audios e imágenes originales se procesan temporalmente y no se conservan. No es necesario montar archivos adicionales.
 
 Para revisar el QR o los logs:
 
@@ -661,7 +697,8 @@ Los prefijos `!` y `/` son aceptados por el parser. La tabla muestra el prefijo 
 | `!ping` | Responde con `pong`. |
 | `!id` | Muestra el JID de WhatsApp. |
 | `!cambiar-password` | Cambia la contraseña de la cuenta autenticada; si no se incluye el valor, inicia una captura segura. |
-| `/cancelar` | Cancela el flujo interactivo actual. |
+| `/cancelar` | Cancela el flujo interactivo, goal, compactación o tarea activa del usuario. |
+| `/goal <objetivo>` | Inicia un objetivo autónomo en segundo plano; `estado`, `cancelar`, `reanudar` y `lista` administran el runtime. |
 | `!clear` | Reinicia la conversación sin borrar la memoria persistente. |
 | `!clear-workdir confirmar` | Limpia todo el workdir privado del usuario sin borrar conversación, memoria ni configuración. |
 | `!limpiar-workdir confirmar` | Alias en español de `!clear-workdir`. |
@@ -707,7 +744,8 @@ persistent/
 │   ├── vault/               # Notas temáticas Markdown, propiedades, links y papelera
 │   ├── reminders.json       # Recordatorios de una sola vez
 │   ├── alarms.json          # Alarmas recurrentes
-│   └── workdir/             # Tareas, temporales y artefactos privados
+│   ├── goals/               # Estado interno: goals.json y tasklists.json (fuera del workdir editable)
+│   └── workdir/             # Código, tareas de subagentes, temporales y artefactos privados
 ├── agent-config.json        # Configuración de herramientas y subagente
 ├── search.json              # Motores, estados, predeterminado y fallback
 ├── search-auth.json         # API keys de búsqueda; secreto
@@ -770,7 +808,9 @@ src/
 │   ├── search-setup.ts      # Flujo /setup-search
 │   ├── search-storage.ts    # Preferencias y credenciales separadas
 │   └── search-tools.ts      # web_search, uso exclusivo del subagente
-├── workspace/               # Workdir aislado, rutas seguras y artefactos
+├── workspace/               # Workdir aislado, filesystem agéntico y ejecución sandboxed
+├── goals/                   # GoalRuntime, tasklist autoritativa, verifier y tools de control
+├── modules/                 # Registro modular de comandos, tools, prompts, permisos y contexto dinámico
 ├── orchestration/           # Persistencia y cancelación de tareas
 ├── artifacts/               # PDF, ZIP y gitzip
 ├── tools/                   # Envío de artefactos por WhatsApp
@@ -811,7 +851,7 @@ dist/
     └── twemoji/             # iconos usados al generar PDF
 ```
 
-El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. Los paquetes Linux incluyen además `libgomp.so.1`, requerido por OpenMP, y el workflow comprueba su presencia antes de comprimir el release. OCR permanece embebido en Luna. No requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Ninguna credencial se incrusta en los releases.
+El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows amd64. Cada paquete contiene el ejecutable de Luna, la release `latest` de whisper.cpp correspondiente a la plataforma, sus DLL o bibliotecas compartidas, el modelo Whisper y el README. Los paquetes Linux incluyen además `libgomp.so.1`, requerido por OpenMP, y el workflow comprueba su presencia antes de comprimir el release. OCR permanece embebido en Luna. El núcleo no requiere Bun, Node, FFmpeg, Python ni Tesseract instalados. Las tools `workspace_exec` detectan los runtimes que existan en el host; la imagen Docker oficial sí incluye Bash, Python y Node/npm. Ninguna credencial se incrusta en los releases.
 
 ## Pruebas manuales importantes
 
@@ -845,6 +885,10 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 27. Pedir a `browser-agent` un inventario de HTML, consola, errores, red, imágenes y favicon; comprobar que guarde manifests y descargas dentro de la carpeta de la tarea.
 28. Probar creación, append, edición exacta y eliminación confirmada desde el orquestador y desde un agente; verificar que no puedan salir de su workdir.
 29. Finalizar y cancelar tareas `api-search`; confirmar que desaparezcan controladores/terminadores efímeros y que sus resultados persistidos sigan disponibles.
+30. Ejecutar `/goal crea un proyecto pequeño, pruébalo y corrige hasta que pase`, comprobar que el chat siga respondiendo mientras trabaja, que la tasklist no tenga comando público y que el verifier impida completar pasos sin evidencia.
+31. Dentro de un goal forzar una falta de documentación, comprobar que delegue a `api-search` o `browser-agent`, espere esa investigación dentro del runtime background y continúe después con la implementación.
+32. Ejecutar `workspace_runtime_status` y `workspace_exec` en Docker con Bash/Python/Node; comprobar que `cwd=../otro-usuario` y rutas mediante symlink sean rechazadas y que cancelar termine el árbol de procesos.
+33. Pedir un recurso visual con fuente y comprobar que `browser-agent` use una página `File:` de Wikimedia Commons, conserve descripción/autor/licencia/URL y no invente contenido visual.
 
 ## Estado actual de ejecución delegada
 

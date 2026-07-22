@@ -27,6 +27,16 @@ describe("registro modular", () => {
     expect(moduleRegistry.resolveCommand("userlist", admin)?.moduleId).toBe("admin");
   });
 
+  it("expone goals y tasklists solo después del login", () => {
+    const pool = [tool("goal_start"), tool("goal_status"), tool("tasklist_create")];
+    expect(moduleRegistry.filterTools(pool, guest).tools).toEqual([]);
+    expect(moduleRegistry.filterTools(pool, user).tools.map((entry) => entry.function.name)).toEqual([
+      "goal_start", "goal_status", "tasklist_create",
+    ]);
+    expect(moduleRegistry.resolveCommand("goal", user)?.moduleId).toBe("goals");
+    expect(moduleRegistry.resolveCommand("tasklist", user)).toBeNull();
+  });
+
   it("rechaza tools no declaradas por defecto", () => {
     const result = moduleRegistry.filterTools([tool("memory_read"), tool("tool_nueva_sin_modulo")], user);
     expect(result.tools.map((entry) => entry.function.name)).toEqual(["memory_read"]);

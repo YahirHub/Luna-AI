@@ -168,7 +168,13 @@ function collectEntries(root: string, options: CollectOptions): { entries: ZipEn
   const entries: ZipEntry[] = [];
   const ignored: string[] = [];
   const rules: IgnoreRule[] = options.gitignore
-    ? [{ base: root, pattern: ".git", negate: false, directoryOnly: true, anchored: false, hasSlash: false }]
+    ? [
+        { base: root, pattern: ".git", negate: false, directoryOnly: true, anchored: false, hasSlash: false },
+        // Directorios privados creados por workspace_exec para HOME/cache. No son
+        // parte del proyecto del usuario y nunca deben colarse en un gitzip.
+        { base: root, pattern: ".home", negate: false, directoryOnly: true, anchored: false, hasSlash: false },
+        { base: root, pattern: ".cache", negate: false, directoryOnly: true, anchored: false, hasSlash: false },
+      ]
     : [];
   let total = 0;
 

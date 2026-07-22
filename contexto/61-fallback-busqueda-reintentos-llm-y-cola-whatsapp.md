@@ -1,4 +1,4 @@
-﻿# 61 — Fallback de búsqueda, reintentos LLM y cola resiliente de WhatsApp
+# 61 — Fallback de búsqueda, reintentos LLM y cola resiliente de WhatsApp
 
 # Fecha
 

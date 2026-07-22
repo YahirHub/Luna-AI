@@ -257,6 +257,8 @@ export interface SpawnAgentsDependencies {
   onBackgroundCompleted?: (taskId: string) => void | Promise<void>;
   /** Estado autoritativo de api-search para esta ejecución. En producción lo resuelve /setup-search. */
   apiSearchAvailable?: boolean;
+  /** Señal opcional del runtime padre (por ejemplo /goal). Al abortarse cancela también esta tarea y sus agentes. */
+  parentSignal?: AbortSignal;
 }
 
 function parseRequests(args: Record<string, unknown>): SpawnAgentRequest[] {
@@ -725,6 +727,27 @@ export async function executeSpawnAgentsTool(
   const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length);
   const background = args.background !== false;
 
+  // Un runtime padre (por ejemplo /goal) debe poder cancelar también los
+  // subagentes que lanzó. TaskRuntime conserva su propio AbortController;
+  // enlazamos ambas señales sin compartir controladores entre capas.
+  let detachParentAbort = () => {};
+  if (dependencies.parentSignal) {
+    const parentSignal = dependencies.parentSignal;
+    const onParentAbort = () => {
+      dependencies.tasks.cancel(dependencies.jid, task.record.id);
+    };
+    if (parentSignal.aborted) onParentAbort();
+    else {
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+      detachParentAbort = () => parentSignal.removeEventListener("abort", onParentAbort);
+    }
+  }
+
+  if (task.signal.aborted) {
+    detachParentAbort();
+    return `Error: la tarea ${task.record.id} fue cancelada antes de iniciar sus subagentes.`;
+  }
+
   debugInfo("agents.spawn", "task_started", { taskId: task.record.id, jid: dependencies.jid, requested: requested.length, unique: uniqueAgents.length, title, background });
   await emit(dependencies.onProgress, {
     type: "task_registered",
@@ -737,7 +760,7 @@ export async function executeSpawnAgentsTool(
   if (background) {
     void runSpawnTask(uniqueAgents, originalToUniqueIndex, task, dependencies, true).catch((error) => {
       debugError("agents.spawn", "background_task_crashed", error, { taskId: task.record.id });
-    });
+    }).finally(detachParentAbort);
     return JSON.stringify({
       task_id: task.record.id,
       title: task.record.title,
@@ -747,9 +770,13 @@ export async function executeSpawnAgentsTool(
     }, null, 2);
   }
 
-  const result = await runSpawnTask(uniqueAgents, originalToUniqueIndex, task, dependencies, false);
-  if (!result.startsWith("Error:")) dependencies.tasks.reviewTask(dependencies.jid, task.record.id);
-  return result;
+  try {
+    const result = await runSpawnTask(uniqueAgents, originalToUniqueIndex, task, dependencies, false);
+    if (!result.startsWith("Error:")) dependencies.tasks.reviewTask(dependencies.jid, task.record.id);
+    return result;
+  } finally {
+    detachParentAbort();
+  }
 }
 
 export async function executeResearcherWebTool(

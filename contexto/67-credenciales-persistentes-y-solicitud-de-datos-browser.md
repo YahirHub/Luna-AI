@@ -1,4 +1,4 @@
-﻿# 67 — Credenciales persistentes y solicitud de datos del navegador
+# 67 — Credenciales persistentes y solicitud de datos del navegador
 
 # Fecha
 

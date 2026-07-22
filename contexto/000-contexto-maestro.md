@@ -1,4 +1,4 @@
-﻿# 000 — Contexto maestro de Luna AI
+# 000 — Contexto maestro de Luna AI
 
 # Fecha
 
@@ -44,12 +44,3 @@ Este archivo es la entrada canónica. Después deben leerse los registros numera
 # Último registro
 
 - `contexto/81-arquitectura-modular-de-capacidades.md`
-
-<!-- codewolf:auto-context:start -->
-# Estado automático más reciente
-
-- Última actualización: 2026-07-22T18:46:31.633Z
-- Último registro: contexto/082-actualizar-nodejs-tar-gz.md
-- Resumen: Actualizar nodejs.tar.gz.
-- Archivos del cambio: nodejs.tar.gz
-<!-- codewolf:auto-context:end -->

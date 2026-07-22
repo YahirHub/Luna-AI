@@ -136,6 +136,18 @@ import {
   executeWorkspaceTool,
 } from "./workspace/workspace-tools.ts";
 import {
+  AGENTIC_WORKSPACE_TOOLS,
+  executeAgenticWorkspaceTool,
+} from "./workspace/workspace-agentic-tools.ts";
+import { getRuntimeStatus, formatRuntimeStatus } from "./workspace/workspace-exec.ts";
+import {
+  TasklistManager,
+  TASKLIST_TOOLS,
+  executeTasklistTool,
+} from "./goals/tasklist.ts";
+import { GoalRuntime } from "./goals/goal-runtime.ts";
+import { GOAL_TOOLS } from "./goals/goal-tools.ts";
+import {
   ARTIFACT_TOOLS,
   executeArtifactTool,
 } from "./artifacts/artifact-tools.ts";
@@ -212,6 +224,8 @@ const alarmManager = new AlarmManager();
 /** Workdir privado y herramientas extendidas por usuario. */
 const workspaceManager = new WorkspaceManager();
 const taskRuntime = new TaskRuntime(workspaceManager);
+const tasklistManager = new TasklistManager(workspaceManager);
+let goalRuntime: GoalRuntime | null = null;
 
 // Variable para guardar el socket actual (para alarmas)
 let currentTransport: MessagingTransport | null = null;
@@ -247,6 +261,9 @@ const BASE_TOOLS = [
   ...REMINDER_TOOLS,
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
+  ...AGENTIC_WORKSPACE_TOOLS,
+  ...TASKLIST_TOOLS,
+  ...GOAL_TOOLS,
   ...ARTIFACT_TOOLS,
   ...MESSAGING_TOOLS,
   ...USER_CONTROL_TOOLS,
@@ -254,7 +271,7 @@ const BASE_TOOLS = [
 
 function getModuleSession(jid?: string): ModuleSession {
   if (!jid || !authManager.isLoggedIn(jid)) return { authenticated: false, isAdmin: false };
-  return { authenticated: true, isAdmin: isAdminSession(jid) };
+  return { authenticated: true, isAdmin: isAdminSession(jid), jid };
 }
 
 function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
@@ -306,6 +323,120 @@ moduleRegistry.bindContextProvider("context", (_message, _session) => {
   return "La compactación manual y automática se ejecuta en segundo plano; /uso distingue contexto actual de consumo histórico.";
 });
 
+moduleRegistry.bindContextProvider("workspace", () => {
+  return formatRuntimeStatus(getRuntimeStatus());
+});
+
+moduleRegistry.bindContextProvider("goals", (_message, session) => {
+  if (!session.jid || !goalRuntime) return "No hay goal activo.";
+  return goalRuntime.buildContextSummary(session.jid);
+});
+
+function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
+  const allowedAgentToolNames = new Set([
+    "spawn_agents", "task_list", "task_status", "task_inspect", "agent_list", "agent_status",
+  ]);
+  const agentTools = getMainAgentTools(agentConfig, isApiSearchCapabilityAvailable())
+    .filter((tool) => allowedAgentToolNames.has(tool.function.name));
+  const pool = [
+    ...TASKLIST_TOOLS,
+    ...WORKSPACE_TOOLS,
+    ...AGENTIC_WORKSPACE_TOOLS,
+    ...ARTIFACT_TOOLS,
+    ...MESSAGING_TOOLS,
+    ...agentTools,
+  ];
+  return moduleRegistry.filterTools(pool, getModuleSession(jid)).tools;
+}
+
+async function executeGoalRuntimeTool(
+  jid: string,
+  goalId: string,
+  tasklistId: string,
+  name: string,
+  args: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<string> {
+  if (signal.aborted) throw signal.reason ?? new Error("goal-cancelled");
+  if (TASKLIST_TOOLS.some((tool) => tool.function.name === name)) {
+    return executeTasklistTool(name, args, tasklistManager, jid, tasklistId);
+  }
+  if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
+    // Un goal puede editar/eliminar archivos concretos porque el objetivo proviene
+    // del usuario, pero nunca puede vaciar el workdir entero de forma implícita.
+    if (name === "workspace_clear") return "Error: workspace_clear no está permitido dentro de /goal; elimina únicamente las rutas necesarias.";
+    return executeWorkspaceTool(name, args, workspaceManager, jid);
+  }
+  if (AGENTIC_WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
+    return executeAgenticWorkspaceTool(name, args, workspaceManager, jid, signal);
+  }
+  if (ARTIFACT_TOOLS.some((tool) => tool.function.name === name)) {
+    return executeArtifactTool(name, args, workspaceManager, jid);
+  }
+  if (MESSAGING_TOOLS.some((tool) => tool.function.name === name)) {
+    if (!currentTransport) return "Error: no hay transporte activo para enviar el archivo o mensaje.";
+    return executeMessagingTool(args, { transport: currentTransport, jid, workspace: workspaceManager });
+  }
+  if (name === "spawn_agents") {
+    const model = contextManager?.getModel(jid);
+    const cfg = llmConfig;
+    if (!model || !cfg) return "Error: proveedor/modelo no disponible para delegar subagentes.";
+    const goalObjective = goalRuntime?.get(jid, goalId)?.objective ?? "Goal autónomo";
+    return executeSpawnAgentsTool({ ...args, background: false }, {
+      jid,
+      model,
+      llmConfig: cfg,
+      agentConfig: { ...agentConfig },
+      apiSearchAvailable: isApiSearchCapabilityAvailable(),
+      parentSignal: signal,
+      workspace: workspaceManager,
+      tasks: taskRuntime,
+      browserCredentials: browserCredentialStore,
+      resumePrompt: goalObjective,
+      onSystemMessage: async (text) => {
+        if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
+      },
+      onSystemArtifact: async (path, caption) => {
+        if (currentTransport) await sendWorkspacePath(currentTransport, jid, workspaceManager, path, caption);
+      },
+      onProgress: async (event) => {
+        if (!currentTransport) return;
+        if (event.type === "task_registered") {
+          await sendWhatsAppMessage(currentTransport, jid, { text: `🔎 ${goalId}: tarea de investigación ${event.taskId} registrada.` }, { waitForDelivery: false });
+        } else if (event.type === "agent_started") {
+          await sendWhatsAppMessage(currentTransport, jid, { text: `🚀 ${event.agentType === "browser-web" ? "browser-agent" : "api-search"} ${event.agentId} trabajando para ${goalId} — ${event.agentName}` }, { waitForDelivery: false });
+        }
+      },
+    });
+  }
+  if (["task_list", "task_status", "task_inspect", "agent_list", "agent_status"].includes(name)) {
+    return executeAgentTaskTool(name, args, { jid, tasks: taskRuntime, workspace: workspaceManager });
+  }
+  return `Error: la herramienta "${name}" no está permitida dentro de /goal.`;
+}
+
+goalRuntime = new GoalRuntime({
+  workspace: workspaceManager,
+  tasklists: tasklistManager,
+  getModel: (jid) => contextManager?.getModel(jid) ?? null,
+  getLlmConfig: () => llmConfig,
+  getTools: (jid) => getGoalRuntimeTools(jid),
+  executeTool: executeGoalRuntimeTool,
+  onProgress: async (jid, text) => {
+    if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
+  },
+  onCompleted: async (jid, goal, text) => {
+    if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
+    const cm = contextManager;
+    if (cm) {
+      await cm.withLock(jid, async () => {
+        cm.addMessage(jid, { role: "user", content: `[Resultado de goal confirmado por el sistema]\n${goal.id} terminó con estado ${goal.status}.` });
+        cm.addMessage(jid, { role: "assistant", content: text });
+      });
+    }
+  },
+});
+
 const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["create_reminder", "⏰ Creando recordatorio..."],
   ["delete_reminder", "🗑️ Eliminando recordatorio..."],
@@ -339,6 +470,7 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
   ["message_send", "📤 Preparando envío por el transporte activo..."],
   ["workspace_clear", "🧹 Limpiando tu workdir..."],
+  ["goal_start", "🎯 Preparando goal autónomo..."],
   ["model_list", "📋 Actualizando modelos disponibles..."],
   ["model_set", "🧠 Cambiando modelo de la conversación..."],
   ["llm_provider_start_setup", "🧠 Preparando configuración del proveedor LLM..."],
@@ -1105,6 +1237,10 @@ function cancelCurrentOperation(jid: string): string {
   cancelledTasks = taskRuntime.cancelAll(jid);
   if (cancelledTasks > 0) cancelledSomething = true;
 
+  if (goalRuntime?.cancel(jid)) {
+    cancelledSomething = true;
+  }
+
   const compactionJob = compactionJobs.get(jid);
   if (compactionJob && !compactionJob.controller.signal.aborted) {
     compactionJob.controller.abort(new Error("user-cancelled-compaction"));
@@ -1538,6 +1674,47 @@ registerCommand(
   },
 );
 
+registerCommand(
+  "goal",
+  "Ejecuta un objetivo autónomo en segundo plano hasta que un verifier confirme que terminó",
+  (cmd, senderJid) => {
+    if (!goalRuntime) return { text: "⚠️ GoalRuntime todavía no está disponible." };
+    const sub = cmd.args[0]?.toLowerCase() ?? "";
+    if (!sub || ["estado", "status"].includes(sub)) {
+      const id = sub ? cmd.args[1] : undefined;
+      return { text: goalRuntime.formatStatus(senderJid, id) };
+    }
+    if (["cancelar", "cancel"].includes(sub)) {
+      const id = cmd.args[1];
+      return { text: goalRuntime.cancel(senderJid, id) ? `⛔ Goal${id ? ` ${id}` : " activo"} cancelado.` : "No hay un goal activo con ese identificador." };
+    }
+    if (["reanudar", "resume"].includes(sub)) {
+      try {
+        const resumed = goalRuntime.resume(senderJid, cmd.args[1]);
+        return { text: `▶️ Goal ${resumed.id} reanudado en segundo plano.\nObjetivo: ${resumed.objective}` };
+      } catch (error) {
+        return { text: `❌ ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    if (["lista", "list"].includes(sub)) {
+      const goals = goalRuntime.list(senderJid);
+      return { text: goals.length ? ["🎯 GOALS RECIENTES", ...goals.map((goal) => `- ${goal.id} | ${goal.status} | ${goal.objective.slice(0, 100)}`)].join("\n") : "🎯 No hay goals registrados." };
+    }
+    try {
+      const objective = cmd.body.trim();
+      const goal = goalRuntime.start(senderJid, objective);
+      return { text: [
+        `🎯 Goal ${goal.id} registrado y ejecutándose en segundo plano.`,
+        `Objetivo: ${goal.objective}`,
+        `Tasklist interna: ${goal.tasklistId}`,
+        "Luna seguirá planificando, ejecutando, investigando y verificando hasta completarlo o encontrar un bloqueo real. Puedes seguir hablando mientras trabaja.",
+      ].join("\n") };
+    } catch (error) {
+      return { text: `❌ ${error instanceof Error ? error.message : String(error)}` };
+    }
+  },
+);
+
 const clearWorkdirCommandHandler = (cmd: import("./commands.ts").ParsedCommand, senderJid: string) => {
   const confirmed = ["confirmar", "confirmo", "si", "sí", "yes"].includes(cmd.args[0]?.toLowerCase() ?? "");
   if (!confirmed) {
@@ -1550,9 +1727,10 @@ const clearWorkdirCommandHandler = (cmd: import("./commands.ts").ParsedCommand, 
       ].join("\n"),
     };
   }
-  const hasActiveTask = taskRuntime.list(senderJid).some((task) => task.status === "running" || task.status === "synthesizing");
-  if (hasActiveTask) {
-    return { text: "❌ No se puede limpiar el workdir mientras hay una tarea de subagentes activa. Cancélala o espera a que termine." };
+  const hasActiveTask = taskRuntime.list(senderJid).some((task) => task.status === "queued" || task.status === "running" || task.status === "synthesizing");
+  const activeGoal = goalRuntime?.list(senderJid).some((goal) => ["queued", "running", "waiting_user"].includes(goal.status)) ?? false;
+  if (hasActiveTask || activeGoal) {
+    return { text: "❌ No se puede limpiar el workdir mientras hay una tarea de subagentes o un /goal activo. Cancélalo o espera a que termine." };
   }
   workspaceManager.clearWorkdir(senderJid);
   return { text: "🧹 Workdir limpiado por completo. Se recrearon tasks, inbox y exports." };
@@ -2934,23 +3112,37 @@ export async function handleMessage(
 function parseDetachedBackgroundTaskResult(
   content: string,
   toolsCalled: string[],
-): { taskId: string; title?: string; status: string } | null {
-  if (!toolsCalled.some((name) => name === "spawn_agents" || name === "researcher_web" || name === "browser_agent")) {
-    return null;
-  }
+): { taskId: string; title?: string; status: string; kind: "task" | "goal" } | null {
+  const goalStarted = toolsCalled.includes("goal_start");
+  const agentStarted = toolsCalled.some((name) => name === "spawn_agents" || name === "researcher_web" || name === "browser_agent");
+  if (!goalStarted && !agentStarted) return null;
   try {
     const parsed = JSON.parse(content) as {
       task_id?: unknown;
+      goal_id?: unknown;
       title?: unknown;
+      objective?: unknown;
       status?: unknown;
       background?: unknown;
     };
-    if (parsed.background !== true || typeof parsed.task_id !== "string" || !parsed.task_id.trim()) return null;
-    return {
-      taskId: parsed.task_id.trim(),
-      title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
-      status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
-    };
+    if (parsed.background !== true) return null;
+    if (goalStarted && typeof parsed.goal_id === "string" && parsed.goal_id.trim()) {
+      return {
+        taskId: parsed.goal_id.trim(),
+        title: typeof parsed.objective === "string" && parsed.objective.trim() ? parsed.objective.trim() : undefined,
+        status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
+        kind: "goal",
+      };
+    }
+    if (agentStarted && typeof parsed.task_id === "string" && parsed.task_id.trim()) {
+      return {
+        taskId: parsed.task_id.trim(),
+        title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
+        status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
+        kind: "task",
+      };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -3158,13 +3350,73 @@ ${supervisorContext}`;
         return result;
       }
 
+      if (GOAL_TOOLS.some((tool) => tool.function.name === name)) {
+        if (!goalRuntime) {
+          result = "Error: GoalRuntime no está disponible.";
+        } else if (name === "goal_start") {
+          const objective = typeof args.objective === "string" ? args.objective.trim() : "";
+          if (!objective) result = "Error: objective es obligatorio.";
+          else {
+            try {
+              const maxIterations = typeof args.max_iterations === "number" ? args.max_iterations : undefined;
+              const goal = goalRuntime.start(remoteJid, objective, maxIterations);
+              await sendWhatsAppMessage(sock, remoteJid, {
+                text: [
+                  `🎯 Goal ${goal.id} registrado y ejecutándose en segundo plano.`,
+                  `Objetivo: ${goal.objective}`,
+                  "La tasklist es interna; puedes seguir hablando mientras Luna investiga, implementa y verifica.",
+                ].join("\n"),
+              }, { waitForDelivery: false });
+              result = JSON.stringify({
+                goal_id: goal.id,
+                tasklist_id: goal.tasklistId,
+                objective: goal.objective,
+                status: goal.status,
+                background: true,
+              }, null, 2);
+            } catch (error) {
+              result = `Error: ${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
+        } else if (name === "goal_status") {
+          result = goalRuntime.formatStatus(remoteJid, typeof args.goal_id === "string" ? args.goal_id : undefined);
+        } else if (name === "goal_cancel") {
+          const goalId = typeof args.goal_id === "string" ? args.goal_id : undefined;
+          result = goalRuntime.cancel(remoteJid, goalId)
+            ? `Goal${goalId ? ` ${goalId}` : " activo"} cancelado.`
+            : "Error: no hay un goal activo con ese identificador.";
+        } else {
+          try {
+            const resumed = goalRuntime.resume(remoteJid, typeof args.goal_id === "string" ? args.goal_id : undefined);
+            result = `Goal ${resumed.id} reanudado en segundo plano.`;
+          } catch (error) {
+            result = `Error: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        }
+        toolResults.push({ name, result });
+        return result;
+      }
+
+      if (TASKLIST_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeTasklistTool(name, args, tasklistManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (AGENTIC_WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeAgenticWorkspaceTool(name, args, workspaceManager, remoteJid, runController.signal);
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
         if (name === "workspace_clear") {
           const hasActiveTask = taskRuntime.list(remoteJid).some(
             (task) => task.status === "queued" || task.status === "running" || task.status === "synthesizing",
           );
-          if (hasActiveTask) {
-            result = "Error: no se puede limpiar el workdir mientras hay una tarea de subagentes activa. Cancélala o espera a que termine.";
+          const hasActiveGoal = goalRuntime?.list(remoteJid).some((goal) => ["queued", "running", "waiting_user"].includes(goal.status)) ?? false;
+          if (hasActiveTask || hasActiveGoal) {
+            result = "Error: no se puede limpiar el workdir mientras hay una tarea de subagentes o un /goal activo. Cancélalo o espera a que termine.";
             await recordToolResult(name, result);
             return result;
           }
@@ -3388,7 +3640,7 @@ ${supervisorContext}`;
         // en la superficie pública siempre crean tareas background. Una vez
         // registrada la tarea no se hace otra llamada al LLM dentro del lock de
         // conversación; el supervisor/revisor continuará por fuera.
-        terminalTools: ["spawn_agents", "researcher_web", "browser_agent"],
+        terminalTools: ["goal_start", "spawn_agents", "researcher_web", "browser_agent"],
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
@@ -3409,7 +3661,7 @@ ${supervisorContext}`;
     if (detachedBackgroundTask) {
       cm.addMessage(remoteJid, {
         role: "assistant",
-        content: `[Tarea de fondo registrada por el sistema: ${detachedBackgroundTask.taskId}${detachedBackgroundTask.title ? ` — ${detachedBackgroundTask.title}` : ""}. Estado inicial: ${detachedBackgroundTask.status}. El supervisor notificará progreso y resultado; la conversación quedó libre para nuevos mensajes.]`,
+        content: `[${detachedBackgroundTask.kind === "goal" ? "Goal autónomo" : "Tarea de fondo"} registrado por el sistema: ${detachedBackgroundTask.taskId}${detachedBackgroundTask.title ? ` — ${detachedBackgroundTask.title}` : ""}. Estado inicial: ${detachedBackgroundTask.status}. El runtime notificará progreso y resultado; la conversación quedó libre para nuevos mensajes.]`,
       });
       debugInfo("agents.spawn", "chat_lock_released_after_background_registration", {
         jid: remoteJid,
