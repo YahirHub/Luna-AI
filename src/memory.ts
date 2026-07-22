@@ -24,7 +24,8 @@ Esta memoria pertenece únicamente a la persona de este chat y sobrevive a !clea
 - Si el nombre sigue como "pendiente de preguntar", pregúntalo de manera natural únicamente durante un saludo o charla casual sin una solicitud operativa.
 - Nunca anexes la pregunta del nombre a investigaciones, archivos, informes, errores, configuraciones, alarmas, recordatorios ni seguimientos de tareas.
 - Cuando la persona diga su nombre, usa memory_write para reemplazar este estado pendiente por el nombre real.
-- Guarda preferencias, temas importantes y la forma en que le gusta que la traten.
+- Guarda aquí únicamente el perfil compacto: nombre, forma de trato y preferencias estables.
+- Para fechas, cumpleaños, personas, proyectos, decisiones o listas que puedan crecer, usa la bóveda temática memory_vault_*.
 - Nunca inventes información personal ni des por conocido un nombre que no esté confirmado.
 
 ## Ejemplo de memoria actualizada

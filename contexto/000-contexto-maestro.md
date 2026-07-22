@@ -30,6 +30,8 @@ Este archivo es la entrada canónica. Después deben leerse los registros numera
 - Los logs distinguen agent.browser-agent, browser-agent.runtime, agent.api-search, api-search.queue, api-search.retry, api-search.runtime y api-search.read-url, e incluyen contexto de tarea/agente. Los runtimes efímeros de búsquedas terminadas se liberan explícitamente.
 
 - Orquestador y subagentes pueden crear, leer, añadir, editar y eliminar archivos dentro de sus workdirs autorizados; la eliminación global exige confirmación y los agentes quedan confinados a su carpeta.
+- La memoria tiene dos niveles: `memory.md` conserva el perfil compacto y `persistent/contexts/<jid>/vault/` guarda notas temáticas Markdown compatibles con Obsidian, con propiedades YAML, tags, alias, wikilinks, backlinks, búsqueda ponderada, caché, renombrado seguro y papelera recuperable.
+- El orquestador dispone de herramientas `memory_vault_*`; cuando enumera datos guardados debe consultar la bóveda real. Fragmentos relevantes se recuperan automáticamente sin inyectar todas las notas en cada turno.
 
 # Seguridad
 
@@ -40,4 +42,4 @@ Este archivo es la entrada canónica. Después deben leerse los registros numera
 
 # Último registro
 
-- `contexto/79-enrutamiento-browser-api-y-herramientas-web-completas.md`
+- `contexto/80-boveda-personal-markdown-y-memoria-estructurada.md`

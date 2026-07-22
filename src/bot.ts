@@ -48,6 +48,11 @@ import {
   executeMemoryTool,
 } from "./memory.ts";
 import {
+  PersistentMemoryVault,
+  MEMORY_VAULT_TOOLS,
+  executeMemoryVaultTool,
+} from "./memory-vault.ts";
+import {
   ReminderManager,
   REMINDER_TOOLS,
   executeReminderTool,
@@ -181,6 +186,8 @@ const authManager = new AuthManager();
 
 /** Gestor de memoria persistente del bot (por usuario). */
 const memoryManager = new MemoryManager();
+/** Bóveda temática persistente compatible con Markdown/Obsidian. */
+const memoryVault = new PersistentMemoryVault();
 
 /** Gestor de recordatorios. */
 const reminderManager = new ReminderManager();
@@ -209,6 +216,7 @@ const backgroundReviewChains = new Map<string, Promise<void>>();
 /** Tools base y herramientas opcionales según /config. */
 const BASE_TOOLS = [
   ...MEMORY_TOOLS,
+  ...MEMORY_VAULT_TOOLS,
   ...REMINDER_TOOLS,
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
@@ -231,8 +239,17 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["create_reminder", "⏰ Creando recordatorio..."],
   ["delete_reminder", "🗑️ Eliminando recordatorio..."],
   ["list_reminders", "📋 Consultando recordatorios..."],
-  ["memory_write", "📝 Escribiendo en memoria..."],
-  ["memory_read", "🔍 Leyendo memoria..."],
+  ["memory_write", "📝 Actualizando perfil persistente..."],
+  ["memory_read", "🔍 Leyendo perfil persistente..."],
+  ["memory_vault_list", "🗂️ Listando la bóveda personal..."],
+  ["memory_vault_search", "🔎 Buscando en la bóveda personal..."],
+  ["memory_vault_read", "📖 Leyendo una nota persistente..."],
+  ["memory_vault_upsert", "📝 Guardando una nota persistente..."],
+  ["memory_vault_edit", "✏️ Editando una nota persistente..."],
+  ["memory_vault_rename", "🏷️ Renombrando una nota persistente..."],
+  ["memory_vault_backlinks", "🔗 Consultando relaciones entre notas..."],
+  ["memory_vault_delete", "🗑️ Moviendo una nota a la papelera..."],
+  ["memory_vault_restore", "♻️ Consultando la papelera de memoria..."],
   ["create_alarm", "⏰ Creando alarma recurrente..."],
   ["delete_alarm", "🗑️ Eliminando alarma..."],
   ["list_alarms", "📋 Consultando alarmas..."],
@@ -2653,7 +2670,10 @@ async function handleAiChat(
 
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
   // usando shallow clone para no contaminar el contexto persistido
+  const relatedVaultContext = memoryVault.buildRelevantContext(remoteJid, userText);
   const dynamicCtx = `${cm.buildDynamicContext(remoteJid)}
+
+${relatedVaultContext}
 
 ${taskRuntime.buildContextSummary(remoteJid)}`;
   const apiMessages = messages.map((m) => ({ ...m }));
@@ -2731,6 +2751,12 @@ ${taskRuntime.buildContextSummary(remoteJid)}`;
 
       if (name === "memory_write" || name === "memory_read") {
         result = await executeMemoryTool(name, args, memoryManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (MEMORY_VAULT_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeMemoryVaultTool(name, args, memoryVault, remoteJid);
         await recordToolResult(name, result);
         return result;
       }

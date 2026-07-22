@@ -11,7 +11,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Vinculación de WhatsApp mediante código QR o número telefónico.
 - Reconexión automática y sesión persistente.
 - Conversación con contexto por usuario y compactación automática.
-- Memoria duradera separada del historial conversacional; al crear un perfil nuevo Luna pregunta el nombre de forma simpática y lo guarda cuando se confirma.
+- Memoria duradera separada del historial conversacional: perfil compacto en `memory.md` y bóveda temática Markdown compatible con Obsidian para fechas, personas, proyectos y conocimiento relacionado.
 - Recordatorios de una sola vez y alarmas recurrentes con mensaje de entrega persistido desde su creación. Cada creación válida genera una confirmación autoritativa del sistema; Luna no puede sustituirla con una afirmación inventada.
 - Los recordatorios y alarmas entregados se agregan al contexto persistente con fecha, texto configurado y respuesta enviada.
 - OpenCode Free integrado como proveedor LLM predeterminado.
@@ -59,6 +59,74 @@ No es necesario crear `.env` ni archivos JSON manualmente.
 4. Conversa normalmente: Luna usa OpenCode Free de forma automática.
 5. Configura búsqueda web con `/setup-search` cuando necesites acceso a internet.
 6. Opcionalmente ajusta el modelo de transcripción con `!setup-whisper`.
+
+## Bóveda personal de memoria
+
+Cada usuario dispone de una bóveda privada en:
+
+```text
+persistent/contexts/<jid>/vault/
+```
+
+La bóveda utiliza archivos Markdown normales, por lo que puede abrirse directamente como vault de Obsidian o editarse con cualquier editor de texto. Luna mantiene `memory.md` únicamente como perfil compacto —nombre, forma de trato y preferencias estables— y guarda los conjuntos de datos que pueden crecer en notas temáticas independientes.
+
+Ejemplo:
+
+```text
+persistent/contexts/<jid>/vault/fechas-de-cumpleanos.md
+```
+
+```markdown
+---
+id: "mem-..."
+title: "Fechas de cumpleaños"
+type: "dates"
+tags:
+  - "cumpleaños"
+  - "familia"
+aliases:
+  - "cumples"
+created: "2026-07-21T10:00:00.000Z"
+updated: "2026-07-21T10:00:00.000Z"
+source: "user"
+---
+
+# Fechas de cumpleaños
+
+- [[Ana Pérez]] — 1995-12-08
+- [[Luis]] — 15 de abril (año todavía desconocido)
+```
+
+La implementación adopta conceptos útiles de Obsidian sin depender de Obsidian en runtime:
+
+- Propiedades YAML tipadas y legibles por humanos.
+- Etiquetas y alias.
+- Wikilinks `[[Nota relacionada]]`.
+- Backlinks entre notas.
+- Búsqueda ponderada por título, alias, etiquetas, propiedades, ruta y contenido.
+- Filtros por carpeta, tipo, etiqueta o propiedad.
+- Caché de catálogo invalidada automáticamente cuando cambia un archivo.
+- Renombrado con actualización de wikilinks.
+- Papelera recuperable en `vault/.trash/`.
+- Recuperación automática de fragmentos relacionados con el mensaje actual, sin cargar toda la bóveda en cada solicitud.
+
+Herramientas disponibles para el orquestador:
+
+```text
+memory_vault_list
+memory_vault_search
+memory_vault_read
+memory_vault_upsert
+memory_vault_edit
+memory_vault_rename
+memory_vault_backlinks
+memory_vault_delete
+memory_vault_restore
+```
+
+Cuando el usuario pregunta “¿qué fechas tengo guardadas?” Luna debe consultar la lista o búsqueda real de la bóveda antes de responder. Para una frase como “recuerda que Ana cumple el 8 de diciembre”, debe crear o actualizar una nota temática, evitando duplicar archivos con el mismo título.
+
+Las notas están aisladas por JID, usan escritura atómica, tienen límites de tamaño y bloquean traversal y enlaces simbólicos hacia fuera del vault. La bóveda rechaza contraseñas, API keys, tokens y OTP; esos datos pertenecen al almacén cifrado de credenciales, no a archivos Markdown.
 
 ## Procesamiento multimedia local
 
@@ -618,7 +686,8 @@ persistent/
 ├── auth_info_baileys/       # Sesión de WhatsApp
 ├── contexts/<jid>/
 │   ├── context.json         # Conversación, alarmas entregadas, modelo y compactación
-│   ├── memory.md            # Memoria duradera del usuario
+│   ├── memory.md            # Perfil compacto: nombre, trato y preferencias
+│   ├── vault/               # Notas temáticas Markdown, propiedades, links y papelera
 │   ├── reminders.json       # Recordatorios de una sola vez
 │   ├── alarms.json          # Alarmas recurrentes
 │   └── workdir/             # Tareas, temporales y artefactos privados
