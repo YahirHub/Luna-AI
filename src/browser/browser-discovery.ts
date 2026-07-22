@@ -103,6 +103,19 @@ export function resolveSystemBrowserExecutable(): string | undefined {
   }
 
   if (process.platform === "linux") {
+    // Ubuntu distribuye Chromium como Snap. /snap/bin no siempre forma parte de
+    // PATH en servicios systemd, CI o shells no interactivos, así que revisamos
+    // rutas conocidas antes de buscar por nombre.
+    const fixedCandidates = [
+      "/snap/bin/chromium",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+    ];
+    const fixed = fixedCandidates.find((candidate) => existsSync(candidate));
+    if (fixed) return fixed;
+
     return findOnPath([
       "google-chrome",
       "google-chrome-stable",
@@ -114,7 +127,6 @@ export function resolveSystemBrowserExecutable(): string | undefined {
       "microsoft-edge-stable",
     ]);
   }
-
   return undefined;
 }
 

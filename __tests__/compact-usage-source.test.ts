@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-const bot = readFileSync(join(root, "src/bot.ts"), "utf8");
-const ai = readFileSync(join(root, "src/ai.ts"), "utf8");
+// Normalizar EOL para que los asserts de fuente sean idénticos en Windows (CRLF)
+// y Linux/macOS (LF). Git puede materializar el mismo archivo con ambos estilos.
+const bot = readFileSync(join(root, "src/bot.ts"), "utf8").replace(/\r\n/g, "\n");
+const ai = readFileSync(join(root, "src/ai.ts"), "utf8").replace(/\r\n/g, "\n");
 
 describe("/compact y /uso", () => {
   it("registra los comandos y no bloquea mensajes mientras compacta", () => {

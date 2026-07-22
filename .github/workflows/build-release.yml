@@ -85,6 +85,38 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Instalar Chromium ARM64 del sistema
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Google no publica Chrome for Testing para Linux ARM64. El runner
+          # ubuntu-24.04-arm tampoco trae Chromium, así que instalamos el Snap
+          # oficial antes de `bun install` (postinstall ejecuta prepare:browser).
+          if ! command -v snap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y snapd
+          fi
+
+          sudo systemctl enable --now snapd.socket || true
+          if ! snap list chromium >/dev/null 2>&1; then
+            sudo snap install chromium
+          fi
+
+          CHROMIUM_PATH="$(command -v chromium || true)"
+          if [ -z "$CHROMIUM_PATH" ] && [ -x /snap/bin/chromium ]; then
+            CHROMIUM_PATH=/snap/bin/chromium
+          fi
+          if [ -z "$CHROMIUM_PATH" ] || [ ! -x "$CHROMIUM_PATH" ]; then
+            echo "No se pudo localizar Chromium después de instalarlo." >&2
+            snap list chromium || true
+            exit 1
+          fi
+
+          "$CHROMIUM_PATH" --version
+          echo "AGENT_BROWSER_EXECUTABLE_PATH=$CHROMIUM_PATH" >> "$GITHUB_ENV"
+          echo "Chromium ARM64: $CHROMIUM_PATH"
+
       - name: Instalar y validar
         run: |
           bun install

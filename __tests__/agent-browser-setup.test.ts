@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   agentBrowserGenericName,
   agentBrowserNativeName,
@@ -27,5 +29,17 @@ describe("preparación multiplataforma de agent-browser", () => {
 
   it("rechaza plataformas sin binario nativo publicado", () => {
     expect(() => agentBrowserNativeName("win32", "arm64", false)).toThrow();
+  });
+
+  it("prepara Chromium del sistema en el runner Linux ARM64 antes de bun install", () => {
+    const root = join(import.meta.dir, "..");
+    const workflow = readFileSync(join(root, ".github/workflows/build-release.yml"), "utf8");
+    expect(workflow).toContain("runs-on: ubuntu-24.04-arm");
+    expect(workflow).toContain("Instalar Chromium ARM64 del sistema");
+    expect(workflow).toContain("sudo snap install chromium");
+    expect(workflow).toContain("AGENT_BROWSER_EXECUTABLE_PATH=$CHROMIUM_PATH");
+    expect(workflow.indexOf("Instalar Chromium ARM64 del sistema")).toBeLessThan(
+      workflow.indexOf("bun install", workflow.indexOf("build-linux-arm64:")),
+    );
   });
 });
