@@ -28,7 +28,7 @@ const tool: ToolDefinition = {
 describe("requestForcedToolArguments", () => {
   it("fuerza la herramienta indicada y devuelve sus argumentos", async () => {
     const requestBodies: Record<string, unknown>[] = [];
-    globalThis.fetch = (async (_input, init) => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(JSON.stringify({
         choices: [{
