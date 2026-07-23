@@ -821,7 +821,7 @@ export async function chatCompletionWithTools(
   } catch (error) {
     if (runtimeOptions.signal?.aborted) throw error;
     if (process.env.LUNA_TEST_QUIET !== "1") {
-      console.warn("[ai] No se pudo generar el cierre después del límite de tools:", error);
+      debugWarn("ai.tools", "final_response_after_tool_limit_failed", { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

@@ -1,3 +1,4 @@
+import { debugWarn } from "./debug.ts";
 import {
   closeSync,
   existsSync,
@@ -175,7 +176,7 @@ export function loadWhisperConfig(path = getWhisperConfigPath()): WhisperConfig 
   try {
     return normalizeWhisperConfig(readJsonFile<unknown>(path));
   } catch (error) {
-    console.warn("[whisper] No se pudo leer whisper.json; usando valores seguros:", error);
+    debugWarn("whisper", "config_load_failed", { error: error instanceof Error ? error.message : String(error) });
     return { ...DEFAULT_WHISPER_CONFIG };
   }
 }
@@ -457,7 +458,7 @@ async function downloadModelInternal(
         try {
           await onProgress?.({ model: modelDefinition, downloadedBytes, totalBytes: metadata.size, percent });
         } catch (error) {
-          console.warn("[whisper] No se pudo enviar el progreso de descarga:", error);
+          debugWarn("whisper", "progress_emit_failed", { error: error instanceof Error ? error.message : String(error) });
         }
       }
     }

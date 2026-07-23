@@ -55,7 +55,7 @@ describe("recuperación de tool calls DSML textuales", () => {
           choices: [{
             finish_reason: "stop",
             message: {
-              content: '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="workspace_delete">\n<｜｜DSML｜｜parameter name="path" string="true">landing-dr-william-hernandez.html</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>',
+              content: '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="workspace_delete">\n<｜｜DSML｜｜parameter name="path" string="true">landing-demo.html</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>',
             },
           }],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -80,7 +80,7 @@ describe("recuperación de tool calls DSML textuales", () => {
 
     expect(executed).toEqual([{
       name: "workspace_delete",
-      args: { path: "landing-dr-william-hernandez.html" },
+      args: { path: "landing-demo.html" },
     }]);
     expect(result.toolsCalled).toEqual(["workspace_delete"]);
     expect(result.content).toBe("✅ Archivo corregido.");

@@ -1,4 +1,5 @@
 export type TransportDeliveryStatus = "sent" | "queued";
+export type TransportMediaKind = "image" | "audio" | "video" | "document" | "sticker" | "other";
 
 export interface TransportOutboundContent {
   text?: string;
@@ -17,12 +18,13 @@ export interface TransportIncomingMessage {
   conversationId: string;
   fromSelf: boolean;
   text: string;
-  mediaKind: "image" | "audio" | null;
+  mediaKind: TransportMediaKind | null;
   caption: string;
   /** Objeto nativo reservado exclusivamente para el adaptador/decodificador. */
   raw: unknown;
   downloadMedia?: () => Promise<Uint8Array>;
   mediaMimeType?: string;
+  mediaFileName?: string;
   mediaSizeBytes?: number;
   mediaDurationSeconds?: number;
 }

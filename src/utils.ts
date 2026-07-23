@@ -15,6 +15,35 @@ export function getAppDir(): string {
   return process.cwd();
 }
 
+
+/** Zona horaria autoritativa del proyecto para logs y timestamps. */
+export function getProjectTimeZone(): string {
+  const fallback = "America/Mexico_City";
+  const configured = process.env.LUNA_TIMEZONE?.trim() || process.env.TZ?.trim();
+  if (!configured) return fallback;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: configured }).format(new Date(0));
+    return configured;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Timestamp legible usando la zona horaria configurada del proyecto. */
+export function formatProjectTimestamp(date = new Date()): string {
+  const timeZone = getProjectTimeZone();
+  return new Intl.DateTimeFormat("es-MX", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 /**
  * Normaliza un número de teléfono al formato E.164 sin el signo +.
  * Elimina espacios, guiones, paréntesis y el prefijo + si existe.

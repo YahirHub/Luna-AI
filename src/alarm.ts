@@ -1,3 +1,4 @@
+import { debugError, debugInfo, debugWarn } from "./debug.ts";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CONTEXTS_DIR } from "./context.ts";
@@ -73,7 +74,7 @@ export class AlarmManager {
         }
       }
     } catch (err) {
-      console.warn("[alarm] Error al cargar alarmas:", err);
+      debugWarn("alarm", "load_failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -96,12 +97,12 @@ export class AlarmManager {
           try {
             writeJsonFileAtomically(path, { alarms });
           } catch (error) {
-            console.warn(`[alarm] No se pudo persistir la migración de ${path}:`, error);
+            debugWarn("alarm", "migration_persist_failed", { path, error: error instanceof Error ? error.message : String(error) });
           }
         }
       }
     } catch (err) {
-      console.warn(`[alarm] Error al leer ${path}:`, err);
+      debugWarn("alarm", "read_failed", { path, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -157,14 +158,7 @@ export class AlarmManager {
 
     this.persistUserMutation(jid, () => this.alarms.push(alarm));
 
-    const daysStr = alarm.daysOfWeek
-      .map((d) => ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][d])
-      .join(",");
-    console.log(
-      `[alarm] Creada alarma #${alarm.id.slice(0, 8)} ` +
-      `para ${jid} a las ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ` +
-      `los días [${daysStr}]`,
-    );
+    debugInfo("alarm", "created", { alarmId: alarm.id, jid, hour, minute, daysOfWeek: alarm.daysOfWeek });
 
     return alarm;
   }
@@ -277,10 +271,7 @@ export class AlarmManager {
             await onDue(alarm);
             this.markFired(alarm.id);
           } catch (err) {
-            console.error(
-              `[alarm] Error al disparar alarma #${alarm.id.slice(0, 8)}:`,
-              err,
-            );
+            debugError("alarm", "delivery_failed", err, { alarmId: alarm.id });
           }
         }
       } finally {
@@ -288,7 +279,7 @@ export class AlarmManager {
       }
     }, 30_000);
 
-    console.log("[alarm] Verificador periódico iniciado (cada 30s)");
+    debugInfo("alarm", "checker_started", { intervalSeconds: 30 });
   }
 
   /** Detiene el verificador periódico. */
@@ -296,7 +287,7 @@ export class AlarmManager {
     if (this.intervalId !== null) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      console.log("[alarm] Verificador periódico detenido");
+      debugInfo("alarm", "checker_stopped");
     }
   }
 }

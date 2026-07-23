@@ -368,7 +368,7 @@ async function emit(handler: SpawnAgentsProgressHandler | undefined, event: Spaw
     await handler?.(event);
   } catch (error) {
     if (process.env.LUNA_TEST_QUIET !== "1") {
-      console.warn("[agents] No se pudo emitir progreso de subagente:", error);
+      debugError("agents.spawn", "progress_emit_failed", error);
     }
   }
 }

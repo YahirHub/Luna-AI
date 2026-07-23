@@ -1,3 +1,4 @@
+import { debugInfo, debugWarn } from "./debug.ts";
 import { join } from "node:path";
 import type { ChatMessage } from "./ai.ts";
 import { getAppDir, getMexicoCityNow } from "./utils.ts";
@@ -97,12 +98,13 @@ export const STATIC_SYSTEM_PROMPT_CONTENT = [
   "- Respeta con prioridad las negaciones del usuario: si dice no crear, no guardar, no enviar o no programar, no ejecutes esa mutación",
   "- No inventes fuentes, URLs, fechas, archivos, estados de tareas ni resultados de herramientas",
   "",
-  "TRANSCRIPCIONES AUTOMÁTICAS:",
-  "- Los mensajes que comienzan con [Transcripción de audio generada por el sistema] pueden contener errores de reconocimiento",
+  "ADJUNTOS Y TRANSCRIPCIONES BAJO DEMANDA:",
+  "- Un bloque [ADJUNTO DISPONIBLE — NO DESCARGADO AUTOMÁTICAMENTE] contiene solo metadata; no implica que conozcas el contenido del archivo",
+  "- Decide si necesitas descargar o inspeccionar el adjunto mediante las tools autorizadas; si no es necesario, responde sin descargarlo",
+  "- Los resultados de attachment_ocr y attachment_transcribe_audio pueden contener errores de reconocimiento",
   "- No inventes nombres, cantidades, fechas, horas, direcciones o acciones ausentes",
-  "- Si una ambigüedad puede cambiar una acción persistente o destructiva, pide una aclaración breve antes de ejecutarla",
-  "- Cuando el usuario corrija o reformule una transcripción, la versión más reciente sustituye a la anterior; no vuelvas a mostrar la antigua",
-  "- Si después de aclarar el usuario dice sí, hazlo, procede o equivalente, ejecuta la intención ya confirmada sin repetir preguntas resueltas",
+  "- Si una ambigüedad en OCR/transcripción puede cambiar una acción persistente o destructiva, pide una aclaración breve antes de ejecutarla",
+  "- Cuando el usuario corrija o reformule una transcripción, la versión más reciente sustituye a la anterior",
   "",
   "ORQUESTACIÓN:",
   "- Los estados autoritativos del sistema y de las tools tienen prioridad sobre tus inferencias",
@@ -255,7 +257,7 @@ export class ContextManager {
         return data;
       }
     } catch (err) {
-      console.warn(`[ctx] Error al leer contexto de ${jid}, creando nuevo:`, err);
+      debugWarn("context", "load_failed_new_context", { jid, error: err instanceof Error ? err.message : String(err) });
     }
 
     this.memoryManager?.init(jid);
@@ -348,7 +350,7 @@ export class ContextManager {
     ctx.messages = [this.makeSystemPrompt()];
     ctx.compaction = undefined;
     this.saveContext(jid);
-    console.log(`[ctx] Conversación reiniciada para ${jid}`);
+    debugInfo("context", "conversation_cleared", { jid });
   }
 
   /**

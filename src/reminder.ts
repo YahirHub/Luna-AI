@@ -1,3 +1,4 @@
+import { debugError, debugInfo, debugWarn } from "./debug.ts";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CONTEXTS_DIR } from "./context.ts";
@@ -73,7 +74,7 @@ export class ReminderManager {
         if (existsSync(path)) this.loadFile(path);
       }
     } catch (err) {
-      console.warn("[reminder] Error al cargar recordatorios:", err);
+      debugWarn("reminder", "load_failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -98,11 +99,11 @@ export class ReminderManager {
         try {
           writeJsonFileAtomically(path, { reminders });
         } catch (error) {
-          console.warn(`[reminder] No se pudo normalizar ${path}:`, error);
+          debugWarn("reminder", "normalize_failed", { path, error: error instanceof Error ? error.message : String(error) });
         }
       }
     } catch (err) {
-      console.warn(`[reminder] Error al leer ${path}:`, err);
+      debugWarn("reminder", "read_failed", { path, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -179,11 +180,7 @@ export class ReminderManager {
 
     this.persistUserMutation(jid, () => this.reminders.push(reminder));
 
-    console.log(
-      `[reminder] Creado recordatorio #${reminder.id.slice(0, 8)} ` +
-      `para ${jid} a las ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ` +
-      `del ${targetDate}`,
-    );
+    debugInfo("reminder", "created", { reminderId: reminder.id, jid, hour, minute, date: targetDate });
 
     return reminder;
   }
@@ -288,10 +285,7 @@ export class ReminderManager {
             await onDue(reminder, this.transport);
             this.markFired(reminder.id);
           } catch (err) {
-            console.error(
-              `[reminder] Error al disparar recordatorio #${reminder.id.slice(0, 8)}:`,
-              err,
-            );
+            debugError("reminder", "delivery_failed", err, { reminderId: reminder.id });
           }
         }
       } finally {
@@ -299,7 +293,7 @@ export class ReminderManager {
       }
     }, 30_000);
 
-    console.log("[reminder] Verificador periódico iniciado (cada 30s)");
+    debugInfo("reminder", "checker_started", { intervalSeconds: 30 });
   }
 
   /** Detiene el verificador periódico. */
@@ -307,7 +301,7 @@ export class ReminderManager {
     if (this.intervalId !== null) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      console.log("[reminder] Verificador periódico detenido");
+      debugInfo("reminder", "checker_stopped");
     }
   }
 }

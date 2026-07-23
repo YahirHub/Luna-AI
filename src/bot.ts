@@ -8,14 +8,9 @@ import {
   isPositiveInteger,
 } from "./commands.ts";
 import type { ParsedCommand } from "./commands.ts";
-import {
-  buildAudioContextText,
-  buildImageContextText,
-  downloadAudioForTranscription,
-  downloadImageForOcr,
-  getMediaCaption,
-  getMediaKind,
-} from "./media.ts";
+import { getMediaKind } from "./media.ts";
+import { AttachmentManager } from "./attachments/attachment-manager.ts";
+import { ATTACHMENT_TOOLS, executeAttachmentTool } from "./attachments/attachment-tools.ts";
 import { MediaProcessorClient } from "./media-processing/client.ts";
 import { loadWhisperConfig } from "./whisper-config.ts";
 import { WhisperSetupManager } from "./whisper-setup.ts";
@@ -229,6 +224,7 @@ const alarmManager = new AlarmManager();
 
 /** Workdir privado y herramientas extendidas por usuario. */
 const workspaceManager = new WorkspaceManager();
+const attachmentManager = new AttachmentManager(workspaceManager);
 const skillManager = new SkillManager();
 const ttsManager = new TtsManager(workspaceManager);
 workspaceManager.ensureGlobalSkillsLinksForExistingUsers();
@@ -287,6 +283,7 @@ const BASE_TOOLS = [
   ...AGENTIC_WORKSPACE_TOOLS,
   ...SKILL_TOOLS,
   ...TTS_TOOLS,
+  ...ATTACHMENT_TOOLS,
   ...PROCESS_TOOLS,
   ...TASKLIST_TOOLS,
   ...GOAL_TOOLS,
@@ -341,6 +338,11 @@ moduleRegistry.bindContextProvider("tts", (message, session) => {
   return `${ttsManager.formatStatus(session.jid)}\n${ttsManager.buildTurnGuidance(session.jid, message)}`;
 });
 
+moduleRegistry.bindContextProvider("attachments", (_message, session) => {
+  if (!session.jid) return "No hay sesión de usuario.";
+  return attachmentManager.buildRuntimeContext(session.jid);
+});
+
 moduleRegistry.bindContextProvider("agents", (_message, _session) => {
   const config = loadAgentConfig();
   return [
@@ -387,6 +389,7 @@ function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
     ...AGENTIC_WORKSPACE_TOOLS,
     ...SKILL_TOOLS,
     ...TTS_TOOLS,
+    ...ATTACHMENT_TOOLS,
     ...PROCESS_TOOLS,
     ...ARTIFACT_TOOLS,
     ...MESSAGING_TOOLS,
@@ -455,6 +458,9 @@ async function executeGoalRuntimeTool(
   if (TTS_TOOLS.some((tool) => tool.function.name === name)) {
     if (!currentTransport) return "Error: no hay transporte activo para enviar audio.";
     return executeTtsTool(name, args, { manager: ttsManager, transport: currentTransport, jid, signal });
+  }
+  if (ATTACHMENT_TOOLS.some((tool) => tool.function.name === name)) {
+    return executeAttachmentTool(name, args, { manager: attachmentManager, media: mediaProcessor, jid });
   }
   if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
     return executeProcessTool(name, args, processManager, jid, goalId);
@@ -892,11 +898,7 @@ async function refreshAvailableModels(): Promise<boolean> {
       }
 
       availableModels = getOpenCodeFreeFallbackModels();
-      console.warn(
-        `[models] No se pudo consultar ${configSnapshot.modelsUrl}; ` +
-        "se usará el catálogo local de OpenCode Free.",
-        error,
-      );
+      debugWarn("models", "catalog_fetch_failed_using_local", { url: configSnapshot.modelsUrl, error: error instanceof Error ? error.message : String(error) });
       return true;
     }
   }
@@ -911,11 +913,7 @@ async function refreshAvailableModels(): Promise<boolean> {
   availableModels = result.models;
 
   if (result.error) {
-    console.warn(
-      `[models] No se pudo consultar ${configSnapshot.modelsUrl}; ` +
-      `se usará el modelo predeterminado "${configSnapshot.defaultModel}".`,
-      result.error,
-    );
+    debugWarn("models", "catalog_fetch_failed_using_default", { url: configSnapshot.modelsUrl, defaultModel: configSnapshot.defaultModel, error: result.error });
   }
 
   return result.usedFallback;
@@ -1023,11 +1021,11 @@ async function onAlarmDue(
         }
       });
     } catch (error) {
-      console.error(`[alarm] La alarma se entregó, pero no pudo agregarse al contexto de ${alarm.jid}:`, error);
+      debugError("alarm", "context_record_failed", error, { jid: alarm.jid, alarmId: alarm.id });
     }
   }
 
-  console.log(`[alarm] Alarma disparada para ${alarm.jid}`);
+  debugInfo("alarm", "delivered", { jid: alarm.jid, alarmId: alarm.id });
 }
 
 /** Callback cuando un recordatorio debe dispararse. */
@@ -1072,14 +1070,11 @@ async function onReminderDue(
         }
       });
     } catch (error) {
-      console.error(
-        `[reminder] El recordatorio se entregó, pero no pudo agregarse al contexto de ${reminder.jid}:`,
-        error,
-      );
+      debugError("reminder", "context_record_failed", error, { jid: reminder.jid, reminderId: reminder.id });
     }
   }
 
-  console.log(`[reminder] Recordatorio disparado para ${reminder.jid}`);
+  debugInfo("reminder", "delivered", { jid: reminder.jid, reminderId: reminder.id });
 }
 
 function isAdminSession(jid: string): boolean {
@@ -2487,7 +2482,7 @@ async function handlePendingAuthAction(
         break;
     }
   } catch (err) {
-    console.error(`[auth] Error en flujo ${action.type}:`, err);
+    debugError("auth", "flow_failed", err, { jid, actionType: action.type });
     await sendWithTyping(
       sock,
       jid,
@@ -2758,7 +2753,7 @@ async function handlePendingProviderSetup(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const step = providerSetupManager.getStep(jid) ?? currentStep;
-    console.warn(`[provider-setup] Entrada inválida en ${step}: ${reason}`);
+    debugWarn("provider-setup", "invalid_input", { step, reason });
     await sendWithTyping(sock, jid, [
       `❌ ${reason}`,
       "",
@@ -3558,9 +3553,25 @@ export async function handleMessage(
     return;
   }
 
-  // ── Procesamiento local de audio e imágenes ────────────────────
+  // ── Adjuntos bajo demanda ───────────────────────────────────────
+  // El transporte entrega únicamente metadata. El archivo real NO se descarga
+  // hasta que el modelo elija attachment_download/attachment_ocr/
+  // attachment_transcribe_audio. Esto evita OCR/Whisper innecesarios y mantiene
+  // limpia la conversación: el detalle operativo vive en --debug.
   if (mediaKind) {
-    await handleMediaMessage(sock, message, remoteJid, mediaKind);
+    if (!llmConfig || !contextManager) {
+      await sendWithTyping(sock, remoteJid, "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.");
+      return;
+    }
+    try {
+      const attachment = attachmentManager.register(remoteJid, message);
+      await handleAiChat(sock, remoteJid, attachmentManager.buildIncomingContext(attachment, text));
+    } catch (error) {
+      debugError("attachments", "registration_failed", error, { jid: remoteJid, mediaKind });
+      await sendWhatsAppMessage(sock, remoteJid, {
+        text: `❌ ${error instanceof Error ? error.message : "No se pudo registrar el archivo."}`,
+      }, { waitForDelivery: false });
+    }
     return;
   }
 
@@ -3916,6 +3927,16 @@ ${supervisorContext}`;
             cm.addMessage(remoteJid, { role: "user", content: persistedSkillMessage });
           }
         }
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (ATTACHMENT_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeAttachmentTool(name, args, {
+          manager: attachmentManager,
+          media: mediaProcessor,
+          jid: remoteJid,
+        });
         await recordToolResult(name, result);
         return result;
       }
@@ -4346,15 +4367,15 @@ ${supervisorContext}`;
     const errorMsg =
       err instanceof Error ? err.message : "Error desconocido";
     if (err instanceof LlmRetriesExhaustedError) {
-      console.error(`[ai] Proveedor LLM no disponible después de ${err.attempts} intento(s): ${err.lastError.message}`);
+      debugError("ai", "provider_unavailable", err, { jid: remoteJid, attempts: err.attempts });
     } else {
-      console.error("[ai] Error en chat:", err);
+      debugError("ai", "chat_failed", err, { jid: remoteJid });
     }
 
     // Detectar error de desbordamiento de contexto y compactar de emergencia
     const isOverflow = /context_length_exceeded|maximum context length|prompt is too long|too many tokens|context.*exceed|request.*too large/i.test(errorMsg);
     if (isOverflow) {
-      console.warn("[compact] Desbordamiento de contexto detectado, compactación de emergencia...");
+      debugWarn("context.compaction", "overflow_detected", { jid: remoteJid });
       try {
         const msgs = cm.getMessages(remoteJid);
         const emergencySplit = selectMessagesForCompaction({
@@ -4393,11 +4414,11 @@ ${supervisorContext}`;
               estimateTokensAccurate(emergencyMessages),
               emergencySplit.messagesToCompact.length,
             );
-            console.log("[compact] Compactación de emergencia aplicada");
+            debugInfo("context.compaction", "emergency_applied", { jid: remoteJid });
           }
         }
       } catch (emergencyErr) {
-        console.error("[compact] Error en compactación de emergencia:", emergencyErr);
+        debugError("context.compaction", "emergency_failed", emergencyErr, { jid: remoteJid });
       }
     }
 
@@ -4421,76 +4442,4 @@ ${supervisorContext}`;
 
 export async function shutdownBotRuntimes(): Promise<void> {
   await ttsManager.runtime.close();
-}
-
-// ─── Media ───────────────────────────────────────────────────────
-
-async function handleMediaMessage(
-  sock: MessagingTransport,
-  message: TransportIncomingMessage,
-  remoteJid: string,
-  mediaKind: "image" | "audio",
-): Promise<void> {
-  if (!llmConfig || !contextManager) {
-    await sendWithTyping(
-      sock,
-      remoteJid,
-      "⚠️ El chat LLM todavía está iniciando. Intenta nuevamente en unos segundos.",
-    );
-    return;
-  }
-
-  const typingSession = await startContinuousTyping(sock, remoteJid);
-
-  try {
-    if (mediaKind === "audio") {
-      await sendWhatsAppMessage(sock, remoteJid, { text: "🎙️ Transcribiendo audio..." }, { waitForDelivery: false });
-      const media = await downloadAudioForTranscription(
-        message,
-        loadWhisperConfig().maxAudioSeconds,
-      );
-      const result = await mediaProcessor.process(
-        "transcribe-audio",
-        media.bytes,
-        media.mimeType,
-      );
-      if (!result.text.trim()) {
-        await sendWhatsAppMessage(sock, remoteJid, { text: "⚠️ No pude identificar voz o texto en el audio." }, { waitForDelivery: false });
-        return;
-      }
-
-      await typingSession.stop();
-      await handleAiChat(sock, remoteJid, buildAudioContextText(result.text));
-      return;
-    }
-
-    await sendWhatsAppMessage(sock, remoteJid, { text: "🖼️ Extrayendo texto de la imagen..." }, { waitForDelivery: false });
-    const media = await downloadImageForOcr(message);
-    const result = await mediaProcessor.process(
-      "ocr-image",
-      media.bytes,
-      media.mimeType,
-    );
-    const caption = getMediaCaption(message);
-    if (!result.text.trim()) {
-      await sendWhatsAppMessage(sock, remoteJid, {
-        text: "⚠️ No encontré texto legible en la imagen. No enviaré una respuesta al asistente sin el resultado del OCR.",
-      }, { waitForDelivery: false });
-      return;
-    }
-
-    await typingSession.stop();
-    await handleAiChat(
-      sock,
-      remoteJid,
-      buildImageContextText(result.text, caption),
-    );
-  } catch (error) {
-    console.error(`[media] Error procesando ${mediaKind}:`, error);
-    await sendWhatsAppMessage(sock, remoteJid, {
-      text: `❌ ${error instanceof Error ? error.message : "No se pudo procesar el archivo."}`,
-    }, { waitForDelivery: false });
-  } finally {
-    await typingSession.stop();
-  }
 }

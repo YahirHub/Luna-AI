@@ -23,6 +23,6 @@ describe("integración Piper Neo adaptativa", () => {
   it("expone modo adaptativo, texto y voz al orquestador", () => {
     expect(moduleSource).toContain('{ name: "tts_set_mode" }');
     expect(moduleSource).toContain("always: true");
-    expect(moduleSource).toContain("Modo adaptativo");
+    expect(moduleSource.toLowerCase()).toContain("modo adaptativo");
   });
 });

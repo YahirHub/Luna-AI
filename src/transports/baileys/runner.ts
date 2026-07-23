@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import pino from "pino";
 import QRCode from "qrcode";
 import { isWhatsAppGroupJid } from "../../whatsapp-message-guard.ts";
+import { debugError } from "../../debug.ts";
 
 const AUTH_DIR = join(getAppDir(), "persistent", "auth_info_baileys");
 
@@ -83,7 +84,7 @@ export async function connectWhatsApp(
 
   sock.ev.on("creds.update", () => {
     void saveCreds().catch((err: unknown) => {
-      console.error("[auth] Error al guardar credenciales:", err);
+      debugError("transport.baileys", "credentials_save_failed", err);
     });
   });
 
@@ -96,7 +97,7 @@ export async function connectWhatsApp(
     for (const message of m.messages) {
       if (isWhatsAppGroupJid(message.key.remoteJid)) continue;
       handleMessage(transport, transport.toIncoming(message)).catch((err: unknown) => {
-        console.error("[msg] Error al procesar mensaje:", err);
+        debugError("transport.baileys", "message_handler_failed", err, { messageId: message.key.id, conversationId: message.key.remoteJid });
       });
     }
   });
@@ -159,10 +160,7 @@ export async function connectWhatsApp(
           );
         } catch (err: unknown) {
           pairingCodeRequested = false;
-          console.error(
-            "\n❌ Error al solicitar código de vinculación:",
-            err instanceof Error ? err.message : String(err),
-          );
+          debugError("transport.baileys", "pairing_code_failed", err);
         }
       }
 
@@ -236,7 +234,7 @@ export async function runWithReconnect(
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
       }
     } catch (err) {
-      console.error(`\n❌ Error de conexión:`, err);
+      debugError("transport.baileys", "connection_failed", err);
       console.log(
         `${dim("↻")} Reintentando en ${(backoffMs / 1000).toFixed(0)}s...`,
       );

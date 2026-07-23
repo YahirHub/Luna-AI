@@ -1,4 +1,4 @@
-import type { TransportIncomingMessage } from "./transports/types.ts";
+import type { TransportIncomingMessage, TransportMediaKind } from "./transports/types.ts";
 
 const IMAGE_MIME_TYPES = ["image/jpeg", "image/png"] as const;
 const AUDIO_MIME_PREFIXES = ["audio/ogg", "audio/opus"] as const;
@@ -36,7 +36,7 @@ export function isWithinSizeLimit(sizeBytes: number, maxBytes = MAX_IMAGE_SIZE_B
   return Number.isFinite(sizeBytes) && sizeBytes >= 0 && sizeBytes <= maxBytes;
 }
 
-export function getMediaKind(message: TransportIncomingMessage): "image" | "audio" | null { return message.mediaKind; }
+export function getMediaKind(message: TransportIncomingMessage): TransportMediaKind | null { return message.mediaKind; }
 
 
 export function getMediaCaption(message: TransportIncomingMessage): string { return message.caption.trim(); }

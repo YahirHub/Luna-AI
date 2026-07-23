@@ -1,3 +1,4 @@
+import { debugWarn } from "./debug.ts";
 import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
 import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
@@ -49,7 +50,7 @@ export function loadAgentConfig(path = getAgentConfigPath()): AgentConfig {
   try {
     return normalizeAgentConfig(readJsonFile<unknown>(path));
   } catch (error) {
-    console.warn("[config] No se pudo leer agent-config.json; usando valores seguros:", error);
+    debugWarn("agent-config", "load_failed_using_defaults", { error: error instanceof Error ? error.message : String(error) });
     return { ...DEFAULT_AGENT_CONFIG };
   }
 }

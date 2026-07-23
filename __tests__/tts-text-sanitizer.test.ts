@@ -31,8 +31,9 @@ describe("filtro de texto para Piper Neo", () => {
     expect(detectTtsTurnPreference("Explícame cómo funciona")).toBeNull();
   });
 
-  it("reconoce el marcador autoritativo de una entrada de audio", () => {
+  it("reconoce una entrada de audio transcrita o todavía pendiente como adjunto", () => {
     expect(isTranscribedAudioMessage("[Transcripción de audio generada por el sistema]\nHola Luna")).toBe(true);
+    expect(isTranscribedAudioMessage("[ADJUNTO DISPONIBLE — NO DESCARGADO AUTOMÁTICAMENTE]\nID: ATT-12345678\nTipo: audio\nMIME: audio/ogg")).toBe(true);
     expect(isTranscribedAudioMessage("Hola Luna")).toBe(false);
   });
 });

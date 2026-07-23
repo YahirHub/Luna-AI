@@ -1,3 +1,4 @@
+import { debugWarn } from "./debug.ts";
 import { join } from "node:path";
 import { getAppDir } from "./utils.ts";
 import { readJsonFile, writeJsonFileAtomically } from "./storage.ts";
@@ -84,7 +85,7 @@ export class AuthManager {
       this.sessions = new Map(restoredSessions.map(([jid, username]) => [jid, normalizeUsername(username)]));
       if (rawSessions.some(([jid]) => isWhatsAppGroupJid(jid))) this.save();
     } catch (err) {
-      console.warn("[auth] Error al cargar usuarios, comenzando de cero:", err);
+      debugWarn("auth", "users_load_failed", { error: err instanceof Error ? err.message : String(err) });
       this.users = [];
       this.sessions = new Map();
     }

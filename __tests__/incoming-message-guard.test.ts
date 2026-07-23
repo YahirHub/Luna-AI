@@ -7,10 +7,11 @@ describe("mensajes entrantes sin contenido", () => {
     expect(source).toContain("if (!mediaKind && !text.trim())");
   });
 
-  it("no continúa al chat AI cuando el OCR no entrega texto", async () => {
+  it("permite que un adjunto llegue al orquestador sin OCR automático", async () => {
     const source = await Bun.file(new URL("../src/bot.ts", import.meta.url)).text();
-    const warning = "No enviaré una respuesta al asistente sin el resultado del OCR.";
 
-    expect(source).toContain(warning);
+    expect(source).toContain("attachmentManager.register(remoteJid, message)");
+    expect(source).toContain("attachmentManager.buildIncomingContext(attachment, text)");
+    expect(source).not.toContain("No enviaré una respuesta al asistente sin el resultado del OCR.");
   });
 });

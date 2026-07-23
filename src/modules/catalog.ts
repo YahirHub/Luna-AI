@@ -15,9 +15,10 @@ import { GOALS_MODULE } from "./goals/module.ts";
 import { PROCESSES_MODULE } from "./processes/module.ts";
 import { SKILLS_MODULE } from "./skills/module.ts";
 import { TTS_MODULE } from "./tts/module.ts";
+import { ATTACHMENTS_MODULE } from "./attachments/module.ts";
 
 export const moduleRegistry = new ModuleRegistry();
 for (const module of [
   CORE_MODULE, CONTEXT_MODULE, MEMORY_MODULE, AUTOMATION_MODULE, WORKSPACE_MODULE, ARTIFACTS_MODULE,
-  PROVIDER_MODULE, SEARCH_MODULE, BROWSER_MODULE, AGENTS_MODULE, GOALS_MODULE, PROCESSES_MODULE, SKILLS_MODULE, TTS_MODULE, WHISPER_MODULE, ADMIN_MODULE,
+  PROVIDER_MODULE, SEARCH_MODULE, BROWSER_MODULE, AGENTS_MODULE, GOALS_MODULE, PROCESSES_MODULE, SKILLS_MODULE, TTS_MODULE, ATTACHMENTS_MODULE, WHISPER_MODULE, ADMIN_MODULE,
 ]) moduleRegistry.register(module);

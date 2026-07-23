@@ -45,6 +45,24 @@ function numericValue(value: unknown): number | undefined {
   return undefined;
 }
 
+
+function unwrapMessageRecord(value: unknown): Record<string, Record<string, unknown> | undefined> {
+  let current = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const wrapperKeys = ["ephemeralMessage", "viewOnceMessage", "viewOnceMessageV2", "viewOnceMessageV2Extension", "documentWithCaptionMessage"];
+  for (let depth = 0; depth < 5; depth += 1) {
+    let next: Record<string, unknown> | null = null;
+    for (const key of wrapperKeys) {
+      const wrapper = current[key];
+      if (!wrapper || typeof wrapper !== "object") continue;
+      const nested = (wrapper as Record<string, unknown>).message;
+      if (nested && typeof nested === "object") { next = nested as Record<string, unknown>; break; }
+    }
+    if (!next) break;
+    current = next;
+  }
+  return current as Record<string, Record<string, unknown> | undefined>;
+}
+
 export class BaileysTransport implements MessagingTransport {
   readonly id = "baileys";
   private socket: WASocket | null = null;
@@ -65,20 +83,43 @@ export class BaileysTransport implements MessagingTransport {
 
   toIncoming(raw: WAMessage): TransportIncomingMessage {
     const message = raw.message;
-    const text = message?.conversation ?? message?.extendedTextMessage?.text ?? message?.imageMessage?.caption ?? "";
-    const mediaKind = message?.imageMessage ? "image" : message?.audioMessage ? "audio" : null;
-    const mediaNode = message?.imageMessage ?? message?.audioMessage;
+    const messageRecord = unwrapMessageRecord(message);
+    const candidates: Array<[TransportIncomingMessage["mediaKind"], Record<string, unknown> | undefined]> = [
+      ["image", messageRecord.imageMessage],
+      ["audio", messageRecord.audioMessage],
+      ["video", messageRecord.videoMessage ?? messageRecord.ptvMessage],
+      ["document", messageRecord.documentMessage],
+      ["sticker", messageRecord.stickerMessage],
+    ];
+    let selected = candidates.find(([, node]) => Boolean(node));
+    if (!selected) {
+      const knownKeys = new Set(["imageMessage", "audioMessage", "videoMessage", "ptvMessage", "documentMessage", "stickerMessage"]);
+      const fallback = Object.entries(messageRecord).find(([key, node]) => {
+        if (knownKeys.has(key) || !node || typeof node !== "object") return false;
+        return typeof node.mimetype === "string" || node.fileLength !== undefined;
+      });
+      if (fallback) selected = ["other", fallback[1]];
+    }
+    const mediaKind = selected?.[0] ?? null;
+    const mediaNode = selected?.[1];
+    const caption = typeof mediaNode?.caption === "string" ? mediaNode.caption : "";
+    const rootText = typeof (messageRecord.conversation as unknown) === "string" ? messageRecord.conversation as unknown as string : "";
+    const extendedText = messageRecord.extendedTextMessage && typeof messageRecord.extendedTextMessage.text === "string" ? messageRecord.extendedTextMessage.text : "";
+    const text = rootText || extendedText || caption;
     const size = numericValue(mediaNode?.fileLength);
-    const seconds = numericValue(message?.audioMessage?.seconds);
+    const seconds = numericValue(mediaNode?.seconds);
+    const fileName = typeof mediaNode?.fileName === "string" ? mediaNode.fileName : undefined;
+    const mimeType = typeof mediaNode?.mimetype === "string" ? mediaNode.mimetype : undefined;
     return {
       id: raw.key.id ?? crypto.randomUUID(),
       conversationId: raw.key.remoteJid ?? "",
       fromSelf: raw.key.fromMe === true,
       text,
       mediaKind,
-      caption: message?.imageMessage?.caption ?? "",
+      caption,
       raw,
-      mediaMimeType: mediaNode?.mimetype ?? undefined,
+      mediaMimeType: mimeType,
+      mediaFileName: fileName,
       mediaSizeBytes: Number.isFinite(size) ? size : undefined,
       mediaDurationSeconds: Number.isFinite(seconds) ? seconds : undefined,
       downloadMedia: mediaKind ? async () => new Uint8Array(await downloadMediaMessage(raw, "buffer", {})) : undefined,

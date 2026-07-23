@@ -22,6 +22,8 @@ describe("frontera de transportes", () => {
 
   it("usa message_send y mensajes entrantes neutrales en el núcleo", () => {
     expect(readFileSync(join(root, "src", "tools", "messaging-tools.ts"), "utf8")).toContain('name: "message_send"');
-    expect(readFileSync(join(root, "src", "media.ts"), "utf8")).toContain('import type { TransportIncomingMessage }');
+    const media = readFileSync(join(root, "src", "media.ts"), "utf8");
+    expect(media).toContain("TransportIncomingMessage");
+    expect(media).toContain('from "./transports/types.ts"');
   });
 });

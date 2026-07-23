@@ -24,7 +24,7 @@ Bot de WhatsApp en TypeScript y Bun con contexto persistente, memoria por usuari
 - Configuración del agente y de los motores desde WhatsApp, sin editar archivos manualmente.
 - Configuración global de Whisper desde `!setup-whisper` o mediante lenguaje natural para administradores, con catálogo oficial, descarga de modelos y parámetros persistentes.
 - Transcripción local de notas de voz OGG/Opus mediante el ejecutable oficial `whisper-cli` de whisper.cpp.
-- OCR local de imágenes JPEG/PNG en español mediante Tesseract WASM.
+- Adjuntos bajo demanda: Luna recibe primero metadata y el modelo decide si descarga el archivo, aplica OCR local a una imagen o transcribe una nota de voz.
 - Luna compila como binario standalone y se distribuye junto a sus runtimes multimedia y de navegador. La imagen Docker añade Bash, Python 3, Node.js/npm, Git y Bubblewrap para ejecución agéntica confinada al workdir.
 - Administrador, usuarios, sesiones y bloqueo de cuentas, también gestionables por lenguaje natural con herramientas restringidas a administradores.
 - Persistencia atómica para archivos JSON críticos.
@@ -226,9 +226,13 @@ Cuando el usuario pregunta “¿qué fechas tengo guardadas?” Luna debe consul
 
 Las notas están aisladas por JID, usan escritura atómica, tienen límites de tamaño y bloquean traversal y enlaces simbólicos hacia fuera del vault. La bóveda rechaza contraseñas, API keys, tokens y OTP; esos datos pertenecen al almacén cifrado de credenciales, no a archivos Markdown.
 
+## Logging y depuración
+
+Los logs operativos DEBUG/INFO/WARN están ocultos por defecto. Ejecuta Luna con `--debug` para mostrarlos en consola con colores y timestamps usando `LUNA_TIMEZONE`, `TZ` o, por defecto, `America/Mexico_City`. Los errores se guardan siempre en `persistent/logs/errors.log`, aunque `--debug` esté apagado. El archivo se rota automáticamente y conserva como máximo aproximadamente 1 MiB de errores recientes. `LUNA_ERROR_LOG_MAX_BYTES` y `LUNA_ERROR_LOG_PATH` permiten ajustar esos valores.
+
 ## Procesamiento multimedia local
 
-Luna procesa localmente las notas de voz y el texto de imágenes. El bot principal es un ejecutable Bun standalone; la transcripción se delega al `whisper-cli` oficial distribuido junto a Luna y el OCR continúa dentro del subproceso multimedia. No se envían archivos a APIs de transcripción u OCR.
+Luna no descarga ni procesa automáticamente los adjuntos. El modelo recibe metadata opaca del archivo y decide si necesita `attachment_download`, `attachment_ocr` o `attachment_transcribe_audio`. Cuando elige OCR/Whisper, el procesamiento sigue siendo local: la transcripción se delega al `whisper-cli` oficial distribuido junto a Luna y el OCR continúa dentro del subproceso multimedia. No se envían archivos a APIs de transcripción u OCR.
 
 ### Notas de voz
 
@@ -238,7 +242,7 @@ Luna procesa localmente las notas de voz y el texto de imágenes. El bot princip
 - El administrador puede usar `!setup-whisper` para descargar otro modelo oficial, activarlo globalmente y ajustar idioma, traducción, hilos, best-of, beam size, temperatura, umbral sin voz, duración máxima y timeout.
 - Los modelos descargados se guardan en `persistent/whisper/models/`, por lo que sobreviven reinicios y actualizaciones del contenedor.
 - El audio se mezcla a mono y se reduce de 48 kHz a 16 kHz antes de transcribir.
-- WhatsApp muestra únicamente `🎙️ Transcribiendo audio...`; al terminar, la transcripción se entrega al asistente marcada como texto generado por el sistema.
+- La transcripción de audio es silenciosa en el chat. Con `--debug`, el log coloreado muestra inicio/fin de descarga y transcripción; sin `--debug` esos eventos operativos no se imprimen.
 
 
 ### Configuración global de Whisper
@@ -288,7 +292,7 @@ Las transcripciones se marcan como texto generado por el sistema. El prompt de L
 - Formatos aceptados: JPEG y PNG.
 - Límite: 10 MB, 16 megapíxeles y 20 000 caracteres extraídos.
 - Tesseract WASM y el modelo rápido de español se incorporan al binario.
-- El texto extraído y el pie de imagen se entregan al asistente con marcadores que conservan su origen.
+- Las imágenes tampoco se transcriben automáticamente. Si el modelo necesita leer texto, llama `attachment_ocr`; el resultado se entrega únicamente al modelo como resultado de herramienta y no genera un mensaje de progreso visible.
 
 El procesamiento pesado corre en un subproceso persistente y serializado para no bloquear la conexión de WhatsApp. El subproceso ejecuta `whisper-cli` para audio y Tesseract WASM para OCR. Luna mantiene el estado `escribiendo` durante el trabajo y admite como máximo tres solicitudes pendientes para evitar saturar memoria.
 

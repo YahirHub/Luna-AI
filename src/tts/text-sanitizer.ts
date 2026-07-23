@@ -102,5 +102,6 @@ export function detectTtsTurnPreference(message: string): TtsTurnPreference {
 }
 
 export function isTranscribedAudioMessage(message: string): boolean {
-  return message.includes("[Transcripción de audio generada por el sistema]");
+  return message.includes("[Transcripción de audio generada por el sistema]")
+    || /\[ADJUNTO DISPONIBLE[^\]]*\][\s\S]{0,220}Tipo:\s*audio/iu.test(message);
 }

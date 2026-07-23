@@ -1,3 +1,4 @@
+import { debugError, debugWarn } from "./debug.ts";
 import type { MessagingTransport } from "./transports/types.ts";
 import { chatCompletion } from "./ai.ts";
 import type { ChatMessage } from "./ai.ts";
@@ -84,15 +85,10 @@ export async function deliverScheduledMessage(
       const generated = await chatCompletion(messages, options.model, options.llmConfig, 3, undefined, { jid: options.jid, purpose: "scheduled-message" });
       body = selectScheduledMessageBody(generated, fallbackBody, options.title);
     } catch (err) {
-      console.error(
-        `[${options.logLabel}] Falló la generación con LLM; usando mensaje persistido:`,
-        err,
-      );
+      debugError("scheduled-message", "llm_generation_failed", err, { label: options.logLabel, jid: options.jid });
     }
   } else {
-    console.warn(
-      `[${options.logLabel}] LLM no disponible; enviando mensaje persistido.`,
-    );
+    debugWarn("scheduled-message", "llm_unavailable_using_fallback", { label: options.logLabel, jid: options.jid });
   }
 
   const deliveredText = `${options.title}\n\n${body}`;

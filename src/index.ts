@@ -3,6 +3,7 @@ import * as readline from "node:readline";
 import { createTransportRunner, resolveTransportId } from "./transports/factory.ts";
 import type { AuthMode } from "./transports/baileys/runner.ts";
 import { handleMessage, initLlm, shutdownBotRuntimes } from "./bot.ts";
+import { debugError, isDebugEnabled } from "./debug.ts";
 import {
   getLlmConfigPath,
   loadLlmConfigIfPresent,
@@ -191,6 +192,9 @@ async function bootstrap(): Promise<void> {
 
 bootstrap().catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
-  console.error(`❌ Error fatal: ${message}`);
+  debugError("runtime", "fatal", err);
+  // Un fallo fatal debe seguir siendo visible incluso sin --debug; el detalle
+  // completo queda en persistent/logs/errors.log.
+  if (!isDebugEnabled()) process.stderr.write(`❌ Error fatal: ${message}\n`);
   process.exit(1);
 });
