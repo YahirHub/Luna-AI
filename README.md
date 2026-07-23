@@ -76,13 +76,57 @@ workspace_glob / workspace_search / workspace_read_files
 workspace_apply_patch / workspace_runtime_status / workspace_exec
 ```
 
-`workspace_exec` acepta Bash, Python, Node.js o Bun únicamente si el runtime existe y está pensado para comandos **finitos** como tests, builds o scripts. En Linux exige un sandbox Bubblewrap operativo y monta como escritura solo el workdir del JID; el resto del filesystem de runtime se expone en solo lectura y `/tmp` es efímero. Si el kernel o el contenedor bloquea los namespaces necesarios, Luna falla de forma segura y no ejecuta código sin aislamiento. En plataformas no Linux la ejecución no aislada permanece deshabilitada salvo habilitación explícita del operador.
+`workspace_exec` acepta Bash, PowerShell, Python, Node.js o Bun únicamente si el runtime existe y está pensado para comandos **finitos** como tests, builds o scripts. En Linux exige un sandbox Bubblewrap operativo y monta como escritura solo el workdir del JID; el resto del filesystem de runtime se expone en solo lectura y `/tmp` es efímero. Si el kernel o el contenedor bloquea los namespaces necesarios, Luna falla de forma segura y no ejecuta código sin aislamiento. En plataformas no Linux la ejecución no aislada permanece deshabilitada salvo habilitación explícita del operador.
 
 Los bots, servidores y servicios que deben permanecer vivos usan el administrador de **procesos persistentes** (`process_start`, `process_list`, `process_status`, `process_logs`, `process_stop`, `process_restart`). Cada proceso obtiene un ID `P-…`, conserva estado por usuario y captura `stdout`, `stderr` y un log combinado cronológico fuera del workdir editable. Luna puede iniciar un bot, comprobar sus logs, corregir el código, reiniciarlo y detenerlo en un turno posterior. Un PID no se considera evidencia suficiente de funcionamiento: el agente debe consultar estado/logs cuando necesite verificar que el servicio arrancó correctamente. Las peticiones directas “detén el bot”, “reinicia el proceso” y consultas puras de logs se resuelven antes del lock conversacional cuando el proceso puede identificarse sin ambigüedad.
 
 Mientras un goal está activo, preguntas como “¿cómo va el goal?” se responden directamente desde GoalRuntime/TaskRuntime sin esperar al LLM. El estado incluye fase, tool actual, actividad, subagentes de investigación activos y procesos persistentes asociados. Las correcciones de requisitos pueden enviarse con `/goal instruccion ...`; el GoalRuntime las incorpora al objetivo efectivo y una instrucción que llegue durante una iteración impide que el verifier cierre el objetivo anterior hasta procesarla.
 
 Para tareas como crear un bot a partir de documentación externa, el flujo esperado es: planificar en la tasklist → investigar lo desconocido con subagentes → conservar el handoff/documentación necesaria → implementar en el workdir → ejecutar tests/builds → corregir → verificar. Para recursos visuales cuando el modelo no tiene visión, `browser-agent` puede consultar páginas `File:` de Wikimedia Commons y conservar la descripción textual, URL de archivo, autor/licencia y fuente antes de reutilizar o descargar el recurso.
+
+## Skills globales compatibles con Claude / Agent Skills
+
+Luna soporta skills globales basadas en `SKILL.md`. Las skills incluidas con el proyecto viven en `assets/skills/`; al iniciar, `SkillManager` copia de forma **aditiva** los archivos que falten a `persistent/skills/`. Una personalización existente en `persistent/skills/` nunca se sobrescribe durante una actualización. Al arrancar, Luna repara el enlace global de todos los workdirs existentes y los usuarios nuevos lo reciben al crear/abrir su workdir. También puedes añadir una skill nueva directamente a `persistent/skills/<nombre>/` y aparecerá en el catálogo sin recompilar el binario.
+
+```text
+assets/skills/                     # defaults incluidos en el release
+        ↓ seed aditivo
+persistent/skills/                 # fuente global persistente y autoritativa
+        ↑ solo lectura
+persistent/contexts/<jid>/workdir/.skills  # symlink/junction por usuario
+```
+
+El formato portable sigue Agent Skills (`SKILL.md`, `scripts/`, `references/`, `assets/` y archivos adicionales) y acepta las extensiones actuales de Claude Code: `description`, `when_to_use`, argumentos posicionales/nombrados, `disable-model-invocation`, `user-invocable`, `allowed-tools`, `disallowed-tools`, `model`, `effort`, `context: fork`, `agent`, `hooks`, `paths`, `shell`, sustituciones `$ARGUMENTS`/`$0`/`$name` y variables `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}` y `${CLAUDE_PROJECT_DIR}`. También reconoce contexto dinámico `!`command`` y bloques ````!``. Los campos `license`, `compatibility` y `metadata` del estándar abierto se conservan y exponen al agente.
+
+`/skills` lista las skills instaladas. Una skill `user-invocable` puede ejecutarse como `/nombre argumentos`; las skills sin `disable-model-invocation` se anuncian por metadata al orquestador para que las cargue bajo demanda con `skill_load`. El cuerpo completo no se añade al prompt hasta que la skill se necesita. `context: fork` en una invocación directa se traduce a un GoalRuntime aislado para no bloquear la conversación.
+
+Herramientas disponibles para el orquestador y GoalRuntime:
+
+```text
+skill_list
+skill_load
+skill_read_resource
+skill_copy_resource
+skill_run_script
+```
+
+`skill_run_script` copia primero la skill a `.skill-runtime/<skill>/<run-id>` dentro del workdir privado y ejecuta el helper desde esa copia. La skill global permanece de solo lectura. Se detectan Bash, PowerShell, Python, Node.js y Bun cuando existen; scripts `.py`, `.ps1`, `.js`/`.mjs`/`.cjs`, `.ts` y ejecutables auxiliares se enrutan al runtime apropiado. En Linux la ejecución pasa por Bubblewrap: `/workspace` es el único árbol escribible y `persistent/skills` se monta en `/skills` como solo lectura. Los subagentes `api-search` y `browser-agent` pueden descubrir/cargar/leer skills para seguir metodologías o referencias, pero no ejecutar scripts arbitrarios de skills; esa ejecución se delega al orquestador o GoalRuntime.
+
+Las declaraciones `allowed-tools` nunca amplían los permisos de una sesión ni evitan las fronteras de autenticación/ModuleRegistry. `disallowed-tools`, `hooks`, `model`, `effort`, `paths` y `agent` se conservan como metadata de compatibilidad y orientación; las políticas autoritativas de Luna y el sandbox prevalecen sobre cualquier skill instalada. Esto permite reutilizar skills de Claude sin permitir que una skill descargada se auto-otorgue privilegios sobre otros usuarios o sobre `persistent/`.
+
+Estructura recomendada:
+
+```text
+assets/skills/mi-skill/
+├── SKILL.md
+├── scripts/
+│   ├── validate.py
+│   └── helper.js
+├── references/
+│   └── REFERENCE.md
+└── assets/
+    └── template.json
+```
 
 ## Requisitos
 
@@ -815,6 +859,7 @@ src/
 │   └── search-tools.ts      # web_search, uso exclusivo del subagente
 ├── workspace/               # Workdir aislado, filesystem agéntico y ejecución sandboxed
 ├── goals/                   # GoalRuntime, tasklist autoritativa, verifier y tools de control
+├── skills/                  # Agent Skills/Claude Skills, catálogo, recursos y ejecución de helpers
 ├── modules/                 # Registro modular de comandos, tools, prompts, permisos y contexto dinámico
 ├── orchestration/           # Persistencia y cancelación de tareas
 ├── artifacts/               # PDF, ZIP y gitzip
@@ -849,6 +894,7 @@ Salida local esperada:
 ```text
 dist/
 ├── luna-ai.exe              # Windows; en Linux se llama luna-ai
+├── skills/                  # skills bundled que sembrarán persistent/skills
 └── runtime/
     ├── whisper/             # whisper-cli, bibliotecas, modelo y manifest.json
     ├── ffmpeg/              # ffmpeg administrado para audio
@@ -896,6 +942,12 @@ El workflow de GitHub genera paquetes para Linux amd64, Linux arm64 y Windows am
 33. Iniciar un bot Node con `process_start`, comprobar `process_status` y `process_logs`, provocar un error, corregirlo y usar `process_restart`; después detenerlo desde lenguaje natural y verificar que el proceso termina.
 34. Con un `/goal` activo, preguntar “¿cómo va el goal?” mientras un browser-agent/api-search sigue investigando; la respuesta debe ser inmediata y mencionar el subagente. Enviar una corrección de requisitos durante esa iteración y confirmar que el verifier no complete el goal hasta procesarla.
 33. Pedir un recurso visual con fuente y comprobar que `browser-agent` use una página `File:` de Wikimedia Commons, conserve descripción/autor/licencia/URL y no invente contenido visual.
+
+35. Añadir `assets/skills/demo/SKILL.md`, iniciar Luna con un `persistent/` vacío y comprobar que aparezca en `persistent/skills/demo` y en `/skills`; editar luego la copia persistente, reiniciar y verificar que el seed bundled no la sobrescriba.
+36. Añadir una skill directamente en `persistent/skills/` sin recompilar y comprobar que el siguiente `/skills`/`skill_list` la detecte.
+37. Invocar una skill con `$ARGUMENTS`, argumentos nombrados y `${CLAUDE_SKILL_DIR}`; comprobar sustituciones y que `disable-model-invocation: true` no aparezca en el catálogo automático.
+38. Ejecutar un helper de skill con `skill_run_script` y verificar que corra desde `.skill-runtime/` dentro del sandbox, que `/skills` sea de solo lectura y que una tool normal de workspace no pueda escribir en `.skills` ni `.skill-runtime`.
+39. Pedir a un `/goal` una tarea cubierta por una skill y comprobar que use `skill_list`/`skill_load`; pedir a `browser-agent`/`api-search` una metodología cubierta por una skill y verificar que puedan leerla pero no ejecutar `skill_run_script`.
 
 ## Estado actual de ejecución delegada
 
@@ -947,3 +999,31 @@ Cada módulo puede aportar dos niveles de contexto al orquestador:
 2. Instrucciones detalladas y contexto dinámico solo cuando el mensaje activa ese módulo.
 
 Por ejemplo, una búsqueda rápida activa `search`; una auditoría de un dominio activa `browser`; una petición de memoria activa `memory`. El system prompt estático conserva únicamente personalidad, seguridad, veracidad, reglas generales de orquestación y formato, reduciendo el crecimiento del prompt global.
+
+## Piper Neo y respuestas por voz
+
+Luna puede sintetizar localmente sus respuestas mediante Piper Neo. El runtime de Piper Neo se prepara por plataforma/arquitectura durante `bun run build` y se distribuye dentro de `runtime/piper-neo/`. Los modelos oficiales de Piper se descargan bajo demanda y se conservan en `persistent/piper/models/official/`.
+
+Comandos principales:
+
+```text
+/voz estado
+/voz auto
+/voz voz
+/voz texto
+/voz idiomas
+/voces es_MX
+/voz usar es_MX-claude-high
+/voz importar ruta/modelo.neo [nombre]
+/voz modelos
+/voz usar-neo <nombre>
+/voz probar Hola, esta es una prueba
+```
+
+El modo predeterminado es **adaptativo**. El orquestador decide por turno entre texto y voz teniendo en cuenta la modalidad de entrada y la intención del usuario. Una nota de voz entrante favorece una respuesta hablada, mientras que código, tablas, comandos, rutas o contenido que deba copiarse favorecen texto. Una petición explícita como “respóndeme por texto” o “mándamelo en audio” siempre tiene prioridad para ese turno.
+
+Antes de enviar texto a Piper Neo, Luna usa un filtro exclusivo de TTS que elimina Markdown, bloques de código, URLs, HTML, tablas visuales, emojis y símbolos decorativos. El texto original de la conversación no se modifica: solo la copia destinada a síntesis se convierte en una frase pronunciable.
+
+El catálogo incluido proviene de `rhasspy/piper-voices/voices.json` y puede filtrarse por locale, familia, nombre nativo/inglés o país. Las voces ONNX oficiales se validan por tamaño y MD5 antes de activarse. Los modelos personalizados `.neo` se importan desde el workdir y se guardan de forma privada en `persistent/contexts/<jid>/tts/models/`.
+
+Piper Neo se utiliza preferentemente como servidor API local. También se puede apuntar a un servidor externo con `PIPER_NEO_BASE_URL`, o personalizar los argumentos del servidor con `PIPER_NEO_SERVER_ARGS`. Luna convierte el WAV sintetizado a OGG/Opus mediante su runtime FFmpeg para enviarlo como nota de voz de WhatsApp; si esa conversión falla, conserva WAV como fallback.

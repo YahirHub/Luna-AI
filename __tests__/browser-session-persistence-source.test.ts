@@ -11,7 +11,10 @@ describe("persistencia de navegador y cancelación jerárquica", () => {
   it("aísla el perfil por ejecución y fusiona el estado persistente por usuario", () => {
     expect(browserRuntime).toContain('"persistent", "browser", "users"');
     expect(browserRuntime).toContain('"session-state.json"');
-    expect(browserRuntime).toContain("AGENT_BROWSER_PROFILE: this.profileDir");
+    expect(browserRuntime).toContain("AGENT_BROWSER_PROFILE: this.currentProfileDir()");
+    expect(browserRuntime).toContain("runtimeDirName(options.runId)");
+    expect(browserRuntime).toContain("attempt-${this.recoveryCounter}");
+    expect(browserRuntime).toContain("persistent_state_export_missing");
     expect(browserRuntime).toContain("AGENT_BROWSER_SESSION_NAME: this.restoreName");
     expect(browserRuntime).toContain("AGENT_BROWSER_STATE");
     expect(browserRuntime).toContain('["state", "save", this.runStateFile, "--json"]');

@@ -2,6 +2,7 @@ import type { ToolDefinition } from "../ai.ts";
 import type { AgentConfig } from "../agent-config.ts";
 import type { LlmConfig } from "../llm-config.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
+import type { SkillManager } from "../skills/skill-manager.ts";
 import type { TaskRuntime } from "../orchestration/task-runtime.ts";
 import { debugError, debugInfo } from "../debug.ts";
 import { MAIN_SPAWNABLE_AGENTS, normalizeAgentType, validateSpawnableAgent } from "./agent-registry.ts";
@@ -241,6 +242,7 @@ export interface SpawnAgentsDependencies {
   llmConfig: LlmConfig;
   agentConfig: AgentConfig;
   workspace: WorkspaceManager;
+  skills?: SkillManager;
   tasks: TaskRuntime;
   onProgress?: SpawnAgentsProgressHandler;
   agentRunner?: typeof runAgent;
@@ -510,6 +512,7 @@ async function runSpawnTask(
           parentSignal: tracked.signal,
           browserExecution,
           workspace: dependencies.workspace,
+          skills: dependencies.skills,
           jid: dependencies.jid,
           agentDir,
           onEvent: async (event) => {

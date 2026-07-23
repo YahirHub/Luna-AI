@@ -47,4 +47,20 @@ describe("tasklist interna de goals", () => {
       expect(updated.items.find((item) => item.id === "T1")?.status).toBe("pending");
     } finally { f.cleanup(); }
   });
+
+  it("deduplica huecos del verifier aunque cambie el prefijo o el ID del paso", () => {
+    const f = fixture();
+    try {
+      const list = f.tasklists.create("user", "Trabajo", ["Probar descarga real con YouTube.js"]);
+      const first = f.tasklists.addItems("user", list.id, [
+        "Resolver verificación: T4: Probar descarga real con YouTube.js [pending]",
+      ]);
+      expect(first.items).toHaveLength(1);
+      const second = f.tasklists.addItems("user", list.id, [
+        "Resolver verificación: Probar descarga real con YouTube.js",
+      ]);
+      expect(second.items).toHaveLength(1);
+    } finally { f.cleanup(); }
+  });
+
 });

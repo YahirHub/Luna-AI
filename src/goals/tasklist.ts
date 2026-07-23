@@ -43,6 +43,28 @@ function normalizeStatus(value: unknown): TasklistItemStatus | null {
     : null;
 }
 
+function normalizeTaskMeaning(value: string): string {
+  return cleanText(value, 1200)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/^resolver verificacion:\s*/i, "")
+    .replace(/^t\d+\s*:\s*/i, "")
+    .replace(/\[(?:pending|in_progress|blocked|completed|skipped)\]/gi, "")
+    .replace(/[^a-z0-9._/@+-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function taskMeaningSimilarity(a: string, b: string): number {
+  const left = new Set(normalizeTaskMeaning(a).split(/\s+/).filter(Boolean));
+  const right = new Set(normalizeTaskMeaning(b).split(/\s+/).filter(Boolean));
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  for (const token of left) if (right.has(token)) intersection += 1;
+  return intersection / Math.max(left.size, right.size);
+}
+
 export class TasklistManager {
   constructor(private readonly workspace: WorkspaceManager) {}
 
@@ -141,7 +163,11 @@ export class TasklistManager {
     for (const raw of texts.slice(0, 40)) {
       const text = cleanText(raw);
       if (!text) continue;
-      if (record.items.some((item) => item.text.toLowerCase() === text.toLowerCase() && item.status !== "skipped")) continue;
+      const meaning = normalizeTaskMeaning(text);
+      if (record.items.some((item) => item.status !== "skipped" && (
+        normalizeTaskMeaning(item.text) === meaning
+        || taskMeaningSimilarity(item.text, text) >= 0.88
+      ))) continue;
       record.items.push({ id: `T${next++}`, text, status: "pending", updatedAt: now });
     }
     record.updatedAt = now;

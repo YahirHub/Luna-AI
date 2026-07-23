@@ -1,0 +1,45 @@
+import type { LunaModule } from "../types.ts";
+
+export const TTS_MODULE: LunaModule = {
+  id: "tts",
+  name: "Piper Neo TTS",
+  description: "Síntesis de voz local con Piper Neo, selección de voces por idioma y modelos globales .onnx/.neo",
+  category: "media",
+  access: "authenticated",
+  scope: "hybrid",
+  commands: [
+    { name: "voz", description: "Gestiona Piper Neo: estado, activar/desactivar, seleccionar/importar y probar voz" },
+    { name: "voces", description: "Lista las voces disponibles, opcionalmente filtradas por idioma" },
+  ],
+  tools: [
+    { name: "tts_status" },
+    { name: "tts_list_voices" },
+    { name: "tts_select_voice" },
+    { name: "tts_list_manual_models" },
+    { name: "tts_select_manual_model" },
+    { name: "tts_list_custom_models" },
+    { name: "tts_select_custom_model" },
+    { name: "tts_import_neo" },
+    { name: "tts_set_mode" },
+    { name: "tts_set_enabled" },
+    { name: "tts_speak" },
+  ],
+  prompt: {
+    summary: "Convierte respuestas a audio local con Piper Neo, administra voces oficiales y descubre modelos globales .onnx/.neo colocados manualmente.",
+    keywords: ["voz", "audio", "tts", "piper", "habla", "pronuncia", "escuchar", "modelo neo", ".neo", ".onnx", "modelo manual"],
+    always: true,
+    patterns: [/\b(?:mand|envi|respond).{0,30}(?:audio|voz)\b/iu, /\b(?:voces?|tts|piper)\b/iu],
+    instructions: [
+      "La política de salida del turno aparece en el contexto [tts]. Respeta primero cualquier petición explícita del usuario de texto o voz.",
+      "En modo adaptativo decide por turno: una entrada de audio favorece una respuesta de voz si es natural, mientras código, tablas, rutas, comandos o contenido que deba copiarse favorecen texto.",
+      "Si decides responder solo con voz, prepara el contenido final y usa tts_speak como última acción del turno. No envíes además la misma respuesta por texto salvo que el usuario pida ambos formatos.",
+      "tts_speak limpia Markdown, bloques de código, URLs, emojis y decoraciones antes de sintetizar; nunca intentes verbalizar sintaxis visual manualmente.",
+      "Para preferencias persistentes usa tts_set_mode: adaptive, voice o text. No cambies el modo persistente por una petición que claramente aplica solo al turno actual.",
+      "Para elegir voces por lenguaje natural, usa tts_list_voices con el idioma/locale solicitado y después tts_select_voice. No inventes IDs de voz.",
+      "tts_select_voice descarga de Hugging Face los archivos ONNX oficiales solo cuando hacen falta; los modelos descargados se comparten en persistent/piper.",
+      "Los modelos globales colocados manualmente se descubren recursivamente bajo persistent/piper/models (excepto official/): .neo o pares .onnx + .onnx.json. Usa tts_list_manual_models y tts_select_manual_model.",
+      "Los archivos .neo importados desde el workdir con tts_import_neo permanecen privados para ese usuario y son independientes de los modelos manuales globales.",
+      "Cambiar el modo persistente de respuesta es una preferencia del usuario. Solo usa tts_set_mode cuando el usuario pida explícitamente cambiar cómo responder en adelante.",
+    ],
+  },
+};

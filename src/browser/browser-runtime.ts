@@ -58,6 +58,11 @@ function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 20);
 }
 
+function runtimeDirName(value: string): string {
+  const readable = safeName(value).slice(0, 54);
+  return `${readable}-${stableHash(value).slice(0, 12)}`;
+}
+
 export interface BrowserExecutionOptions {
   jid: string;
   runId: string;
@@ -315,7 +320,7 @@ export class BrowserAgentExecution {
   private readonly runtimeCwd: string;
   private readonly runRuntimeDir: string;
   private readonly persistentHome: string;
-  private readonly profileDir: string;
+  private readonly profileRootDir: string;
   private readonly stateFile: string;
   private readonly runStateFile: string;
   private readonly profileLeaseKey: string;
@@ -343,21 +348,25 @@ export class BrowserAgentExecution {
     this.session = this.sessionBase;
     this.restoreName = this.sessionBase;
     this.binary = resolveAgentBrowserBinary();
-    this.runRuntimeDir = join(getAppDir(), "persistent", "browser", "runs", safeName(options.runId));
+    this.runRuntimeDir = join(getAppDir(), "persistent", "browser", "runs", runtimeDirName(options.runId));
     this.runtimeCwd = this.runRuntimeDir;
     // Cada agente obtiene HOME y perfil propios. Compartir el directorio físico de
     // Chrome impedía la concurrencia real y hacía que un agente esperando datos
     // bloqueara a todos los demás. El estado autenticado portable se comparte
     // mediante stateFile y solo su escritura final se serializa.
     this.persistentHome = join(this.runRuntimeDir, "home");
-    this.profileDir = join(this.runRuntimeDir, "profile");
+    this.profileRootDir = join(this.runRuntimeDir, "profiles");
     this.stateFile = join(getAppDir(), "persistent", "browser", "users", userState, "session-state.json");
     this.runStateFile = join(this.runRuntimeDir, "session-state-export.json");
     this.profileLeaseKey = `${userState}:state-save`;
     mkdirSync(this.runtimeCwd, { recursive: true });
     mkdirSync(this.persistentHome, { recursive: true });
-    mkdirSync(this.profileDir, { recursive: true });
+    mkdirSync(this.currentProfileDir(), { recursive: true });
     mkdirSync(dirname(this.stateFile), { recursive: true });
+  }
+
+  private currentProfileDir(): string {
+    return join(this.profileRootDir, `attempt-${this.recoveryCounter}`);
   }
 
   private env(): Record<string, string> {
@@ -381,7 +390,7 @@ export class BrowserAgentExecution {
       // Así close --all e idle-timeout solo afectan a este agente.
       AGENT_BROWSER_NAMESPACE: `luna-run-${stableHash(`${this.options.jid}:${this.options.runId}`)}`,
       // Perfil físico aislado para permitir varios browser-web en paralelo.
-      AGENT_BROWSER_PROFILE: this.profileDir,
+      AGENT_BROWSER_PROFILE: this.currentProfileDir(),
       ...(existsSync(this.stateFile) ? { AGENT_BROWSER_STATE: this.stateFile } : {}),
       AGENT_BROWSER_CONTENT_BOUNDARIES: "true",
       AGENT_BROWSER_MAX_OUTPUT: "500000",
@@ -389,9 +398,10 @@ export class BrowserAgentExecution {
       // devuelve un error controlado antes de que el cliente quede esperando.
       AGENT_BROWSER_DEFAULT_TIMEOUT: process.env.AGENT_BROWSER_DEFAULT_TIMEOUT?.trim() || "20000",
       // El daemon pertenece exclusivamente a esta ejecución. Un keepalive interno
-      // evita que expire mientras el agente sigue razonando o espera datos del usuario;
-      // al finalizar dejamos de enviar keepalives y el daemon aislado se apaga solo.
-      AGENT_BROWSER_IDLE_TIMEOUT_MS: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS?.trim() || "10000",
+      // evita que expire mientras el agente sigue razonando o espera datos del usuario.
+      // El margen de 60 s evita que el daemon desaparezca entre la última tool y
+      // finalize(), obligando a Chrome a reabrir un profile que aún conserva lock.
+      AGENT_BROWSER_IDLE_TIMEOUT_MS: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS?.trim() || "60000",
       AGENT_BROWSER_ENCRYPTION_KEY: encryptionKey(),
       // El HOME temporal evita que daemons/sesiones concurrentes se pisen. Se
       // elimina al terminar; cookies/localStorage duraderos viven en stateFile.
@@ -577,6 +587,7 @@ export class BrowserAgentExecution {
   private rotateSessionAfterHang(): void {
     this.recoveryCounter += 1;
     this.session = `${this.sessionBase}-recovery-${this.recoveryCounter}`;
+    mkdirSync(this.currentProfileDir(), { recursive: true });
     debugWarn("browser-agent.runtime", "session_rotated", {
       runId: this.options.runId,
       session: this.session,
@@ -776,13 +787,15 @@ ${snapshot}
     return await this.finalizePromise;
   }
 
-  private mergePersistentState(): void {
+  private mergePersistentState(): boolean {
+    if (!existsSync(this.runStateFile)) return false;
     const incoming = JSON.parse(readFileSync(this.runStateFile, "utf8")) as unknown;
     let base: unknown = {};
     if (existsSync(this.stateFile)) {
       try { base = JSON.parse(readFileSync(this.stateFile, "utf8")) as unknown; } catch { base = {}; }
     }
     writeJsonFileAtomically(this.stateFile, mergeBrowserStorageStates(base, incoming));
+    return true;
   }
 
   private async finalizeInternal(): Promise<void> {
@@ -796,15 +809,32 @@ ${snapshot}
         // con un daemon ya inaccesible y mantener bloqueados agentes en cola.
         if (!this.cancelled) {
           try {
+            try { rmSync(this.runStateFile, { force: true }); } catch { /* best effort */ }
             await this.run(["state", "save", this.runStateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
-            this.releaseProfileLease = await acquireBrowserProfileLease(this.profileLeaseKey, controller.signal);
-            this.mergePersistentState();
-            debugInfo("browser-agent.runtime", "persistent_state_saved", {
-              runId: this.options.runId,
-              session: this.session,
-              stateFile: this.stateFile,
-              strategy: "merge",
-            });
+            if (!existsSync(this.runStateFile)) {
+              // Algunas versiones del daemon pueden responder antes de que el archivo
+              // quede visible. Un único reintento corto evita ENOENT sin convertir el
+              // cierre en un bucle de recuperación.
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              await this.run(["state", "save", this.runStateFile, "--json"], controller.signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.close);
+            }
+            if (!existsSync(this.runStateFile)) {
+              debugWarn("browser-agent.runtime", "persistent_state_export_missing", {
+                runId: this.options.runId,
+                session: this.session,
+                exportPath: this.runStateFile,
+              });
+            } else {
+              this.releaseProfileLease = await acquireBrowserProfileLease(this.profileLeaseKey, controller.signal);
+              if (this.mergePersistentState()) {
+                debugInfo("browser-agent.runtime", "persistent_state_saved", {
+                  runId: this.options.runId,
+                  session: this.session,
+                  stateFile: this.stateFile,
+                  strategy: "merge",
+                });
+              }
+            }
           } catch (error) {
             debugWarn("browser-agent.runtime", "persistent_state_save_failed", {
               runId: this.options.runId,

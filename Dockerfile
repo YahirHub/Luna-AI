@@ -13,6 +13,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libgomp1 \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
@@ -57,11 +58,13 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
 COPY --from=build /app/dist/luna-ai /data/bot
 COPY --from=build /app/dist/runtime /data/runtime
+COPY --from=build /app/dist/skills /data/skills
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh /data/bot \
-    && chmod -R a+rX /data/runtime \
+    && chmod -R a+rX /data/runtime /data/skills \
     && find /data/runtime/whisper -type f -name whisper-cli -exec chmod +x {} + \
-    && find /data/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
+    && find /data/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} + \
+    && find /data/runtime/piper-neo -type f \( -name "piper*" -o -name "*piper*" \) -exec chmod +x {} +
 
 WORKDIR /data
 ENTRYPOINT ["/entrypoint.sh"]

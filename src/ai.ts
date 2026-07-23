@@ -94,6 +94,109 @@ function emitLlmUsage(event: LlmUsageEvent): void {
   }
 }
 
+// DeepSeek V4 puede devolver tool calls DSML dentro de message.content en lugar
+// de usar el campo OpenAI tool_calls. Normalizamos las variantes oficiales
+// <｜DSML｜...>, la variante observada <｜｜DSML｜｜...> y <||DSML||...>.
+function normalizeDsmlMarkup(value: string): string {
+  return value.replace(
+    /<(\/?)[\s]*(?:(?:\|){1,2}|(?:｜){1,2})[\s]*DSML[\s]*(?:(?:\|){1,2}|(?:｜){1,2})[\s]*([a-z_]+)/giu,
+    "<$1DSML_$2",
+  );
+}
+
+function decodeDsmlText(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '\"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function parseDsmlParameterValue(rawValue: string, stringMode: boolean): unknown {
+  const decoded = decodeDsmlText(rawValue).trim();
+  if (stringMode) return decoded;
+  if (!decoded) return null;
+  try {
+    return JSON.parse(decoded);
+  } catch {
+    // Una respuesta DSML defectuosa no debe tumbar todo el turno. Conservamos
+    // el valor para que el ejecutor/schema pueda devolver un error útil al modelo.
+    return decoded;
+  }
+}
+
+interface TextualToolCallRecovery {
+  content: string;
+  toolCalls: ToolCall[];
+  rejectedToolNames: string[];
+  detected: boolean;
+}
+
+/**
+ * Recupera tool calls DSML serializados como texto por algunos providers/modelos.
+ * Solo transforma nombres presentes en `tools`; escribir DSML nunca eleva permisos.
+ */
+function recoverTextualDsmlToolCalls(
+  content: string,
+  tools: ToolDefinition[] | undefined,
+): TextualToolCallRecovery {
+  const normalized = normalizeDsmlMarkup(content);
+  const allowed = new Set((tools ?? []).map((tool) => tool.function.name));
+  const toolCalls: ToolCall[] = [];
+  const rejectedToolNames: string[] = [];
+  let detected = false;
+  let ordinal = 0;
+
+  const stripped = normalized.replace(
+    /<DSML_tool_calls\b[^>]*>([\s\S]*?)<\/DSML_tool_calls>/giu,
+    (_block, inner: string) => {
+      detected = true;
+      const invokeRegex = /<DSML_invoke\b([^>]*)>([\s\S]*?)<\/DSML_invoke>/giu;
+      let invokeMatch: RegExpExecArray | null;
+      while ((invokeMatch = invokeRegex.exec(inner)) !== null) {
+        const attrs = invokeMatch[1] ?? "";
+        const body = invokeMatch[2] ?? "";
+        const name = /\bname\s*=\s*["']([^"']+)["']/iu.exec(attrs)?.[1]?.trim() ?? "";
+        if (!name) continue;
+        if (!allowed.has(name)) {
+          rejectedToolNames.push(name);
+          continue;
+        }
+
+        const args: Record<string, unknown> = {};
+        const paramRegex = /<DSML_parameter\b([^>]*)>([\s\S]*?)<\/DSML_parameter>/giu;
+        let paramMatch: RegExpExecArray | null;
+        while ((paramMatch = paramRegex.exec(body)) !== null) {
+          const paramAttrs = paramMatch[1] ?? "";
+          const paramName = /\bname\s*=\s*["']([^"']+)["']/iu.exec(paramAttrs)?.[1]?.trim() ?? "";
+          if (!paramName) continue;
+          const stringAttr = /\bstring\s*=\s*["'](true|false)["']/iu.exec(paramAttrs)?.[1]?.toLowerCase();
+          args[paramName] = parseDsmlParameterValue(paramMatch[2] ?? "", stringAttr !== "false");
+        }
+
+        ordinal += 1;
+        toolCalls.push({
+          id: `call_dsml_${Date.now()}_${ordinal}`,
+          type: "function",
+          function: {
+            name,
+            arguments: JSON.stringify(args),
+          },
+        });
+      }
+      return "";
+    },
+  );
+
+  // Si el provider dejó tokens de fin propios después del bloque, tampoco deben
+  // filtrarse al usuario. No tocamos texto normal fuera del protocolo.
+  const cleaned = stripped
+    .replace(/<(?:(?:\|){1,2}|(?:｜){1,2})end[^>]*>/giu, "")
+    .trim();
+
+  return { content: cleaned, toolCalls, rejectedToolNames, detected };
+}
 
 
 class HttpStatusError extends Error {
@@ -272,8 +375,30 @@ async function rawChatRequest(
         throw new Error("La API no devolvió choices en la respuesta");
       }
 
-      const content = choice.message?.content ?? null;
-      const toolCalls = choice.message?.tool_calls;
+      const providerContent = choice.message?.content ?? null;
+      let toolCalls = choice.message?.tool_calls;
+      let content = providerContent;
+
+      if (providerContent?.trim()) {
+        const recovered = recoverTextualDsmlToolCalls(providerContent, body.tools);
+        if (recovered.detected) {
+          // Siempre retiramos el protocolo textual del content. Si el provider ya
+          // entregó tool_calls estructurados, esos tienen prioridad para evitar
+          // ejecutar dos veces la misma mutación.
+          content = recovered.content || null;
+          if ((!toolCalls || toolCalls.length === 0) && recovered.toolCalls.length > 0) {
+            toolCalls = recovered.toolCalls;
+          }
+          debugWarn("ai.tools", "textual_dsml_detected", {
+            recovered: recovered.toolCalls.map((call) => call.function.name),
+            rejected: recovered.rejectedToolNames,
+            structuredToolCalls: choice.message?.tool_calls?.length ?? 0,
+            residualChars: recovered.content.length,
+            model: body.model,
+          });
+        }
+      }
+
       if ((!toolCalls || toolCalls.length === 0) && !content?.trim()) {
         throw new Error("La API devolvió una respuesta vacía sin tool calls");
       }

@@ -7,9 +7,11 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { platform } from "node:os";
 import { sanitizePathSegment, writeJsonFileAtomically, writeTextFileAtomically } from "../storage.ts";
 import { getAppDir } from "../utils.ts";
 
@@ -30,6 +32,14 @@ interface ArtifactFile {
 }
 
 const RESERVED_ROOT_WORKDIR_FILES = new Set(["tasks.json", "artifacts.json"]);
+const RESERVED_ROOT_WORKDIR_PREFIXES = new Set([".skills", ".skill-runtime"]);
+
+function isReservedWorkdirPath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  if (RESERVED_ROOT_WORKDIR_FILES.has(normalized)) return true;
+  const first = normalized.split("/")[0] ?? normalized;
+  return RESERVED_ROOT_WORKDIR_PREFIXES.has(first);
+}
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   ".pdf": "application/pdf",
@@ -86,13 +96,58 @@ export class WorkspaceManager {
     return path;
   }
 
+  getGlobalSkillsDir(): string {
+    const path = join(dirname(this.contextsDir), "skills");
+    mkdirSync(path, { recursive: true });
+    return path;
+  }
+
+  private ensureGlobalSkillsLink(workdir: string): void {
+    const linkPath = join(workdir, ".skills");
+    const target = this.getGlobalSkillsDir();
+    try {
+      const info = lstatSync(linkPath);
+      if (!info.isSymbolicLink()) {
+        // Nunca reemplazamos una ruta real existente: podría contener datos del usuario.
+        return;
+      }
+      try {
+        if (realpathSync(linkPath) === realpathSync(target)) return;
+      } catch { /* enlace roto o apuntando a un destino desaparecido */ }
+      rmSync(linkPath, { force: true });
+    } catch {
+      // ENOENT: se crea a continuación.
+    }
+    try {
+      const linkTarget = platform() === "win32" ? target : relative(workdir, target);
+      symlinkSync(linkTarget, linkPath, platform() === "win32" ? "junction" : "dir");
+    } catch {
+      // Algunos Windows/FS no permiten enlaces. El SkillManager sigue funcionando
+      // directamente desde persistent/skills; el enlace es una comodidad global.
+    }
+  }
+
   getWorkdir(jid: string): string {
     const path = join(this.getUserDir(jid), "workdir");
     mkdirSync(path, { recursive: true });
     for (const folder of ["tasks", "inbox", "exports"]) {
       mkdirSync(join(path, folder), { recursive: true });
     }
+    this.ensureGlobalSkillsLink(path);
     return path;
+  }
+
+  /** Repara al arrancar el alias global de skills en workdirs ya existentes. */
+  ensureGlobalSkillsLinksForExistingUsers(): number {
+    let linked = 0;
+    for (const entry of readdirSync(this.contextsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const workdir = join(this.contextsDir, entry.name, "workdir");
+      if (!existsSync(workdir)) continue;
+      this.ensureGlobalSkillsLink(workdir);
+      linked += 1;
+    }
+    return linked;
   }
 
   createTask(jid: string, label = "task"): { taskId: string; path: string } {
@@ -107,8 +162,8 @@ export class WorkspaceManager {
   resolvePath(jid: string, inputPath: string, options: { mustExist?: boolean; allowDirectory?: boolean } = {}): string {
     const root = this.getWorkdir(jid);
     const normalized = normalizeRelativePath(inputPath);
-    if (RESERVED_ROOT_WORKDIR_FILES.has(normalized.toLowerCase())) {
-      throw new Error(`"${normalized}" es metadato interno de Luna y no puede manipularse mediante herramientas de workspace.`);
+    if (isReservedWorkdirPath(normalized)) {
+      throw new Error(`"${normalized}" es una ruta interna/de solo lectura de Luna y no puede manipularse mediante herramientas de workspace.`);
     }
     const candidate = resolve(root, normalized);
     if (!isInside(root, candidate)) {
@@ -146,6 +201,26 @@ export class WorkspaceManager {
       }
     }
 
+    return candidate;
+  }
+
+  /**
+   * Resuelve una ruta interna administrada por Luna dentro del workdir. Solo
+   * subsistemas confiables (skills/runtime) deben usarla; las tools públicas
+   * siguen pasando por resolvePath y no pueden tocar estos prefijos.
+   */
+  resolveInternalPath(jid: string, inputPath: string, options: { mustExist?: boolean; allowDirectory?: boolean } = {}): string {
+    const root = this.getWorkdir(jid);
+    const normalized = normalizeRelativePath(inputPath);
+    const candidate = resolve(root, normalized);
+    if (!isInside(root, candidate)) throw new Error("La ruta interna solicitada está fuera del workdir.");
+    if (options.mustExist && !existsSync(candidate)) throw new Error(`No existe "${normalized}" en el workdir.`);
+    if (existsSync(candidate)) {
+      const realRoot = realpathSync(root);
+      const realCandidate = realpathSync(candidate);
+      if (!isInside(realRoot, realCandidate)) throw new Error("La ruta interna resuelve fuera del workdir mediante un enlace simbólico.");
+      if (!options.allowDirectory && statSync(candidate).isDirectory()) throw new Error("La operación interna requiere un archivo, no una carpeta.");
+    }
     return candidate;
   }
 
@@ -225,8 +300,12 @@ export class WorkspaceManager {
     const entries: string[] = [];
     const walk = (current: string): void => {
       if (entries.length >= Math.max(1, maxEntries)) return;
-      const info = statSync(current);
+      const info = lstatSync(current);
       const relativePath = this.relativePath(jid, current);
+      if (info.isSymbolicLink()) {
+        entries.push(`🔗 ${relativePath} — enlace global/de solo lectura`);
+        return;
+      }
       if (!info.isDirectory()) {
         entries.push(`📄 ${relativePath} — ${info.size} bytes`);
         return;
@@ -260,6 +339,7 @@ export class WorkspaceManager {
     for (const folder of ["tasks", "inbox", "exports"]) {
       mkdirSync(join(workdir, folder), { recursive: true });
     }
+    this.ensureGlobalSkillsLink(workdir);
   }
 
   registerArtifact(

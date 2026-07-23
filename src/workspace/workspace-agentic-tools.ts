@@ -136,7 +136,7 @@ export const AGENTIC_WORKSPACE_TOOLS: ToolDefinition[] = [
       parameters: {
         type: "object",
         properties: {
-          runtime: { type: "string", enum: ["bash", "python", "node", "bun"] },
+          runtime: { type: "string", enum: ["bash", "python", "node", "bun", "powershell"] },
           code: { type: "string" },
           cwd: { type: "string", description: "Carpeta relativa dentro del workdir; por defecto '.'." },
           args: { type: "array", maxItems: 40, items: { type: "string" } },
@@ -361,7 +361,7 @@ export async function executeAgenticWorkspaceTool(
       manager.resolvePath(jid, cwd, { mustExist: true, allowDirectory: true });
       const extraArgs = Array.isArray(args.args) ? args.args.filter((value): value is string => typeof value === "string").slice(0, 40) : [];
       const timeoutSeconds = typeof args.timeout_seconds === "number" ? Math.max(1, Math.min(900, Math.trunc(args.timeout_seconds))) : 120;
-      return await executeSandboxedCode({ manager, jid, runtime: runtime as "bash" | "python" | "node" | "bun", code, cwd, args: extraArgs, timeoutSeconds, signal });
+      return await executeSandboxedCode({ manager, jid, runtime: runtime as "bash" | "python" | "node" | "bun" | "powershell", code, cwd, args: extraArgs, timeoutSeconds, signal });
     }
     return `Error: herramienta agentica desconocida "${name}".`;
   } catch (error) {

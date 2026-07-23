@@ -57,15 +57,20 @@ jobs:
           mkdir -p release/luna-ai-linux-amd64
           cp dist/luna-ai release/luna-ai-linux-amd64/luna-ai
           cp -R dist/runtime release/luna-ai-linux-amd64/runtime
+          cp -R dist/skills release/luna-ai-linux-amd64/skills
           cp README.md release/luna-ai-linux-amd64/README.md
           chmod +x release/luna-ai-linux-amd64/luna-ai
           find release/luna-ai-linux-amd64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
           find release/luna-ai-linux-amd64/runtime/ffmpeg -type f -name ffmpeg -exec chmod +x {} +
           find release/luna-ai-linux-amd64/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
+          find release/luna-ai-linux-amd64/runtime/piper-neo -type f -iname "*piper*" -exec chmod +x {} +
           test -f release/luna-ai-linux-amd64/runtime/whisper/system-libs/libgomp.so.1
           test -f release/luna-ai-linux-amd64/runtime/ffmpeg/ffmpeg
           test -f release/luna-ai-linux-amd64/runtime/ffmpeg/manifest.json
           test -f release/luna-ai-linux-amd64/runtime/agent-browser/agent-browser
+          test -f release/luna-ai-linux-amd64/runtime/piper-neo/manifest.json
+          test -f release/luna-ai-linux-amd64/runtime/piper-neo/voices.json
+          test -f release/luna-ai-linux-amd64/skills/README.md
           tar -czf release/luna-ai-linux-amd64.tar.gz -C release luna-ai-linux-amd64
 
       - uses: actions/upload-artifact@v4
@@ -129,15 +134,20 @@ jobs:
           mkdir -p release/luna-ai-linux-arm64
           cp dist/luna-ai release/luna-ai-linux-arm64/luna-ai
           cp -R dist/runtime release/luna-ai-linux-arm64/runtime
+          cp -R dist/skills release/luna-ai-linux-arm64/skills
           cp README.md release/luna-ai-linux-arm64/README.md
           chmod +x release/luna-ai-linux-arm64/luna-ai
           find release/luna-ai-linux-arm64/runtime/whisper -type f -name whisper-cli -exec chmod +x {} +
           find release/luna-ai-linux-arm64/runtime/ffmpeg -type f -name ffmpeg -exec chmod +x {} +
           find release/luna-ai-linux-arm64/runtime/agent-browser -type f -name agent-browser -exec chmod +x {} +
+          find release/luna-ai-linux-arm64/runtime/piper-neo -type f -iname "*piper*" -exec chmod +x {} +
           test -f release/luna-ai-linux-arm64/runtime/whisper/system-libs/libgomp.so.1
           test -f release/luna-ai-linux-arm64/runtime/ffmpeg/ffmpeg
           test -f release/luna-ai-linux-arm64/runtime/ffmpeg/manifest.json
           test -f release/luna-ai-linux-arm64/runtime/agent-browser/agent-browser
+          test -f release/luna-ai-linux-arm64/runtime/piper-neo/manifest.json
+          test -f release/luna-ai-linux-arm64/runtime/piper-neo/voices.json
+          test -f release/luna-ai-linux-arm64/skills/README.md
           tar -czf release/luna-ai-linux-arm64.tar.gz -C release luna-ai-linux-arm64
 
       - uses: actions/upload-artifact@v4
@@ -171,10 +181,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path release/luna-ai-windows-amd64 | Out-Null
           Copy-Item dist/luna-ai.exe release/luna-ai-windows-amd64/luna-ai.exe
           Copy-Item dist/runtime release/luna-ai-windows-amd64/runtime -Recurse
+          Copy-Item dist/skills release/luna-ai-windows-amd64/skills -Recurse
           Copy-Item README.md release/luna-ai-windows-amd64/README.md
           if (-not (Test-Path release/luna-ai-windows-amd64/runtime/ffmpeg/ffmpeg.exe)) { throw "Falta FFmpeg en el runtime Windows" }
           if (-not (Test-Path release/luna-ai-windows-amd64/runtime/ffmpeg/manifest.json)) { throw "Falta manifest de FFmpeg" }
           if (-not (Test-Path release/luna-ai-windows-amd64/runtime/agent-browser/agent-browser.exe)) { throw "Falta agent-browser en el runtime Windows" }
+          if (-not (Test-Path release/luna-ai-windows-amd64/runtime/piper-neo/manifest.json)) { throw "Falta manifest de Piper Neo" }
+          if (-not (Test-Path release/luna-ai-windows-amd64/runtime/piper-neo/voices.json)) { throw "Falta catálogo de voces de Piper" }
+          if (-not (Test-Path release/luna-ai-windows-amd64/skills/README.md)) { throw "Faltan skills globales en el paquete Windows" }
           Compress-Archive -Path release/luna-ai-windows-amd64 -DestinationPath release/luna-ai-windows-amd64.zip -Force
 
       - uses: actions/upload-artifact@v4

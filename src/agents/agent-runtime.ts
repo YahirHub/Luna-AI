@@ -8,6 +8,8 @@ import { runSearchWithRetry } from "../search/search-coordinator.ts";
 import { BROWSER_AGENT_TOOLS } from "../browser/browser-tools.ts";
 import type { BrowserAgentExecution } from "../browser/browser-runtime.ts";
 import { AGENT_WORKSPACE_TOOLS, executeAgentWorkspaceTool } from "../workspace/agent-workspace-tools.ts";
+import { SKILL_TOOLS, executeSkillTool } from "../skills/skill-tools.ts";
+import type { SkillManager } from "../skills/skill-manager.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
 import { getMexicoCityNow } from "../utils.ts";
 import { agentLogData, withAgentExecutionContext, type AgentBackend } from "./execution-context.ts";
@@ -23,6 +25,8 @@ const TOOL_BINDINGS = new Map<string, Omit<AgentToolBinding, "execute">>([
   ["read_url", { definition: READ_URL_TOOL }],
   ...BROWSER_AGENT_TOOLS.map((definition) => [definition.function.name, { definition }] as const),
   ...AGENT_WORKSPACE_TOOLS.map((definition) => [definition.function.name, { definition }] as const),
+  ...SKILL_TOOLS.filter((definition) => ["skill_list", "skill_load", "skill_read_resource"].includes(definition.function.name))
+    .map((definition) => [definition.function.name, { definition }] as const),
 ]);
 
 function childAbortController(parentSignal: AbortSignal | undefined, timeoutMs: number): {
@@ -99,6 +103,7 @@ export interface RunAgentOptions {
   workspace?: WorkspaceManager;
   jid?: string;
   agentDir?: string;
+  skills?: SkillManager;
 }
 
 async function runAgentInternal(options: RunAgentOptions): Promise<SpawnAgentReport> {
@@ -163,6 +168,12 @@ async function runAgentInternal(options: RunAgentOptions): Promise<SpawnAgentRep
             toolResult = await options.browserExecution.executeTool(name, args, signal);
           } else if (name.startsWith("agent_workspace_") && options.workspace && options.jid && options.agentDir) {
             toolResult = await executeAgentWorkspaceTool(name, args, options.workspace, options.jid, options.agentDir);
+          } else if (name.startsWith("skill_") && options.skills && options.workspace && options.jid) {
+            toolResult = await executeSkillTool(name, args, options.skills, options.workspace, options.jid, signal, {
+              executeDynamicCommands: false,
+              allowScripts: false,
+              destinationPrefix: options.agentDir,
+            });
           } else {
             toolResult = `Error: la herramienta "${name}" no está permitida para ${options.definition.id}.`;
           }

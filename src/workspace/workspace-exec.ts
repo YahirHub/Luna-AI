@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { platform } from "node:os";
 import type { WorkspaceManager } from "./workspace-manager.ts";
 
-export type AgenticRuntime = "bash" | "python" | "node" | "bun";
+export type AgenticRuntime = "bash" | "python" | "node" | "bun" | "powershell";
 
 export interface RuntimeState {
   runtime: AgenticRuntime;
@@ -42,12 +42,14 @@ export function getRuntimeStatus(force = false): RuntimeState[] {
         ["python", ["python.exe", "python3.exe", "python", "python3"]],
         ["node", ["node.exe", "node"]],
         ["bun", ["bun.exe", "bun"]],
+        ["powershell", ["pwsh.exe", "powershell.exe", "pwsh", "powershell"]],
       ]
     : [
         ["bash", ["bash"]],
         ["python", ["python3", "python"]],
         ["node", ["node"]],
         ["bun", ["bun"]],
+        ["powershell", ["pwsh", "powershell"]],
       ];
   const states = candidates.map(([runtime, names]) => {
     const executable = findExecutable(names);
@@ -151,7 +153,7 @@ function addReadOnlyPath(args: string[], source: string, destination = source): 
   args.push("--ro-bind", source, destination);
 }
 
-export function buildBubblewrapArgs(workdir: string, cwdRelative: string, executable: string, runtimeArgs: string[]): string[] {
+export function buildBubblewrapArgs(workdir: string, cwdRelative: string, executable: string, runtimeArgs: string[], extraEnv: Record<string, string> = {}): string[] {
   const args = [
     "--die-with-parent",
     "--new-session",
@@ -162,6 +164,7 @@ export function buildBubblewrapArgs(workdir: string, cwdRelative: string, execut
     "--tmpfs", "/tmp",
     "--dir", "/etc",
     "--dir", "/workspace",
+    "--dir", "/skills",
   ];
   for (const path of ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/usr/local"]) addReadOnlyPath(args, path);
   for (const path of [
@@ -173,6 +176,12 @@ export function buildBubblewrapArgs(workdir: string, cwdRelative: string, execut
     "/etc/ssl/certs",
     "/etc/ca-certificates.conf",
   ]) addReadOnlyPath(args, path);
+  // workdir = <persistent>/contexts/<jid>/workdir. Las skills globales viven
+  // en <persistent>/skills y se montan de solo lectura en /skills. El enlace
+  // .skills del workdir apunta de forma relativa a ese mount dentro del sandbox.
+  const persistentRoot = dirname(dirname(dirname(workdir)));
+  const globalSkillsDir = join(persistentRoot, "skills");
+  if (existsSync(globalSkillsDir)) args.push("--ro-bind", globalSkillsDir, "/skills");
   args.push(
     "--bind", workdir, "/workspace",
     "--clearenv",
@@ -182,6 +191,12 @@ export function buildBubblewrapArgs(workdir: string, cwdRelative: string, execut
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LUNA_WORKDIR", "/workspace",
     "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+  );
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    args.push("--setenv", key, value);
+  }
+  args.push(
     executable,
     ...runtimeArgs,
   );
@@ -192,6 +207,7 @@ function runtimeInvocation(runtime: AgenticRuntime, executable: string, code: st
   if (runtime === "bash") return { executable, args: ["-lc", code, "luna-script", ...args] };
   if (runtime === "python") return { executable, args: ["-c", code, ...args] };
   if (runtime === "node") return { executable, args: ["-e", code, "--", ...args] };
+  if (runtime === "powershell") return { executable, args: ["-NoProfile", "-NonInteractive", "-Command", code, ...args] };
   return { executable, args: ["-e", code, "--", ...args] };
 }
 
@@ -281,6 +297,7 @@ export async function executeSandboxedCode(options: {
   args: string[];
   timeoutSeconds: number;
   signal?: AbortSignal;
+  env?: Record<string, string>;
 }): Promise<string> {
   const states = getRuntimeStatus();
   const state = states.find((item) => item.runtime === options.runtime);
@@ -306,7 +323,7 @@ export async function executeSandboxedCode(options: {
       return `Error: ejecución de código deshabilitada porque el sandbox bubblewrap no está operativo. Luna no ejecutará terminal sin aislamiento de filesystem.${sandboxStatus.reason ? ` Motivo: ${sandboxStatus.reason}` : ""}`;
     }
     executable = sandboxStatus.executable;
-    childArgs = buildBubblewrapArgs(workdir, cwdRelative, invocation.executable, invocation.args);
+    childArgs = buildBubblewrapArgs(workdir, cwdRelative, invocation.executable, invocation.args, options.env);
     sandbox = "bubblewrap";
   } else if (process.env.LUNA_ALLOW_UNSANDBOXED_EXEC !== "1") {
     return `Error: ejecución agentica deshabilitada en ${platform()} porque no hay un sandbox de filesystem equivalente configurado. Para evitar que un script salga del workdir, Luna falla de forma segura. LUNA_ALLOW_UNSANDBOXED_EXEC=1 habilita un modo explícitamente no aislado bajo responsabilidad del operador.`;
@@ -329,6 +346,7 @@ export async function executeSandboxedCode(options: {
             XDG_CACHE_HOME: join(workdir, ".cache"),
             TMPDIR: join(workdir, ".cache"),
             LUNA_WORKDIR: workdir,
+            ...options.env,
           },
       stdio: ["ignore", "pipe", "pipe"],
       detached: platform() !== "win32",

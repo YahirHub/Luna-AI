@@ -142,6 +142,10 @@ import {
 import { getRuntimeStatus, formatRuntimeStatus } from "./workspace/workspace-exec.ts";
 import { UserProcessManager } from "./processes/process-manager.ts";
 import { PROCESS_TOOLS, executeProcessTool } from "./processes/process-tools.ts";
+import { SkillManager } from "./skills/skill-manager.ts";
+import { SKILL_TOOLS, executeSkillTool } from "./skills/skill-tools.ts";
+import { TtsManager } from "./tts/tts-manager.ts";
+import { TTS_TOOLS, executeTtsTool } from "./tts/tts-tools.ts";
 import {
   TasklistManager,
   TASKLIST_TOOLS,
@@ -225,6 +229,9 @@ const alarmManager = new AlarmManager();
 
 /** Workdir privado y herramientas extendidas por usuario. */
 const workspaceManager = new WorkspaceManager();
+const skillManager = new SkillManager();
+const ttsManager = new TtsManager(workspaceManager);
+workspaceManager.ensureGlobalSkillsLinksForExistingUsers();
 const processManager = new UserProcessManager(workspaceManager);
 const taskRuntime = new TaskRuntime(workspaceManager);
 const tasklistManager = new TasklistManager(workspaceManager);
@@ -254,6 +261,19 @@ const compactionJobs = new Map<string, CompactionJobState>();
  * después de que el usuario ya canceló la solicitud. */
 const activeAiRuns = new Map<string, AbortController>();
 
+type ForegroundAiPhase = "model" | "tool" | "responding";
+interface ForegroundAiRunState {
+  controller: AbortController;
+  startedAt: string;
+  updatedAt: string;
+  phase: ForegroundAiPhase;
+  toolName?: string;
+  requestPreview: string;
+}
+
+/** Estado ligero para responder progreso/cancelación sin esperar el lock del chat. */
+const activeAiRunStates = new Map<string, ForegroundAiRunState>();
+
 /** Serializa revisiones automáticas por chat para no mezclar resultados simultáneos. */
 const backgroundReviewChains = new Map<string, Promise<void>>();
 
@@ -265,6 +285,8 @@ const BASE_TOOLS = [
   ...ALARM_TOOLS,
   ...WORKSPACE_TOOLS,
   ...AGENTIC_WORKSPACE_TOOLS,
+  ...SKILL_TOOLS,
+  ...TTS_TOOLS,
   ...PROCESS_TOOLS,
   ...TASKLIST_TOOLS,
   ...GOAL_TOOLS,
@@ -314,6 +336,11 @@ moduleRegistry.bindContextProvider("whisper", () => {
   return `Modelo: ${config.modelId}\nIdioma: ${config.language}\nThreads: ${config.threads === 0 ? "automático" : config.threads}`;
 });
 
+moduleRegistry.bindContextProvider("tts", (message, session) => {
+  if (!session.jid) return "No hay sesión de usuario.";
+  return `${ttsManager.formatStatus(session.jid)}\n${ttsManager.buildTurnGuidance(session.jid, message)}`;
+});
+
 moduleRegistry.bindContextProvider("agents", (_message, _session) => {
   const config = loadAgentConfig();
   return [
@@ -329,6 +356,13 @@ moduleRegistry.bindContextProvider("context", (_message, _session) => {
 
 moduleRegistry.bindContextProvider("workspace", () => {
   return formatRuntimeStatus(getRuntimeStatus());
+});
+
+moduleRegistry.bindContextProvider("skills", (_message, session) => {
+  if (!session.jid) return "No hay sesión de usuario.";
+  // Garantiza también que el workdir actual tenga su alias .skills.
+  workspaceManager.getWorkdir(session.jid);
+  return skillManager.buildCatalogForModel();
 });
 
 moduleRegistry.bindContextProvider("processes", (_message, session) => {
@@ -351,12 +385,46 @@ function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
     ...TASKLIST_TOOLS,
     ...WORKSPACE_TOOLS,
     ...AGENTIC_WORKSPACE_TOOLS,
+    ...SKILL_TOOLS,
+    ...TTS_TOOLS,
     ...PROCESS_TOOLS,
     ...ARTIFACT_TOOLS,
     ...MESSAGING_TOOLS,
     ...agentTools,
   ];
   return moduleRegistry.filterTools(pool, getModuleSession(jid)).tools;
+}
+
+
+function buildGoalDelegatedTaskContext(jid: string, taskIds: string[]): string {
+  if (!taskIds.length) return "";
+  const sections: string[] = [];
+  let totalChars = 0;
+  for (const taskId of taskIds.slice(-8)) {
+    const task = taskRuntime.get(jid, taskId);
+    if (!task) continue;
+    const lines = [`Tarea ${task.id} — ${task.title}`, `Estado: ${task.status}`];
+    const agents = taskRuntime.listAgents(jid, task.id).slice().reverse();
+    for (const agent of agents.slice(0, 6)) {
+      lines.push(`Agente ${agent.id} (${agent.name}/${agent.agentType}): ${agent.status}`);
+      if (agent.error) lines.push(`Error: ${agent.error}`);
+      if (agent.resultPath) {
+        try {
+          const remaining = Math.max(800, 18_000 - totalChars);
+          const result = workspaceManager.readText(jid, agent.resultPath, Math.min(5_000, remaining));
+          lines.push(`Resultado confirmado (${agent.resultPath}):\n${result}`);
+          totalChars += result.length;
+        } catch {
+          lines.push(`Resultado registrado en ${agent.resultPath}, pero no pudo leerse en este momento.`);
+        }
+      }
+    }
+    const section = lines.join("\n");
+    sections.push(section);
+    totalChars += section.length;
+    if (totalChars >= 18_000) break;
+  }
+  return sections.join("\n\n---\n\n").slice(0, 18_000);
 }
 
 async function executeGoalRuntimeTool(
@@ -379,6 +447,14 @@ async function executeGoalRuntimeTool(
   }
   if (AGENTIC_WORKSPACE_TOOLS.some((tool) => tool.function.name === name)) {
     return executeAgenticWorkspaceTool(name, args, workspaceManager, jid, signal);
+  }
+  if (SKILL_TOOLS.some((tool) => tool.function.name === name)) {
+    goalRuntime?.noteActivity(jid, goalId, `Usando skill: ${typeof args.skill === "string" ? args.skill : name}`, name, "executing");
+    return executeSkillTool(name, args, skillManager, workspaceManager, jid, signal);
+  }
+  if (TTS_TOOLS.some((tool) => tool.function.name === name)) {
+    if (!currentTransport) return "Error: no hay transporte activo para enviar audio.";
+    return executeTtsTool(name, args, { manager: ttsManager, transport: currentTransport, jid, signal });
   }
   if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
     return executeProcessTool(name, args, processManager, jid, goalId);
@@ -403,6 +479,7 @@ async function executeGoalRuntimeTool(
       apiSearchAvailable: isApiSearchCapabilityAvailable(),
       parentSignal: signal,
       workspace: workspaceManager,
+      skills: skillManager,
       tasks: taskRuntime,
       browserCredentials: browserCredentialStore,
       resumePrompt: goalObjective,
@@ -440,6 +517,7 @@ goalRuntime = new GoalRuntime({
   getLlmConfig: () => llmConfig,
   getTools: (jid) => getGoalRuntimeTools(jid),
   executeTool: executeGoalRuntimeTool,
+  getDelegatedTaskContext: (jid, taskIds) => buildGoalDelegatedTaskContext(jid, taskIds),
   onProgress: async (jid, text) => {
     if (currentTransport) await sendWhatsAppMessage(currentTransport, jid, { text }, { waitForDelivery: false });
   },
@@ -491,6 +569,15 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
   ["message_send", "📤 Preparando envío por el transporte activo..."],
   ["workspace_clear", "🧹 Limpiando tu workdir..."],
+  ["workspace_exec", "⚙️ Ejecutando comando en tu entorno..."],
+  ["workspace_write_text", "📝 Escribiendo archivo en tu workdir..."],
+  ["workspace_edit_text", "✏️ Editando archivo en tu workdir..."],
+  ["workspace_delete", "🗑️ Eliminando archivo del workdir..."],
+  ["workspace_apply_patch", "🧩 Aplicando cambios al proyecto..."],
+  ["skill_load", "🧩 Cargando skill global..."],
+  ["skill_run_script", "🧩 Ejecutando herramienta de una skill..."],
+  ["tts_select_voice", "⬇️ Preparando voz de Piper Neo..."],
+  ["tts_import_neo", "🔊 Importando modelo .neo..."],
   ["process_start", "⚙️ Iniciando proceso persistente..."],
   ["process_logs", "📜 Revisando logs del proceso..."],
   ["process_stop", "⛔ Deteniendo proceso..."],
@@ -1006,6 +1093,7 @@ const SLASH_COMMANDS = new Set([
   "config",
   "compact",
   "uso",
+  "skills",
 ]);
 
 function formatCommandName(name: string): string {
@@ -1158,11 +1246,49 @@ function formatAgentEventAge(timestamp?: string): string {
   return `hace ${Math.floor(elapsed / 3_600_000)} h`;
 }
 
+function isForegroundProgressQuestion(value: string): boolean {
+  const normalized = normalizeNaturalText(value);
+  return /^(?:como|cómo) vas(?: con eso)?$/iu.test(normalized)
+    || /^(?:que|qué) (?:haces|estas haciendo|estás haciendo)$/iu.test(normalized)
+    || /^(?:sigues|sigues trabajando|aun sigues|aún sigues)$/iu.test(normalized)
+    || /^(?:estado|avance|progreso)(?: de esto| de eso)?$/iu.test(normalized);
+}
+
+function formatForegroundProgressForUser(jid: string): string {
+  const state = activeAiRunStates.get(jid);
+  if (!state) return "No hay una operación principal activa en este momento.";
+  const elapsedMs = Math.max(0, Date.now() - Date.parse(state.startedAt));
+  const elapsed = elapsedMs < 60_000
+    ? "menos de un minuto"
+    : elapsedMs < 3_600_000
+      ? `${Math.floor(elapsedMs / 60_000)} min`
+      : `${Math.floor(elapsedMs / 3_600_000)} h ${Math.floor((elapsedMs % 3_600_000) / 60_000)} min`;
+  const phase = state.phase === "tool"
+    ? `Ejecutando herramienta: ${state.toolName ?? "herramienta del orquestador"}`
+    : state.phase === "responding"
+      ? "Preparando la respuesta final"
+      : "Analizando el siguiente paso con el modelo";
+  return [
+    "⏳ OPERACIÓN ACTUAL",
+    `Estado: ${phase}`,
+    `Tiempo activo: ${elapsed}`,
+    state.requestPreview ? `Solicitud: ${state.requestPreview}` : "",
+    "Puedes usar !cancelar para detener esta ejecución.",
+  ].filter(Boolean).join("\n");
+}
+
 function isTaskProgressQuestion(value: string): boolean {
   const normalized = normalizeNaturalText(value);
   return /(?:como|cómo|estado|avance|progreso|que tal|qué tal).{0,35}(?:tarea|tareas|proceso|procesos|agente|agentes)/iu.test(normalized)
     || /(?:tarea|tareas|proceso|procesos|agente|agentes).{0,35}(?:como va|cómo va|como van|cómo van|estado|avance|progreso)/iu.test(normalized)
     || /^(?:como|cómo) va(?:n)?(?: el| la| los| las)? (?:proceso|procesos|tarea|tareas|agente|agentes)/iu.test(normalized);
+}
+
+
+function isUsageOrTokenQuestion(value: string): boolean {
+  const normalized = normalizeNaturalText(value);
+  if (!/(?:token|tokens|contexto|uso)/iu.test(normalized)) return false;
+  return /(?:como va|cómo va|cuanto|cuánto|cuantos|cuántos|uso|consumo|porcentaje|queda|llevo|gastado|contexto)/iu.test(normalized);
 }
 
 function isGoalProgressQuestion(value: string, jid: string): boolean {
@@ -1172,6 +1298,8 @@ function isGoalProgressQuestion(value: string, jid: string): boolean {
   if (/(?:goal|objetivo).{0,40}(?:como va|cómo va|estado|avance|progreso|haciendo|en que va|en qué va)/iu.test(normalized)) return true;
   if (/(?:como va|cómo va|estado|avance|progreso|que esta haciendo|qué está haciendo|en que vas|en qué vas).{0,45}(?:goal|objetivo)/iu.test(normalized)) return true;
   if (/^(?:como|cómo) va(?: el| la)? (?:bot|proyecto|trabajo)(?:\?|$)/iu.test(normalized)) return true;
+  if (/(?:que|qué) han hecho.{0,35}(?:agentes|investigadores|busqueda|búsqueda)/iu.test(normalized)) return true;
+  if (/(?:carpeta|resultados).{0,35}(?:agentes|investigacion|investigación|busqueda|búsqueda)/iu.test(normalized)) return true;
   return false;
 }
 
@@ -1192,6 +1320,25 @@ function formatGoalProgressForUser(jid: string): string {
         ? `esperando ${agent.waitingFieldName ?? "un dato"}`
         : agent.status === "queued" ? "en cola" : "trabajando";
       lines.push(`• ${agentBackendLabel(agent.agentType)} ${agent.id} — ${agent.name}`, `  Estado: ${state}`, `  Ahora: ${agent.activity ?? "sin actividad detallada"}`, `  Último evento: ${formatAgentEventAge(agent.lastEventAt)}`);
+    }
+  }
+
+
+  const completedResearch = taskRuntime.listAgents(jid)
+    .filter((agent) => ["completed", "failed", "interrupted"].includes(agent.status) && delegatedIds.has(agent.taskId))
+    .slice(0, 6);
+  if (completedResearch.length) {
+    lines.push("", "📚 Investigaciones recientes terminadas:");
+    for (const agent of completedResearch) {
+      lines.push(`• ${agentBackendLabel(agent.agentType)} ${agent.id} — ${agent.name}: ${agent.status}`);
+      if (agent.error) lines.push(`  Error: ${agent.error}`);
+      if (agent.resultPath) {
+        try {
+          const result = workspaceManager.readText(jid, agent.resultPath, 1_600).replace(/\s+/g, " ").trim();
+          if (result) lines.push(`  Hallazgos: ${result.slice(0, 700)}${result.length > 700 ? "…" : ""}`);
+          lines.push(`  Archivo: ${agent.resultPath}`);
+        } catch { lines.push(`  Resultado: ${agent.resultPath}`); }
+      }
     }
   }
 
@@ -1400,6 +1547,10 @@ function cancelCurrentOperation(jid: string): string {
   const activeRun = activeAiRuns.get(jid);
   if (activeRun && !activeRun.signal.aborted) {
     activeRun.abort(new Error("user-cancelled-current-operation"));
+    cancelledSomething = true;
+  }
+
+  if (ttsManager.cancelActiveVoiceDownload(jid)) {
     cancelledSomething = true;
   }
 
@@ -1821,6 +1972,119 @@ registerCommand(
       caption: `📊 Uso de contexto — ${ctx.percentOfInputBudget.toFixed(1)}% del presupuesto de entrada · ${source}`,
     });
     return { text: "" };
+  },
+);
+
+
+registerCommand(
+  "skills",
+  "Lista las skills globales instaladas y disponibles",
+  () => ({ text: skillManager.formatListForUser() }),
+);
+
+registerCommand(
+  "voces",
+  "Lista voces de Piper Neo, opcionalmente filtradas por idioma",
+  (cmd) => ({ text: ttsManager.formatVoices(cmd.body.trim() || undefined) }),
+);
+
+registerCommand(
+  "voz",
+  "Gestiona Piper Neo: estado, modo adaptativo/voz/texto, voces oficiales, modelos manuales, importar o probar",
+  async (cmd, senderJid, transport) => {
+    const sub = cmd.args[0]?.toLowerCase() ?? "estado";
+    if (["estado", "status"].includes(sub)) return { text: ttsManager.formatStatus(senderJid) };
+    if (["on", "activar", "activa", "audio", "voz"].includes(sub)) {
+      ttsManager.setResponseMode(senderJid, "voice");
+      return { text: "🔊 Modo solo voz activado. Una petición explícita de texto en un turno seguirá teniendo prioridad." };
+    }
+    if (["off", "desactivar", "desactiva", "texto", "text"].includes(sub)) {
+      ttsManager.setResponseMode(senderJid, "text");
+      return { text: "💬 Modo solo texto activado. Una petición explícita de audio en un turno seguirá teniendo prioridad." };
+    }
+    if (["auto", "adaptive", "adaptativo", "adaptativa"].includes(sub)) {
+      ttsManager.setResponseMode(senderJid, "adaptive");
+      return { text: "🎛️ Modo adaptativo activado. Luna decidirá por turno entre texto y voz según la intención y el tipo de contenido." };
+    }
+    if (["modo", "mode"].includes(sub)) {
+      const requested = cmd.args[1]?.toLowerCase() ?? "";
+      if (["auto", "adaptive", "adaptativo", "adaptativa"].includes(requested)) {
+        ttsManager.setResponseMode(senderJid, "adaptive");
+        return { text: "🎛️ Modo adaptativo activado." };
+      }
+      if (["voz", "voice", "audio"].includes(requested)) {
+        ttsManager.setResponseMode(senderJid, "voice");
+        return { text: "🔊 Modo solo voz activado." };
+      }
+      if (["texto", "text", "mensaje"].includes(requested)) {
+        ttsManager.setResponseMode(senderJid, "text");
+        return { text: "💬 Modo solo texto activado." };
+      }
+      return { text: "Uso: /voz modo adaptativo | /voz modo voz | /voz modo texto" };
+    }
+    if (["idiomas", "languages"].includes(sub)) return { text: ttsManager.formatLanguages() };
+    if (["voces", "voices"].includes(sub)) return { text: ttsManager.formatVoices(cmd.args.slice(1).join(" ").trim() || undefined) };
+    if (["modelos", "models"].includes(sub)) return { text: [ttsManager.formatManualModels(), "", ttsManager.formatCustomModels(senderJid)].join("\n") };
+    if (["manuales", "locales", "manual", "local"].includes(sub)) return { text: ttsManager.formatManualModels() };
+    if (["usar-local", "usar-manual", "use-local", "use-manual", "select-local"].includes(sub)) {
+      const model = cmd.args.slice(1).join(" ").trim();
+      if (!model) return { text: "Uso: /voz usar-local <nombre-o-ruta-relativa>" };
+      try {
+        const selected = ttsManager.selectManual(senderJid, model);
+        return { text: `✅ Modelo Piper manual seleccionado: ${selected.id}.` };
+      } catch (error) { return { text: `❌ ${error instanceof Error ? error.message : String(error)}` }; }
+    }
+    if (["usar-neo", "use-neo", "select-neo"].includes(sub)) {
+      const model = cmd.args.slice(1).join(" ").trim();
+      if (!model) return { text: "Uso: /voz usar-neo <nombre>" };
+      try {
+        const selected = ttsManager.selectCustom(senderJid, model);
+        return { text: `✅ Modelo .neo seleccionado: ${selected.id}.` };
+      } catch (error) { return { text: `❌ ${error instanceof Error ? error.message : String(error)}` }; }
+    }
+    if (["usar", "use", "seleccionar", "select"].includes(sub)) {
+      const voice = cmd.args.slice(1).join(" ").trim();
+      if (!voice) return { text: "Uso: /voz usar <id-o-nombre-de-voz>" };
+      try {
+        const selected = await ttsManager.selectOfficial(senderJid, voice, undefined, async (message) => {
+          await sendWhatsAppMessage(transport, senderJid, { text: `⬇️ ${message}` }, { waitForDelivery: false });
+        });
+        return { text: `✅ Voz seleccionada: ${selected.key}.` };
+      } catch (error) { return { text: `❌ ${error instanceof Error ? error.message : String(error)}` }; }
+    }
+    if (["importar", "import"].includes(sub)) {
+      const path = cmd.args[1]?.trim() ?? "";
+      const name = cmd.args.slice(2).join(" ").trim() || undefined;
+      if (!path) return { text: "Uso: /voz importar <ruta/modelo.neo> [nombre]" };
+      try {
+        const selected = ttsManager.importNeo(senderJid, path, name);
+        return { text: `✅ Modelo .neo importado y seleccionado: ${selected.id}.` };
+      } catch (error) { return { text: `❌ ${error instanceof Error ? error.message : String(error)}` }; }
+    }
+    if (["probar", "test"].includes(sub)) {
+      const text = cmd.args.slice(1).join(" ").trim() || "Hola, soy Luna. Esta es una prueba de Piper Neo.";
+      try {
+        const audio = await ttsManager.synthesize(senderJid, text);
+        await transport.send(senderJid, { audio: audio.audio, mimetype: audio.mimetype, ptt: audio.ptt }, { waitForDelivery: false });
+        return { text: "" };
+      } catch (error) { return { text: `❌ ${error instanceof Error ? error.message : String(error)}` }; }
+    }
+    return { text: [
+      ttsManager.formatStatus(senderJid),
+      "",
+      "Comandos:",
+      "/voz auto | /voz voz | /voz texto",
+      "/voz modo adaptativo | /voz modo voz | /voz modo texto",
+      "/voz idiomas",
+      "/voces es_MX",
+      "/voz usar es_MX-claude-high",
+      "/voz modelos",
+      "/voz manuales",
+      "/voz usar-local <nombre-o-ruta-relativa>",
+      "/voz importar ruta/modelo.neo [nombre]",
+      "/voz usar-neo <nombre>",
+      "/voz probar [texto]",
+    ].join("\n") };
   },
 );
 
@@ -2866,6 +3130,18 @@ export async function handleMessage(
 
   if (authManager.isLoggedIn(remoteJid)) {
     retryPendingBackgroundReviews(sock, remoteJid);
+    // Consultas naturales de tokens/contexto deben responder con métricas reales
+    // antes de que el contexto del goal sesgue al LLM hacia el progreso del trabajo.
+    if (!command && isUsageOrTokenQuestion(text)) {
+      await sendWithTyping(sock, remoteJid, formatUsageText(remoteJid));
+      return;
+    }
+    // Una consulta breve de progreso de la ejecución principal tampoco espera el
+    // lock que esa misma ejecución puede estar reteniendo.
+    if (!command && activeAiRuns.has(remoteJid) && isForegroundProgressQuestion(text)) {
+      await sendWithTyping(sock, remoteJid, formatForegroundProgressForUser(remoteJid));
+      return;
+    }
     // Controles operativos puros de procesos tampoco deben esperar al LLM.
     if (await tryHandleNaturalProcessControl(sock, remoteJid, text)) return;
     // Las consultas de progreso no deben esperar al LLM ni al lock del chat.
@@ -3223,6 +3499,29 @@ export async function handleMessage(
     }
 
     const moduleCommand = moduleRegistry.resolveCommand(command.name, getModuleSession(remoteJid));
+    if (!moduleCommand && skillManager.hasUserInvocable(command.name)) {
+      try {
+        const renderedSkill = await skillManager.render(command.name, command.body, workspaceManager, remoteJid, {
+          modelInvocation: false,
+          executeDynamicCommands: true,
+        });
+        if (renderedSkill.skill.context === "fork" && goalRuntime) {
+          const goal = goalRuntime.start(remoteJid, [
+            `Ejecuta la skill global /${renderedSkill.skill.id} en contexto aislado.`,
+            renderedSkill.content,
+          ].join("\n\n"));
+          await sendWithTyping(sock, remoteJid, `🧩 Skill /${renderedSkill.skill.id} iniciada en contexto aislado como goal ${goal.id}. Puedes seguir hablando mientras trabaja.`);
+        } else {
+          await handleAiChat(sock, remoteJid, [
+            `[SKILL INVOCADA EXPLÍCITAMENTE POR EL USUARIO: /${renderedSkill.skill.id}]`,
+            renderedSkill.content,
+          ].join("\n\n"));
+        }
+      } catch (error) {
+        await sendWithTyping(sock, remoteJid, `❌ No pude cargar /${command.name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
     if (!moduleCommand) {
       const known = moduleRegistry.getCommands(getModuleSession(remoteJid)).map((c) => formatCommandName(c.name)).join(", ");
       await sendWithTyping(sock, remoteJid, [
@@ -3406,6 +3705,18 @@ ${supervisorContext}`;
   const typingSession = await startContinuousTyping(sock, remoteJid);
   const runController = new AbortController();
   activeAiRuns.set(remoteJid, runController);
+  activeAiRunStates.set(remoteJid, {
+    controller: runController,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    phase: "model",
+    requestPreview: userText.replace(/\s+/g, " ").trim().slice(0, 180),
+  });
+  const updateForegroundState = (patch: Partial<Omit<ForegroundAiRunState, "controller" | "startedAt" | "requestPreview">>): void => {
+    const current = activeAiRunStates.get(remoteJid);
+    if (!current || current.controller !== runController) return;
+    activeAiRunStates.set(remoteJid, { ...current, ...patch, updatedAt: new Date().toISOString() });
+  };
 
   try {
     // Ejecutar chat con function calling. Las acciones mutables se registran
@@ -3447,6 +3758,7 @@ ${supervisorContext}`;
       if (runController.signal.aborted) {
         throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
       }
+      updateForegroundState({ phase: "tool", toolName: name });
       const toolModule = moduleRegistry.getModuleForTool(name);
       debugInfo("modules.tools", "execute", {
         jid: remoteJid,
@@ -3593,6 +3905,35 @@ ${supervisorContext}`;
         return result;
       }
 
+      if (SKILL_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeSkillTool(name, args, skillManager, workspaceManager, remoteJid, runController.signal);
+        if (name === "skill_load" && !result.startsWith("Error:")) {
+          const skillName = typeof args.skill === "string" ? args.skill.trim().toLowerCase() : "skill";
+          const persistedSkillMessage = `[SKILL GLOBAL CARGADA: ${skillName}]\n${result}`;
+          // Igual que Claude Code, el contenido cargado permanece en el contexto
+          // entre turnos. Evitamos duplicar una invocación idéntica.
+          if (!cm.getMessages(remoteJid).some((message) => message.role === "user" && message.content === persistedSkillMessage)) {
+            cm.addMessage(remoteJid, { role: "user", content: persistedSkillMessage });
+          }
+        }
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (TTS_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executeTtsTool(name, args, {
+          manager: ttsManager,
+          transport: sock,
+          jid: remoteJid,
+          signal: runController.signal,
+          onProgress: async (text) => {
+            await sendWhatsAppMessage(sock, remoteJid, { text }, { waitForDelivery: false });
+          },
+        });
+        await recordToolResult(name, result);
+        return result;
+      }
+
       if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
         result = await executeProcessTool(name, args, processManager, remoteJid);
         await recordToolResult(name, result);
@@ -3631,6 +3972,7 @@ ${supervisorContext}`;
           agentConfig: agentConfigSnapshot,
           apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
+          skills: skillManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
@@ -3668,6 +4010,7 @@ ${supervisorContext}`;
           agentConfig: agentConfigSnapshot,
           apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
+          skills: skillManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
@@ -3738,6 +4081,7 @@ ${supervisorContext}`;
           agentConfig: agentConfigSnapshot,
           apiSearchAvailable: isApiSearchCapabilityAvailable(),
           workspace: workspaceManager,
+          skills: skillManager,
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
@@ -3831,17 +4175,31 @@ ${supervisorContext}`;
         // en la superficie pública siempre crean tareas background. Una vez
         // registrada la tarea no se hace otra llamada al LLM dentro del lock de
         // conversación; el supervisor/revisor continuará por fuera.
-        terminalTools: ["goal_start", "goal_instruction", "spawn_agents", "researcher_web", "browser_agent"],
+        terminalTools: ["goal_start", "goal_instruction", "spawn_agents", "researcher_web", "browser_agent", "tts_speak"],
         onToolRoundComplete: async () => {
           // Igual que Codewolf: la deduplicación semántica solo aplica a las
           // solicitudes repetidas dentro de una misma respuesta del modelo.
           spawnDeduper.reset();
+          updateForegroundState({ phase: "model", toolName: undefined });
         },
       },
     );
 
     if (runController.signal.aborted) {
       throw runController.signal.reason ?? new Error("user-cancelled-current-operation");
+    }
+
+    if (result.toolsCalled.includes("tts_speak")) {
+      try {
+        const payload = JSON.parse(result.content) as { tts_sent?: unknown; voice?: unknown; spoken_text?: unknown };
+        if (payload.tts_sent === true) {
+          const spoken = typeof payload.spoken_text === "string" && payload.spoken_text.trim()
+            ? payload.spoken_text.trim()
+            : `[Respuesta enviada por voz con Piper Neo${typeof payload.voice === "string" ? ` · voz ${payload.voice}` : ""}.]`;
+          cm.addMessage(remoteJid, { role: "assistant", content: spoken });
+          return;
+        }
+      } catch { /* si no fue un resultado TTS válido, sigue el flujo normal */ }
     }
 
     // Una tarea background ya fue registrada y su progreso visible se envió
@@ -3948,10 +4306,26 @@ ${supervisorContext}`;
     // próximo user message via buildDynamicContext().
     // En esta misma ronda el modelo ya ve el resultado del tool call.
 
+    updateForegroundState({ phase: "responding", toolName: undefined });
     // Todo mensaje saliente pasa por la cola resiliente y simula escritura.
     // Si WhatsApp se desconectó durante la tarea, queda pendiente y se envía
     // automáticamente al reconectar sin abortar el flujo del agente.
-    await sendWithTyping(sock, remoteJid, finalContent, 1_500, 3_000);
+    if (ttsManager.shouldForceVoice(remoteJid, userText)) {
+      try {
+        const voice = await ttsManager.synthesize(remoteJid, finalContent, {
+          signal: runController.signal,
+          onProgress: async (message) => {
+            await sendWhatsAppMessage(sock, remoteJid, { text: `⬇️ Piper: ${message}` }, { waitForDelivery: false });
+          },
+        });
+        await sock.send(remoteJid, { audio: voice.audio, mimetype: voice.mimetype, ptt: voice.ptt }, { minDelayMs: 500, maxDelayMs: 1_200, waitForDelivery: false });
+      } catch (error) {
+        debugError("tts", "automatic_voice_failed", error, { jid: remoteJid });
+        await sendWithTyping(sock, remoteJid, `${finalContent}\n\n⚠️ No pude convertir esta respuesta a voz con Piper Neo.`, 1_500, 3_000);
+      }
+    } else {
+      await sendWithTyping(sock, remoteJid, finalContent, 1_500, 3_000);
+    }
     if (clearConversationAfterResponse) {
       // La confirmación se entrega por WhatsApp, pero el historial queda realmente
       // limpio igual que con !clear; memoria, modelo y workdir se conservan.
@@ -4038,10 +4412,15 @@ ${supervisorContext}`;
     );
   } finally {
     if (activeAiRuns.get(remoteJid) === runController) activeAiRuns.delete(remoteJid);
+    if (activeAiRunStates.get(remoteJid)?.controller === runController) activeAiRunStates.delete(remoteJid);
     await typingSession.stop();
   }
 
   }); // fin de withLock
+}
+
+export async function shutdownBotRuntimes(): Promise<void> {
+  await ttsManager.runtime.close();
 }
 
 // ─── Media ───────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { rmSync } from "node:fs";
 import * as readline from "node:readline";
 import { createTransportRunner, resolveTransportId } from "./transports/factory.ts";
 import type { AuthMode } from "./transports/baileys/runner.ts";
-import { handleMessage, initLlm } from "./bot.ts";
+import { handleMessage, initLlm, shutdownBotRuntimes } from "./bot.ts";
 import {
   getLlmConfigPath,
   loadLlmConfigIfPresent,
@@ -134,14 +134,14 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n${ANSI.gray}🛑 Cerrando bot (Ctrl+C)...${ANSI.reset}`);
-    process.exit(0);
+    void shutdownBotRuntimes().finally(() => process.exit(0));
   });
 
   process.on("SIGTERM", () => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n${ANSI.gray}🛑 Cerrando bot...${ANSI.reset}`);
-    process.exit(0);
+    void shutdownBotRuntimes().finally(() => process.exit(0));
   });
 
   // ── Bucle de conexión y vinculación ─────────────────────────────

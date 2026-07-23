@@ -12,7 +12,7 @@ export const PROCESS_TOOLS: ToolDefinition[] = [
         type: "object",
         properties: {
           name: { type: "string", description: "Nombre estable, por ejemplo telegram-bot." },
-          runtime: { type: "string", enum: ["node", "bun", "python", "bash"] },
+          runtime: { type: "string", enum: ["node", "bun", "python", "bash", "powershell"] },
           entry: { type: "string", description: "Archivo ejecutable relativo al workdir, por ejemplo telegram-bot/src/bot.js." },
           cwd: { type: "string", description: "Directorio de trabajo relativo; por defecto '.'." },
           args: { type: "array", maxItems: 40, items: { type: "string" } },

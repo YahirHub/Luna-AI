@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 import { agentBrowserGenericName, agentBrowserNativeName } from "../src/browser/browser-discovery.ts";
 import {
@@ -77,3 +77,32 @@ if (existsSync(agentBrowserPreparedSource)) {
 }
 if (process.platform !== "win32") chmodSync(target, 0o755);
 console.log(`[package-runtime] agent-browser nativo copiado a ${target}`);
+
+
+const piperNeoSource = join(root, "assets", "runtime", "piper-neo");
+const piperNeoDestination = join(root, "dist", "runtime", "piper-neo");
+if (!existsSync(join(piperNeoSource, "manifest.json"))) {
+  throw new Error("Falta el runtime de Piper Neo. Ejecuta bun run prepare:piper.");
+}
+rmSync(piperNeoDestination, { recursive: true, force: true });
+cpSync(piperNeoSource, piperNeoDestination, {
+  recursive: true,
+  filter(path: string) { return !path.includes(`${join("piper-neo", ".downloads")}`); },
+});
+try {
+  const manifest = JSON.parse(readFileSync(join(piperNeoDestination, "manifest.json"), "utf8")) as { executable?: string };
+  if (manifest.executable && process.platform !== "win32") {
+    const executable = join(piperNeoDestination, manifest.executable);
+    if (existsSync(executable)) chmodSync(executable, 0o755);
+  }
+} catch { /* manifest validado por prepare:piper */ }
+console.log(`[package-runtime] Piper Neo copiado a ${piperNeoDestination}`);
+
+const skillsSource = join(root, "assets", "skills");
+const skillsDestination = join(root, "dist", "skills");
+rmSync(skillsDestination, { recursive: true, force: true });
+mkdirSync(skillsDestination, { recursive: true });
+if (existsSync(skillsSource)) {
+  cpSync(skillsSource, skillsDestination, { recursive: true, dereference: false });
+  console.log(`[package-runtime] Skills globales copiadas a ${skillsDestination}`);
+}

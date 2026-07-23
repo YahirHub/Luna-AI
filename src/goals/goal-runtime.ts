@@ -9,6 +9,14 @@ import type { TasklistManager, TasklistRecord } from "./tasklist.ts";
 
 export type GoalStatus = "queued" | "running" | "waiting_user" | "completed" | "failed" | "cancelled" | "interrupted";
 
+export interface GoalResearchRecord {
+  prompt: string;
+  normalized: string;
+  taskId?: string;
+  resultPreview?: string;
+  createdAt: string;
+}
+
 export interface GoalRecord {
   id: string;
   jid: string;
@@ -33,6 +41,7 @@ export interface GoalRecord {
   pendingInstructions?: string[];
   instructionHistory?: string[];
   delegatedTaskIds?: string[];
+  researchHistory?: GoalResearchRecord[];
 }
 
 interface GoalFile { version: 1; goals: GoalRecord[] }
@@ -56,6 +65,7 @@ export interface GoalRuntimeDependencies {
   getLlmConfig: () => LlmConfig | null;
   getTools: (jid: string) => ToolDefinition[];
   executeTool: (jid: string, goalId: string, tasklistId: string, name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<string>;
+  getDelegatedTaskContext?: (jid: string, taskIds: string[]) => string;
   onProgress?: (jid: string, text: string) => void | Promise<void>;
   onCompleted?: (jid: string, goal: GoalRecord, text: string) => void | Promise<void>;
   onCancelled?: (jid: string, goal: GoalRecord) => void | Promise<void>;
@@ -88,6 +98,44 @@ function parseVerifier(raw: string): GoalVerifierResult {
   } catch {
     return { complete: false, missing: ["El verifier no produjo JSON válido; volver a verificar con evidencia más clara."], reason: "Respuesta del verifier no parseable." };
   }
+}
+
+function normalizeResearchText(value: string): string {
+  const stop = new Set(["the", "a", "an", "to", "of", "for", "and", "or", "in", "on", "with", "how", "use", "using", "search", "research", "find", "check", "verify", "investigate", "properly", "implementation", "implement", "para", "como", "cómo", "usar", "usa", "busca", "buscar", "investiga", "investigar", "verifica", "verificar", "con", "del", "de", "la", "el", "los", "las", "un", "una", "y", "o", "en"]);
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, (url) => {
+      try {
+        const parsed = new URL(url);
+        return `${parsed.hostname}${parsed.pathname}`;
+      } catch { return url; }
+    })
+    .replace(/[^a-z0-9._/@+-]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !stop.has(token))
+    .join(" ")
+    .trim();
+}
+
+function tokenSimilarity(a: string, b: string): number {
+  const left = new Set(a.split(/\s+/).filter(Boolean));
+  const right = new Set(b.split(/\s+/).filter(Boolean));
+  if (!left.size || !right.size) return a === b ? 1 : 0;
+  let intersection = 0;
+  for (const token of left) if (right.has(token)) intersection += 1;
+  const union = new Set([...left, ...right]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function extractResearchPrompts(args: Record<string, unknown>): string[] {
+  const agents = Array.isArray(args.agents) ? args.agents : [];
+  return agents.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const prompt = (entry as Record<string, unknown>).prompt;
+    return typeof prompt === "string" && prompt.trim() ? [prompt.trim()] : [];
+  });
 }
 
 export class GoalRuntime {
@@ -179,7 +227,7 @@ export class GoalRuntime {
     const record: GoalRecord = {
       id, jid, objective: clean, status: "queued", tasklistId: tasklist.id,
       createdAt: now, updatedAt: now, iteration: 0,
-      currentPhase: "planning", currentActivity: "Preparando la primera iteración", lastEventAt: now, pendingInstructions: [], instructionHistory: [], delegatedTaskIds: [],
+      currentPhase: "planning", currentActivity: "Preparando la primera iteración", lastEventAt: now, pendingInstructions: [], instructionHistory: [], delegatedTaskIds: [], researchHistory: [],
       maxIterations: Math.max(3, Math.min(40, Math.trunc(maxIterations))), noProgressIterations: 0,
     };
     const file = this.load(jid);
@@ -247,6 +295,56 @@ export class GoalRuntime {
     if (!goal) return;
     const ids = [...new Set([...(goal.delegatedTaskIds ?? []), taskId])].slice(-30);
     this.patch(jid, id, { delegatedTaskIds: ids, lastEventAt: new Date().toISOString() });
+  }
+
+  private findSimilarResearch(goal: GoalRecord, prompt: string): GoalResearchRecord | undefined {
+    const normalized = normalizeResearchText(prompt);
+    if (!normalized) return undefined;
+    return [...(goal.researchHistory ?? [])].reverse().find((entry) => {
+      if (entry.normalized === normalized) return true;
+      return tokenSimilarity(entry.normalized, normalized) >= 0.72;
+    });
+  }
+
+  private rememberResearch(jid: string, id: string, prompts: string[], result: string): void {
+    const goal = this.get(jid, id);
+    if (!goal || !prompts.length) return;
+    let taskId: string | undefined;
+    try {
+      const parsed = JSON.parse(result) as { task_id?: unknown };
+      if (typeof parsed.task_id === "string") taskId = parsed.task_id;
+    } catch { /* resultado no JSON */ }
+    const history = [...(goal.researchHistory ?? [])];
+    const now = new Date().toISOString();
+    for (const prompt of prompts) {
+      const normalized = normalizeResearchText(prompt);
+      if (!normalized) continue;
+      const duplicate = history.find((entry) => entry.normalized === normalized || tokenSimilarity(entry.normalized, normalized) >= 0.90);
+      if (duplicate) {
+        duplicate.taskId = taskId ?? duplicate.taskId;
+        duplicate.resultPreview = truncate(result, 1600);
+        continue;
+      }
+      history.push({ prompt: prompt.slice(0, 1800), normalized, taskId, resultPreview: truncate(result, 1600), createdAt: now });
+    }
+    this.patch(jid, id, { researchHistory: history.slice(-24) });
+  }
+
+  private researchReuseMessage(goal: GoalRecord, args: Record<string, unknown>): string | null {
+    const prompts = extractResearchPrompts(args);
+    if (!prompts.length) return null;
+    const matches = prompts.map((prompt) => ({ prompt, match: this.findSimilarResearch(goal, prompt) }));
+    if (!matches.every((item) => item.match)) return null;
+    return JSON.stringify({
+      status: "reused_previous_research",
+      message: "No se lanzó otra investigación porque una misión semánticamente equivalente ya fue ejecutada. Reutiliza primero la evidencia y resultados previos incluidos en el contexto del goal; solo investiga otra vez si puedes formular un hueco factual nuevo y específico.",
+      matches: matches.map((item) => ({
+        requested: item.prompt.slice(0, 500),
+        previous_prompt: item.match?.prompt.slice(0, 500),
+        task_id: item.match?.taskId,
+        result_preview: item.match?.resultPreview,
+      })),
+    }, null, 2);
   }
 
   noteActivity(jid: string, id: string, activity: string, tool?: string, phase?: GoalRecord["currentPhase"]): void {
@@ -344,14 +442,17 @@ export class GoalRuntime {
   }
 
   private progressSignature(jid: string, tasklist: TasklistRecord): string {
-    // Solo cuenta archivos de trabajo. Los registros autoritativos del runtime
-    // viven fuera del workdir, pero también excluimos metadatos heredados que
-    // cambian por sí solos y falsearían la detección de progreso.
-    const tree = this.deps.workspace.listRecursive(jid, ".", 220)
-      .filter((line) => !/(^|\/)tasks\.json(?:\s|$)|(^|\/)artifacts\.json(?:\s|$)/i.test(line))
+    // El progreso debe representar trabajo del objetivo, no actividad del propio
+    // supervisor. Las carpetas tasks/ cambian cada vez que se lanza una búsqueda y
+    // antes hacían que una cadena infinita de investigaciones pareciera progreso.
+    const tree = this.deps.workspace.listRecursive(jid, ".", 500)
+      .filter((line) => !/(^|\/)tasks(?:\/|\s|$)|(^|\/)tasks\.json(?:\s|$)|(^|\/)artifacts\.json(?:\s|$)|(^|\/)node_modules(?:\/|\s|$)|(^|\/)\.skills(?:\/|\s|$)|(^|\/)\.skill-runtime(?:\/|\s|$)/i.test(line))
       .join("\n");
     return JSON.stringify({
-      items: tasklist.items.map((item) => [item.id, item.status, item.text, item.evidence ?? ""]),
+      completed: tasklist.items
+        .filter((item) => item.status === "completed" || item.status === "skipped")
+        .map((item) => [item.text, item.status, item.evidence ?? ""]),
+      blocked: tasklist.items.filter((item) => item.status === "blocked").map((item) => item.text),
       tree,
     });
   }
@@ -382,18 +483,22 @@ export class GoalRuntime {
       const pendingInstructions = [...(goal.pendingInstructions ?? [])];
       const tools = this.deps.getTools(goal.jid);
       const trace: GoalToolTrace[] = [];
+      const delegatedContext = this.deps.getDelegatedTaskContext?.(goal.jid, goal.delegatedTaskIds ?? []) ?? "";
+      const iterationStartProgress = this.deps.tasklists.progress(tasklist);
+      let tasklistAddsThisIteration = 0;
       const messages: ChatMessage[] = [
         {
           role: "system",
           content: [
             "Eres el ejecutor autónomo de un /goal de Luna. Trabajas en segundo plano hasta completar el objetivo, no hasta producir una respuesta plausible.",
             `Goal: ${goal.id}. Tasklist obligatoria: ${goal.tasklistId}.`,
-            "Al inicio inspecciona la tasklist. Si todavía es genérica, reemplázala con tasklist_replace por pasos específicos, verificables y completos.",
-            "Actualiza tasklist_update después de cada avance importante. No marques completed sin evidencia concreta en evidence.",
+            "Al inicio inspecciona la tasklist. Si todavía es genérica, reemplázala UNA SOLA VEZ con tasklist_replace por pasos específicos, verificables y completos. Después de concretarla, conserva el plan existente: usa tasklist_update y tasklist_add; no reinicies ni reemplaces la lista para esconder pendientes o evidencia.",
+            "Actualiza tasklist_update después de cada avance importante. No marques completed sin evidencia concreta en evidence. Prioriza cerrar pasos existentes antes de ampliar el plan.",
             "Puedes crear/leer/editar/buscar/mover/copiar archivos en el workdir y ejecutar Bash/Python/Node/Bun cuando el runtime esté disponible. Usa workspace_exec para tests, builds y scripts finitos; no inventes su resultado.",
+            "Antes de improvisar una metodología o framework, consulta skill_list y carga con skill_load cualquier skill global que encaje con el objetivo. Usa skill_read_resource para referencias y skill_run_script para helpers incluidos en la skill; los scripts se ejecutan en una copia privada dentro del sandbox del usuario.",
             "Si el objetivo requiere dejar un bot, servidor o servicio ejecutándose después de este turno, usa process_start. Verifica process_status/process_logs, corrige errores y reinicia cuando sea necesario; no mantengas un workspace_exec infinito.",
-            "Cuando falte documentación o información actual, delega con spawn_agents. Usa researcher-web si api-search está disponible y browser-web en caso contrario o para navegación/scraping. Pide al investigador guardar documentación útil en Markdown dentro de su carpeta de tarea cuando vaya a ser necesaria para continuar la implementación.",
-            "Si después de una investigación aún falta un dato, realiza otra investigación enfocada únicamente en el hueco restante; no abandones el goal por un primer intento incompleto.",
+            "Cuando falte documentación o información actual, primero revisa RESULTADOS DE INVESTIGACIONES PREVIAS. Solo si ahí no está la respuesta, delega con spawn_agents. Usa researcher-web si api-search está disponible y browser-web en caso contrario o para navegación/scraping. Pide al investigador guardar documentación útil en Markdown dentro de su carpeta de tarea cuando vaya a ser necesaria para continuar la implementación.",
+            "No repitas una investigación ya realizada con otra redacción. Si después de consumir sus resultados aún falta un dato, formula una segunda investigación enfocada únicamente en un hueco factual nuevo y específico.",
             "Para imágenes útiles a modelos sin visión, delega browser-web hacia páginas de archivo de Wikimedia Commons: conserva URL de la página File:, descripción textual, autor/licencia cuando estén visibles y descarga el recurso si el objetivo lo necesita. No adivines el contenido visual.",
             "No salgas del workdir. No uses terminal para escribir archivos cuando existe una tool de filesystem más precisa, salvo que el propio build/script deba generarlos.",
             "No hagas git push, despliegues, pagos, cambios de seguridad ni acciones externas irreversibles salvo que el objetivo del usuario las autorice explícitamente.",
@@ -406,6 +511,7 @@ export class GoalRuntime {
             `OBJETIVO ORIGINAL:\n${goal.objective}`,
             `ESTADO ACTUAL:\n${this.deps.tasklists.format(tasklist)}`,
             goal.verifierFeedback ? `FEEDBACK DEL VERIFIER ANTERIOR:\n${goal.verifierFeedback}` : "",
+            delegatedContext ? `RESULTADOS DE INVESTIGACIONES PREVIAS — reutilízalos antes de lanzar otras:\n${truncate(delegatedContext, 18000)}` : "",
             pendingInstructions.length ? `NUEVAS INSTRUCCIONES DEL USUARIO — son obligatorias y corrigen/amplían el objetivo:\n${pendingInstructions.map((item) => `- ${item}`).join("\n")}` : "",
             `WORKDIR (vista parcial):\n${truncate(this.deps.workspace.listRecursive(goal.jid, ".", 180).join("\n"), 10000)}`,
             `ITERACIÓN: ${iteration}/${goal.maxIterations}`,
@@ -428,8 +534,43 @@ export class GoalRuntime {
               : `Ejecutando ${name}`,
             lastEventAt: new Date().toISOString(),
           });
-          const toolResult = await this.deps.executeTool(goal.jid, goal.id, goal.tasklistId, name, args, signal);
-          trace.push({ name, args: structuredClone(args), result: toolResult });
+          let effectiveArgs = args;
+          let toolResult: string;
+          const currentGoal = this.get(goal.jid, goal.id) ?? goal;
+          const currentTasklist = this.deps.tasklists.get(goal.jid, goal.tasklistId)!;
+
+          if (name === "tasklist_create") {
+            toolResult = `Error: este goal ya tiene la tasklist autoritativa ${goal.tasklistId}. Usa tasklist_read/update/add sobre esa lista.`;
+          } else if (name === "tasklist_replace" && !this.tasklistStillGeneric(currentTasklist)) {
+            toolResult = "Error: tasklist_replace solo está permitido durante la planificación inicial. El plan ya está concretado; conserva evidencia y progreso con tasklist_update/tasklist_add.";
+          } else if (name === "tasklist_add") {
+            const progress = this.deps.tasklists.progress(currentTasklist);
+            const requestedItems = Array.isArray(args.items) ? args.items : [];
+            if (currentTasklist.items.length >= 30) {
+              toolResult = "Error: la tasklist alcanzó el límite operativo de 30 pasos. Cierra, combina o marca los pasos existentes antes de añadir más.";
+            } else if (currentGoal.noProgressIterations >= 1 && progress.done <= iterationStartProgress.done && progress.pending > 0) {
+              toolResult = "Error: no puedes ampliar la tasklist tras una iteración sin progreso. Completa o desbloquea al menos un paso existente antes de añadir nuevos.";
+            } else if (tasklistAddsThisIteration >= 4) {
+              toolResult = "Error: ya se añadieron suficientes pasos nuevos en esta iteración. Prioriza ejecutar la tasklist existente.";
+            } else {
+              const allowed = Math.max(0, Math.min(4 - tasklistAddsThisIteration, 30 - currentTasklist.items.length));
+              const sliced = requestedItems.slice(0, allowed);
+              tasklistAddsThisIteration += sliced.length;
+              effectiveArgs = { ...args, items: sliced };
+              toolResult = await this.deps.executeTool(goal.jid, goal.id, goal.tasklistId, name, effectiveArgs, signal);
+            }
+          } else if (name === "spawn_agents") {
+            const reuse = this.researchReuseMessage(currentGoal, args);
+            if (reuse) {
+              toolResult = reuse;
+            } else {
+              toolResult = await this.deps.executeTool(goal.jid, goal.id, goal.tasklistId, name, args, signal);
+              this.rememberResearch(goal.jid, goal.id, extractResearchPrompts(args), toolResult);
+            }
+          } else {
+            toolResult = await this.deps.executeTool(goal.jid, goal.id, goal.tasklistId, name, args, signal);
+          }
+          trace.push({ name, args: structuredClone(effectiveArgs), result: toolResult });
           this.patch(goal.jid, goal.id, {
             currentPhase: "executing",
             currentTool: undefined,
@@ -463,6 +604,7 @@ export class GoalRuntime {
         || after.items.length < 2
         || after.items.some((item) => item.status === "pending" || item.status === "in_progress" || item.status === "blocked");
       let verifier: GoalVerifierResult;
+      let verifierRan = false;
       if (deterministicPending) {
         const pending = after.items.filter((item) => item.status === "pending" || item.status === "in_progress" || item.status === "blocked").map((item) => `${item.id}: ${item.text} [${item.status}]`).slice(0, 12);
         const genericMissing = this.tasklistStillGeneric(after)
@@ -474,6 +616,7 @@ export class GoalRuntime {
           reason: genericMissing.length ? "La planificación inicial aún no fue concretada." : "La tasklist todavía tiene trabajo pendiente o bloqueado.",
         };
       } else {
+        verifierRan = true;
         verifier = await this.verify(goal, after, result.content, trace, signal);
       }
       if (verifier.complete) {
@@ -497,8 +640,16 @@ export class GoalRuntime {
       }
 
       const feedback = [verifier.reason, ...verifier.missing.map((item) => `- ${item}`)].filter(Boolean).join("\n");
-      if (verifier.missing.length) {
-        this.deps.tasklists.addItems(goal.jid, goal.tasklistId, verifier.missing.map((item) => `Resolver verificación: ${item}`));
+      // Los pendientes deterministas YA existen en la tasklist. Antes se volvían a
+      // insertar como "Resolver verificación: Tn..." en cada iteración, provocando
+      // crecimientos 2/8 → 2/11 → 2/14 → 2/17 sin trabajo real. Solo un verifier
+      // externo, ejecutado cuando la lista estaba cerrada, puede descubrir huecos nuevos.
+      if (verifierRan && verifier.missing.length) {
+        this.deps.tasklists.addItems(
+          goal.jid,
+          goal.tasklistId,
+          verifier.missing.slice(0, 6).map((item) => `Resolver verificación: ${item}`),
+        );
       }
       const current = this.deps.tasklists.get(goal.jid, goal.tasklistId)!;
       const signature = this.progressSignature(goal.jid, current);

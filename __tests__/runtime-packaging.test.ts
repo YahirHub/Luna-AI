@@ -13,6 +13,9 @@ describe("empaquetado del runtime multimedia", () => {
     const browserPrepareSource = await Bun.file(
       new URL("../scripts/prepare-agent-browser.ts", import.meta.url),
     ).text();
+    const piperPrepareSource = await Bun.file(
+      new URL("../scripts/prepare-piper-neo.ts", import.meta.url),
+    ).text();
     const browserRuntimeSource = await Bun.file(
       new URL("../src/browser/browser-runtime.ts", import.meta.url),
     ).text();
@@ -23,12 +26,28 @@ describe("empaquetado del runtime multimedia", () => {
     const entrypointSource = await Bun.file(new URL("../entrypoint.sh", import.meta.url)).text();
 
     expect(packageJson.scripts.build).toContain("prepare:browser");
+    expect(packageJson.scripts.build).toContain("prepare:piper");
+    expect(packageJson.scripts.start).toContain("prepare:piper");
     expect(packageJson.scripts.build).toContain("package:runtime");
     expect(packageJson.scripts.dev).toContain("prepare:browser");
     expect(packageJson.scripts.start).toContain("prepare:browser");
     expect(packageJson.scripts.postinstall).toContain("prepare:browser");
     expect(packageJson.trustedDependencies).toContain("agent-browser");
     expect(source).toContain('"dist", "runtime", "whisper"');
+    expect(source).toContain('"dist", "runtime", "piper-neo"');
+    expect(source).toContain("Piper Neo copiado");
+    expect(piperPrepareSource).toContain("ThowiLabs/Piper-Neo");
+    expect(piperPrepareSource).toContain('PIPER_NEO_RELEASE_TAG');
+    expect(piperPrepareSource).toContain('/releases/latest');
+    expect(piperPrepareSource).toContain('piper_linux_x86_64.tar.gz');
+    expect(piperPrepareSource).toContain('piper_linux_aarch64.tar.gz');
+    expect(piperPrepareSource).toContain('piper_linux_armv7l.tar.gz');
+    expect(piperPrepareSource).toContain('piper_windows_amd64.zip');
+    expect(piperPrepareSource).toContain('Descarga:');
+    expect(piperPrepareSource).toContain('EXECUTABLE_VALIDATE_TIMEOUT_MS');
+    expect(piperPrepareSource).toContain('Promise.race');
+    expect(piperPrepareSource).toContain('manifest.json');
+    expect(piperPrepareSource).toContain('directExecutable');
     expect(source).toContain('"dist", "runtime", "twemoji"');
     expect(source).toContain("Assets Twemoji copiados");
     expect(source).toContain("agent-browser nativo copiado");
