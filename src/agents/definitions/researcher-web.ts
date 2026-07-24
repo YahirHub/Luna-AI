@@ -13,10 +13,27 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
     "agent_workspace_append_text",
     "agent_workspace_edit_text",
     "agent_workspace_delete",
-    "skill_list",
+    "skill_search",
     "skill_load",
     "skill_read_resource",
   ],
+  initialToolNames: ["web_search", "read_url"],
+  toolGroups: {
+    workspace: {
+      description: "guardar notas o handoffs Markdown dentro de la carpeta privada del investigador",
+      toolNames: ["agent_workspace_list", "agent_workspace_read_text", "agent_workspace_write_text", "agent_workspace_append_text", "agent_workspace_edit_text", "agent_workspace_delete"],
+      instructions: [
+        "Escribe únicamente dentro de tu carpeta privada. Si la investigación se reutilizará para implementar código, guarda un Markdown autocontenido con API/clases/métodos, ejemplos mínimos, versiones/limitaciones y URLs fuente.",
+      ],
+    },
+    skills: {
+      description: "buscar y leer una skill global relevante para la metodología de investigación",
+      toolNames: ["skill_search", "skill_load", "skill_read_resource"],
+      instructions: [
+        "Usa skill_search y carga solo una coincidencia útil. Los subagentes solo leen skills: la ejecución de scripts se delega al goal/orquestador.",
+      ],
+    },
+  },
   spawnableAgents: [],
   includeMessageHistory: false,
   outputMode: "last_message",
@@ -26,6 +43,7 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
   systemPrompt: [
     "Eres un investigador web experto que trabaja en un contexto completamente aislado del agente principal.",
     "Tu única misión es resolver con evidencia la pregunta exacta que recibiste.",
+    "Tu toolset es progresivo: web_search/read_url están disponibles al inicio. Usa agent_capability_load solo si realmente necesitas workspace o skills.",
     "Construye de forma privada una lista de evidencia necesaria y detente en cuanto todos los puntos estén verificados o explícitamente sin resolver.",
     "El timeout configurado es solo un techo de seguridad, no un objetivo de duración.",
     "Los snippets y answer boxes del buscador sirven para descubrir fuentes, no son evidencia final: abre las páginas importantes con read_url antes de afirmar un dato.",
@@ -37,9 +55,6 @@ export const RESEARCHER_WEB_AGENT: AgentDefinition = {
     "Devuelve una síntesis concisa y útil para el agente padre, con hallazgos exactos, URLs completas de las fuentes utilizadas y cualquier punto no resuelto.",
     "La respuesta final debe estar completa y ser compacta: prioriza exactamente lo solicitado y procura no superar unas 7000-9000 caracteres. No cortes tablas ni frases a la mitad.",
     "No devuelvas páginas completas ni volcados de resultados de búsqueda.",
-    "Puedes crear notas, tablas o borradores dentro de tu carpeta privada con agent_workspace_*. No puedes tocar archivos fuera de esa carpeta.",
-    "Si existe una skill global relevante para la metodología de investigación, framework o dominio, puedes descubrirla con skill_list y cargarla con skill_load. Los subagentes solo leen skills: la ejecución de scripts se delega al goal/orquestador.",
-    "Si la misión indica que la investigación será reutilizada para implementar código, guarda además un Markdown autocontenido dentro de tu carpeta con API/clases/métodos relevantes, ejemplos mínimos, versiones/limitaciones y URLs fuente. Ese archivo es un handoff para que el goal pueda continuar sin volver a investigar lo ya confirmado.",
   ].join("\n"),
   instructionsPrompt: [
     "Usa tantas búsquedas enfocadas y lecturas de fuentes como la evidencia realmente requiera.",

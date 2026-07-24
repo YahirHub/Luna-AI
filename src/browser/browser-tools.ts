@@ -5,6 +5,7 @@ export const BROWSER_AGENT_TOOL_NAMES = [
   "browser_snapshot",
   "browser_read",
   "browser_get_html",
+  "browser_find_html",
   "browser_eval",
   "browser_console",
   "browser_errors",
@@ -50,6 +51,24 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
           selector: { type: "string", description: "Selector o referencia. Predeterminado: html." },
           filename: { type: "string", description: "Nombre .html opcional dentro de la carpeta del agente." },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_find_html",
+      description: "Busca coincidencias localmente dentro del HTML renderizado sin devolver todo el documento al LLM. Puede extraer URLs/medios o fragmentos de texto; úsala antes de browser_get_html cuando solo necesitas localizar un enlace, .mp4, embed, atributo o patrón simple.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Texto literal a buscar, por ejemplo .mp4, video, download o un identificador." },
+          mode: { type: "string", enum: ["text", "urls", "media"], description: "text devuelve fragmentos; urls extrae enlaces coincidentes; media restringe a candidatos de medios." },
+          selector: { type: "string", description: "Selector opcional. Predeterminado: html." },
+          max_matches: { type: "integer", minimum: 1, maximum: 100, description: "Máximo de coincidencias. Predeterminado: 30." },
+        },
+        required: ["query"],
         additionalProperties: false,
       },
     },
@@ -264,7 +283,7 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_auth_profiles",
-      description: "Lista perfiles de credenciales guardados por el sistema para este usuario de Luna. Devuelve solo referencias opacas, URL y nombre de usuario; nunca contraseñas. Úsala cuando una sesión haya expirado o necesites elegir entre varias cuentas del mismo sitio.",
+      description: "Lista perfiles de credenciales guardados por el sistema para este usuario de Luna. Devuelve solo referencias opacas, URL y nombre de usuario; nunca contraseñas. En una orden explícita de iniciar sesión, no la uses para decidir la identidad: si el usuario no indicó correo/usuario, primero solicítalo con browser_request_user_input. Ni un único perfil ni un valor prellenado equivalen a consentimiento para usar esa cuenta.",
       parameters: {
         type: "object",
         properties: {
@@ -279,12 +298,12 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_request_user_input",
-      description: "Pausa esta misma ejecución de navegador para pedir al sistema un dato que falta. La sesión de agent-browser permanece abierta y la tool no retorna hasta que el usuario responda o cancele. Para password u otp el valor se captura fuera del LLM y solo se devuelve una referencia segura.",
+      description: "Pausa esta misma ejecución de navegador para pedir al sistema cualquier dato humano imprescindible que falte (usuario/correo, contraseña, OTP, token/API key/respuesta de seguridad, CAPTCHA textual u otro texto). La sesión de agent-browser permanece abierta y la tool no retorna hasta que el usuario responda o cancele. Para password, otp o secret el valor se captura fuera del LLM y solo se devuelve una referencia segura. Si password llega sin URL o usuario, el runtime intenta inferirlos desde la página, la misión y los perfiles guardados; si aún falta identidad, solicita primero usuario/correo en vez de abortar.",
       parameters: {
         type: "object",
         properties: {
-          kind: { type: "string", enum: ["username", "password", "otp", "text"] },
-          field_name: { type: "string", description: "Nombre humano del dato solicitado, por ejemplo correo, contraseña o código de verificación." },
+          kind: { type: "string", enum: ["username", "password", "otp", "secret", "text"] },
+          field_name: { type: "string", description: "Nombre humano del dato solicitado, por ejemplo correo, contraseña, código de verificación o API key." },
           url: { type: "string", description: "Sitio al que pertenece el dato, cuando aplique." },
           username: { type: "string", description: "Usuario/correo conocido. Es obligatorio cuando kind=password para asociar la contraseña a la cuenta correcta." },
           message: { type: "string", description: "Explicación breve de por qué se necesita el dato." },
@@ -328,7 +347,7 @@ export const BROWSER_AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_auth_login",
-      description: "Inicia sesión con una credencial temporal o un perfil cifrado guardado por el sistema. Puedes pasar credential_ref directamente, o url+username para que el sistema resuelva una cuenta persistente. La contraseña nunca se entrega al LLM.",
+      description: "Inicia sesión con una credencial temporal o un perfil cifrado guardado por el sistema. Puedes pasar una credential_ref entregada explícitamente a la tarea, o url+username después de que el usuario haya indicado/confirmado esa identidad. URL sola nunca selecciona una cuenta, aunque exista un único perfil guardado. La contraseña nunca se entrega al LLM.",
       parameters: {
         type: "object",
         properties: {

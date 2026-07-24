@@ -2,13 +2,24 @@ import type { ToolDefinition } from "../ai.ts";
 
 export type AgentOutputMode = "last_message" | "structured_output";
 
+export interface AgentToolGroup {
+  description: string;
+  toolNames: string[];
+  /** Instrucciones que solo se entregan cuando el grupo se carga. */
+  instructions?: string[];
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
   /** Prompt breve que ayuda al agente padre a decidir cuándo delegar. */
   spawnerPrompt: string;
-  /** Herramientas disponibles dentro del contexto aislado del subagente. */
+  /** Conjunto total autorizado dentro del contexto aislado del subagente. */
   toolNames: string[];
+  /** Subconjunto barato que se envía en la primera ronda. Por defecto usa toolNames completo. */
+  initialToolNames?: string[];
+  /** Grupos adicionales cargables durante la misma ejecución con agent_capability_load. */
+  toolGroups?: Record<string, AgentToolGroup>;
   /** Subagentes que este agente puede crear. Vacío para investigadores hoja. */
   spawnableAgents: string[];
   includeMessageHistory: boolean;

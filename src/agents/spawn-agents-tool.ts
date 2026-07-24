@@ -25,8 +25,8 @@ export const SPAWN_AGENTS_TOOL: ToolDefinition = {
       "Crea subagentes especializados con contexto aislado y los ejecuta en segundo plano para no bloquear el chat.",
       "Úsala para delegar dos o más investigaciones independientes en paralelo; por ejemplo un researcher-web por proveedor, producto o tema.",
       "Cada subagente puede usar sus propias herramientas y devuelve únicamente su respuesta final compacta.",
-      "La herramienta NO crea PDFs ni entrega archivos: cuando termine, tú recuperas el control, revisas los resultados, puedes lanzar investigaciones adicionales si algo falta y después debes crear/sintetizar los archivos solicitados con las herramientas normales.",
-      "Usa researcher-web/api-search para búsquedas rápidas, noticias, comparaciones o verificación pública solo cuando existan motores configurados. Si api-search no está disponible, las solicitudes researcher-web se enrutan automáticamente a browser-web usando Dogpile como buscador de respaldo.",
+      "La herramienta NO crea PDFs ni entrega archivos. Tras registrarla, el turno principal sigue disponible para trabajo independiente; cuando termine, el supervisor integra el resultado con la solicitud original y completa la parte que dependía del subagente.",
+      "Usa researcher-web/api-search para búsquedas rápidas, noticias, comparaciones o verificación pública solo cuando existan motores configurados. Si api-search no está disponible, las solicitudes researcher-web se enrutan automáticamente a browser-web usando Dogpile para web general, Wikimedia Commons para imágenes y Archive.org para video/audio/contenido público.",
       "Usa browser-web/browser-agent para analizar, scrapear o inventariar un dominio concreto, recorrer sus páginas internas, inspeccionar HTML/DOM/consola/red, iniciar sesión, tomar capturas o descargar imágenes, favicon y archivos.",
     ].join(" "),
     parameters: {
@@ -81,7 +81,7 @@ export const RESEARCHER_WEB_DIRECT_TOOL: ToolDefinition = {
       "Lanza un único investigador web en un contexto aislado.",
       "Úsalo para búsquedas rápidas o investigación pública en múltiples fuentes. NO lo uses para recorrer o scrapear íntegramente un dominio concreto: para eso usa browser_agent.",
       "El investigador decide cuántas búsquedas y lecturas necesita, prioriza fuentes oficiales y devuelve una síntesis con URLs y puntos no resueltos.",
-      "La tarea queda en segundo plano, el chat continúa disponible y el orquestador revisa el resultado automáticamente al terminar.",
+      "La tarea queda en segundo plano, el chat continúa disponible y el orquestador integra automáticamente el resultado con la solicitud original al terminar; no te limites a repetir el reporte del investigador.",
     ].join(" "),
     parameters: {
       type: "object",
@@ -108,8 +108,8 @@ export const BROWSER_WEB_DIRECT_TOOL: ToolDefinition = {
     description: [
       "Lanza un agente de navegador aislado para navegar sitios interactivos, iniciar sesión mediante credential_ref segura, extraer datos, tomar capturas o descargar archivos.",
       "Es la opción correcta para analizar o scrapear un dominio específico, recorrer todas sus rutas internas, inspeccionar HTML, consola y red, y descargar imágenes/favicon/assets.",
-      "El agente trabaja usando accesibilidad, DOM renderizado y herramientas de depuración. Los archivos físicos quedan en el workdir y tú recuperas el control para crear PDFs o enviarlos por WhatsApp.",
-      "Nunca incluyas una contraseña en prompt ni en argumentos: usa únicamente la credential_ref segura que el sistema haya colocado en el mensaje.",
+      "El agente trabaja usando accesibilidad, DOM renderizado y herramientas de depuración. Los archivos físicos quedan en el workdir; mientras trabaja puedes completar partes independientes y, al terminar, el supervisor continúa la intención original con sus resultados.",
+      "Nunca incluyas una contraseña en prompt ni en argumentos: usa únicamente la credential_ref segura que el sistema haya colocado en el mensaje. Una browser-profile-* obtenida de browser_credentials_list no autoriza por sí sola a elegir esa cuenta: si el usuario pidió login sin indicar correo/usuario, no asumas identidad y deja que browser-web la solicite.",
     ].join(" "),
     parameters: {
       type: "object",
@@ -147,7 +147,7 @@ export const BROWSER_CREDENTIAL_CONTROL_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "browser_credentials_list",
-      description: "Lista las cuentas de navegador guardadas por el sistema para el usuario actual. Devuelve URL, correo/usuario y una referencia opaca, nunca contraseñas. Soporta varias cuentas por sitio.",
+      description: "Lista las cuentas de navegador guardadas por el sistema para el usuario actual. Devuelve URL, correo/usuario y una referencia opaca, nunca contraseñas. Soporta varias cuentas por sitio. No uses el resultado para escoger una identidad en una nueva orden de login si el usuario no indicó cuál cuenta usar, aunque solo exista una.",
       parameters: {
         type: "object",
         properties: {
@@ -208,7 +208,7 @@ function getSpawnAgentsTool(apiSearchAvailable: boolean): ToolDefinition {
   tool.function.description = [
     "Crea subagentes de navegador con contexto aislado y los ejecuta en segundo plano para no bloquear el chat.",
     "api-search no está disponible en esta ejecución, por lo que solo browser-web puede delegarse.",
-    "Para búsquedas públicas generales, browser-web usa Dogpile como buscador de descubrimiento y después verifica las fuentes originales.",
+    "Para búsquedas públicas generales, browser-web usa Dogpile para descubrimiento; para imágenes prioriza Wikimedia Commons y para video/audio/contenido descargable prioriza Archive.org, verificando siempre la fuente original.",
     "Para dominios concretos puede navegar, scrapear, inspeccionar HTML/DOM/consola/red, iniciar sesión, tomar capturas y descargar archivos.",
   ].join(" ");
   const parameters = tool.function.parameters as Record<string, any>;
@@ -249,8 +249,10 @@ export interface SpawnAgentsDependencies {
   /** Permite deduplicar llamadas equivalentes emitidas por el mismo mensaje del modelo. */
   filterRequests?: (agents: SpawnAgentRequest[]) => SpawnAgentRequest[];
   browserCredentials?: BrowserCredentialStore;
-  /** Texto original del usuario, usado para reanudar una tarea después de pedir un dato humano. */
+  /** Solicitud original del usuario; también permite reanudar browser-web tras pedir un dato humano. */
   resumePrompt?: string;
+  /** Contexto reciente del turno padre, congelado al delegar. */
+  resumeContext?: string;
   /** Permite al subagente pedir datos al usuario mediante un mensaje de sistema. */
   onSystemMessage?: (text: string) => void | Promise<void>;
   /** Envía una captura/archivo generado por el agente mientras espera datos. */
@@ -440,6 +442,7 @@ async function runSpawnTask(
             workspace: dependencies.workspace,
             credentials: dependencies.browserCredentials,
             resumePrompt: dependencies.resumePrompt ?? request.prompt ?? "",
+            initialCredentialRef: credentialRef || undefined,
             onStateChange: async (state) => {
               dependencies.tasks.updateAgent(dependencies.jid, tracked.record.id, {
                 status: state,
@@ -464,7 +467,7 @@ async function runSpawnTask(
                   `Pantalla donde ${tracked.record.id} necesita ${input.fieldName}`,
                 );
               }
-              const secret = input.kind === "password" || input.kind === "otp";
+              const secret = input.kind === "password" || input.kind === "otp" || input.kind === "secret";
               const heading = secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA";
               const lines = [
                 heading,
@@ -712,7 +715,7 @@ export async function executeSpawnAgentsTool(
   if (requested.length === 0) return "Error: agents debe contener al menos un subagente con agent_type y prompt.";
   if (requested.length > MAX_AGENTS_PER_CALL) return `Error: solo se permiten ${MAX_AGENTS_PER_CALL} subagentes por llamada.`;
   if (dependencies.filterRequests) requested = dependencies.filterRequests(requested);
-  if (requested.length === 0) return JSON.stringify({ status: "deduplicated", reports: [], message: "Las solicitudes equivalentes de subagentes ya se ejecutaron en esta ronda." });
+  if (requested.length === 0) return JSON.stringify({ status: "deduplicated", reports: [], message: "Las solicitudes equivalentes de subagentes ya se registraron en este turno; no se volverán a lanzar." });
 
   for (const request of requested) {
     const definition = validateSpawnableAgent(request.agent_type, MAIN_SPAWNABLE_AGENTS);
@@ -727,7 +730,10 @@ export async function executeSpawnAgentsTool(
     : uniqueAgents.length === 1
       ? `${uniqueAgents[0]?.name || "Tarea"}: ${uniqueAgents[0]?.prompt?.slice(0, 70) ?? "subagente"}`
       : `Tarea paralela con ${uniqueAgents.length} subagentes`;
-  const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length);
+  const task = dependencies.tasks.create(dependencies.jid, title, uniqueAgents.length, {
+    prompt: dependencies.resumePrompt ?? "",
+    context: dependencies.resumeContext ?? "",
+  });
   const background = args.background !== false;
 
   // Un runtime padre (por ejemplo /goal) debe poder cancelar también los
@@ -769,7 +775,7 @@ export async function executeSpawnAgentsTool(
       title: task.record.title,
       status: "queued",
       background: true,
-      message: "La tarea quedó bajo control del supervisor en segundo plano. Los mensajes del sistema task_registered/agent_started son la única fuente autoritativa de su estado. No repitas la misión completa ni afirmes que sigue en cola o activa; limita tu respuesta a confirmar que el supervisor la administrará. Puedes seguir conversando y cancelarla con task_cancel/agent_cancel.",
+      message: "La tarea quedó bajo control del supervisor en segundo plano. NO la relances ni esperes su resultado dentro de este turno. Continúa ahora con cualquier parte restante de la petición del usuario que NO dependa de ese resultado. No inventes la conclusión dependiente del subagente: el supervisor integrará automáticamente el resultado con la solicitud original cuando termine. Puedes seguir conversando y cancelarla con task_cancel/agent_cancel.",
     }, null, 2);
   }
 

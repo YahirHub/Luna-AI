@@ -37,6 +37,50 @@ describe("registro modular", () => {
     expect(moduleRegistry.resolveCommand("tasklist", user)).toBeNull();
   });
 
+  it("expone por turno solo las tools de módulos activos y permite lazy loading explícito", () => {
+    const pool = [
+      tool("capability_load"),
+      tool("control_ping"),
+      tool("memory_read"),
+      tool("workspace_read_text"),
+      tool("workspace_write_text"),
+      tool("tts_speak"),
+    ];
+    const simple = moduleRegistry.filterToolsForTurn(pool, "hola, ¿cómo estás?", user);
+    expect(simple.tools.map((entry) => entry.function.name)).toEqual(["capability_load", "control_ping"]);
+
+    const memory = moduleRegistry.filterToolsForTurn(pool, "recuerda que prefiero respuestas breves", user);
+    expect(memory.tools.map((entry) => entry.function.name)).toContain("memory_read");
+    expect(memory.tools.map((entry) => entry.function.name)).not.toContain("workspace_read_text");
+
+    const intentOnly = moduleRegistry.filterToolsForTurn(pool, "edita el proyecto", user);
+    expect(intentOnly.tools.map((entry) => entry.function.name)).toContain("workspace_read_text");
+    expect(intentOnly.tools.map((entry) => entry.function.name)).not.toContain("workspace_write_text");
+
+    const loaded = moduleRegistry.filterToolsForTurn(pool, "hola", user, ["workspace"]);
+    expect(loaded.tools.map((entry) => entry.function.name)).toContain("workspace_read_text");
+    expect(loaded.tools.map((entry) => entry.function.name)).toContain("workspace_write_text");
+    expect(loaded.tools.map((entry) => entry.function.name)).not.toContain("tts_speak");
+  });
+
+  it("difiere también las instrucciones avanzadas hasta capability_load", async () => {
+    const prompt = moduleRegistry.buildCapabilityPrompt("edita el proyecto", user);
+    expect(prompt).toContain("Inspecciona primero el workdir");
+    expect(prompt).not.toContain("workspace_exec está confinado");
+
+    const loaded = await moduleRegistry.buildLoadedCapabilityContext("workspace", "edita el proyecto", user, false);
+    expect(loaded).toContain("workspace_exec está confinado");
+    expect(loaded).not.toContain("Inspecciona primero el workdir");
+  });
+
+  it("capability_load publica un índice compacto sin cargar schemas de todos los módulos", () => {
+    const definition = moduleRegistry.buildCapabilityLoadTool(user);
+    expect(definition.function.name).toBe("capability_load");
+    expect(definition.function.description).toContain("workspace=");
+    expect(definition.function.description).toContain("skills=");
+    expect(definition.function.description).not.toContain("admin=");
+  });
+
   it("rechaza tools no declaradas por defecto", () => {
     const result = moduleRegistry.filterTools([tool("memory_read"), tool("tool_nueva_sin_modulo")], user);
     expect(result.tools.map((entry) => entry.function.name)).toEqual(["memory_read"]);
@@ -81,20 +125,25 @@ describe("registro modular", () => {
   });
 
   it("inyecta api-search solo cuando existe un proveedor y activa browser como fallback", () => {
-    const prompt = moduleRegistry.buildCapabilityPrompt("Busca el precio actual de GPT", user);
-    const searchTool = moduleRegistry.filterTools([tool("researcher_web")], user).tools;
+    const request = "Busca el precio actual de GPT";
+    const prompt = moduleRegistry.buildCapabilityPrompt(request, user);
+    const routedTools = moduleRegistry.filterToolsForTurn(
+      [tool("researcher_web"), tool("browser_agent")],
+      request,
+      user,
+    ).tools.map((entry) => entry.function.name);
     if (isApiSearchCapabilityAvailable()) {
-      expect(prompt).toContain("search: api-search");
       expect(prompt).toContain("[search] Búsqueda API");
-      expect(searchTool.map((entry) => entry.function.name)).toEqual(["researcher_web"]);
+      expect(routedTools).toContain("researcher_web");
+      expect(routedTools).not.toContain("browser_agent");
     } else {
-      expect(prompt).not.toContain("search: api-search");
       expect(prompt).not.toContain("[search] Búsqueda API");
       expect(prompt).toContain("[browser] Navegador");
-      expect(prompt).toContain("dogpile.com");
-      expect(searchTool).toEqual([]);
+      expect(routedTools).toContain("browser_agent");
+      expect(routedTools).not.toContain("researcher_web");
     }
     expect(prompt).not.toContain("[whisper] Whisper");
+    expect(prompt).not.toContain("CAPACIDADES MODULARES DISPONIBLES");
 
     const browser = moduleRegistry.buildCapabilityPrompt("Analiza https://example.com y descarga su favicon", user);
     expect(browser).toContain("[browser] Navegador");

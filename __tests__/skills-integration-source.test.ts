@@ -19,17 +19,19 @@ describe("integración global de Claude/Agent Skills", () => {
     expect(catalog).toContain("SKILLS_MODULE");
     expect(bot).toContain("...SKILL_TOOLS");
     expect(bot).toContain('moduleRegistry.bindContextProvider("skills"');
-    expect(bot).toContain("skillManager.buildCatalogForModel()");
+    expect(bot).not.toContain("skillManager.buildCatalogForModel()");
+    expect(bot).toContain("Usa skill_search para descubrir únicamente las skills relevantes");
     expect(bot).toContain("workspaceManager.ensureGlobalSkillsLinksForExistingUsers()");
     expect(bot).toContain("executeSkillTool(name, args, skillManager");
-    expect(bot).toContain("[SKILL GLOBAL CARGADA:");
+    expect(bot).not.toContain("[SKILL GLOBAL CARGADA:");
+    expect(goal).toContain("skill_search");
     expect(goal).toContain("skill_list");
     expect(goal).toContain("skill_load");
     expect(goal).toContain("skill_run_script");
   });
 
   it("da a los agentes de investigación acceso de lectura a skills sin ejecución arbitraria", () => {
-    expect(agentRuntime).toContain('["skill_list", "skill_load", "skill_read_resource"]');
+    expect(agentRuntime).toContain('["skill_search", "skill_load", "skill_read_resource"]');
     expect(agentRuntime).toContain("allowScripts: false");
     expect(agentRuntime).toContain("executeDynamicCommands: false");
     expect(researcher).toContain("skill_load");

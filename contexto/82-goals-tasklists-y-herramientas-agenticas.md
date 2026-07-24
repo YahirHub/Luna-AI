@@ -6,7 +6,7 @@ Añadir a Luna una capa de autonomía de horizonte largo para trabajos que requi
 
 ## GoalRuntime
 
-`src/goals/goal-runtime.ts` administra objetivos persistentes por JID. `/goal <objetivo>` y la tool `goal_start` registran un goal y liberan inmediatamente el chat. El runtime ejecuta iteraciones en segundo plano, usa tools permitidas por el registro modular y finaliza solo cuando un verifier independiente confirma que el objetivo está cubierto.
+`src/goals/goal-runtime.ts` administra objetivos persistentes por JID. `/goal <objetivo>` y la tool `goal_start` registran un goal y liberan inmediatamente el chat. El runtime ejecuta iteraciones en segundo plano, usa tools permitidas por el registro modular y finaliza solo cuando un verifier independiente confirma que el objetivo está cubierto. Desde el registro 86 el toolset de cada iteración también es progresivo: parte de las capacidades operativas del goal y puede incorporar módulos adicionales con `capability_load` sin reiniciar la ejecución.
 
 Estados: `queued`, `running`, `waiting_user`, `completed`, `failed`, `cancelled`, `interrupted`.
 

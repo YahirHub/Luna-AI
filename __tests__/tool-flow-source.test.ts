@@ -20,8 +20,10 @@ describe("flujo autoritativo de tools", () => {
   });
 
   it("ofrece tools según el registro modular y la sesión autenticada", () => {
-    expect(botSource).toContain("getAvailableTools(remoteJid)");
-    expect(botSource).toContain("moduleRegistry.filterTools(pool, session)");
+    expect(botSource).toContain("getAvailableTools(remoteJid, userText, loadedCapabilities)");
+    expect(botSource).toContain("moduleRegistry.filterToolsForTurn(pool, message, session, loaded, pinned)");
+    expect(botSource).toContain('name === "capability_load"');
+    expect(botSource).toContain("resolveTools: () => getAvailableTools(remoteJid, userText, loadedCapabilities)");
     expect(botSource).toContain("if (!session.authenticated) return []");
   });
 

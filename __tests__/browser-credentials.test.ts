@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   BrowserCredentialStore,
+  browserLoginRequiresIdentityConfirmation,
   extractBrowserLoginIntent,
   sanitizeBrowserCredentialText,
 } from "../src/browser/browser-credentials.ts";
@@ -17,6 +18,32 @@ describe("credenciales seguras del navegador", () => {
     expect(intent.password).toBe("patito123");
   });
 
+
+  it("exige confirmar identidad cuando se ordena login sin usuario", () => {
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Abre https://example.com e inicia sesión",
+    )).toBe(true);
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Abre https://example.com e inicia sesión con el correo yo@example.com",
+    )).toBe(false);
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Abre https://example.com e inicia sesión",
+      "yo@example.com",
+    )).toBe(false);
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Abre https://example.com e inicia sesión",
+      "",
+      "browser-cred-explicita",
+    )).toBe(false);
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Abre https://example.com e inicia sesión",
+      "",
+      "browser-profile-guardado",
+    )).toBe(true);
+    expect(browserLoginRequiresIdentityConfirmation(
+      "Entra a https://example.com y revisa la página pública",
+    )).toBe(false);
+  });
 
   it("prioriza localhost sobre el dominio incluido en el correo y usa HTTP local", () => {
     const intent = extractBrowserLoginIntent(
@@ -126,6 +153,17 @@ it("maneja solicitudes genéricas de datos y secretos temporales fuera del LLM",
   expect(store.getSecret(secret.ref, "otro@lid")).toBeUndefined();
   expect(store.getSecret(secret.ref, "a@lid", true)?.value).toBe("123456");
   expect(store.getSecret(secret.ref, "a@lid")).toBeUndefined();
+
+  store.setPendingInput({
+    jid: "a@lid",
+    kind: "secret",
+    fieldName: "API key",
+    originalText: "configura la integración",
+  });
+  expect(store.getPendingInput("a@lid")?.kind).toBe("secret");
+  const apiKey = store.createSecret({ jid: "a@lid", kind: "secret", value: "sk-example" });
+  expect(store.getSecret(apiKey.ref, "a@lid", true)?.kind).toBe("secret");
+  expect(store.getSecret(apiKey.ref, "a@lid")).toBeUndefined();
 });
 
 

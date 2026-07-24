@@ -6,6 +6,22 @@ export const SKILL_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "skill_search",
+      description: "Busca localmente las skills globales relevantes para una tarea sin inyectar el catálogo completo. Devuelve solo unas pocas coincidencias; después usa skill_load únicamente sobre la skill necesaria.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Tecnología, dominio o metodología concreta que necesitas." },
+          limit: { type: "integer", minimum: 1, maximum: 10, description: "Máximo de resultados; por defecto 5." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "skill_list",
       description: "Lista las skills globales instaladas que el modelo puede invocar automáticamente. Devuelve solo metadatos; usa skill_load para cargar el SKILL.md relevante.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
@@ -97,6 +113,11 @@ export async function executeSkillTool(
   options: { executeDynamicCommands?: boolean; allowScripts?: boolean; destinationPrefix?: string } = {},
 ): Promise<string> {
   try {
+    if (name === "skill_search") {
+      const query = typeof args.query === "string" ? args.query.trim() : "";
+      const limit = typeof args.limit === "number" ? args.limit : 5;
+      return skills.searchForModel(query, limit);
+    }
     if (name === "skill_list") return skills.buildCatalogForModel();
     const skillName = typeof args.skill === "string" ? args.skill.trim() : "";
     if (!skillName) return "Error: skill es obligatorio.";

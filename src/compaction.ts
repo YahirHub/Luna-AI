@@ -437,41 +437,47 @@ export function parseCompactedResponse(
  * Convierte un CompactedSummary a un bloque de texto legible para inyectar
  * en el contexto dinámico (user message).
  */
+export const MAX_COMPACTED_SUMMARY_CONTEXT_CHARS = 8_000;
+
 export function summaryToTextBlock(summary: CompactedSummary): string {
+  const footer = "=== FIN DEL RESUMEN COMPACTADO ===";
+  const maxBodyChars = MAX_COMPACTED_SUMMARY_CONTEXT_CHARS - footer.length - 4;
   const parts: string[] = ["=== RESUMEN COMPACTADO DE LA CONVERSACIÓN ==="];
+  let chars = parts[0]!.length;
 
-  if (summary.durableFacts.length > 0) {
-    parts.push("", "DATOS IMPORTANTES:", summary.durableFacts.map((f) => `- ${f}`).join("\n"));
-  }
-  if (summary.preferences.length > 0) {
-    parts.push("", "PREFERENCIAS:", summary.preferences.map((p) => `- ${p}`).join("\n"));
-  }
-  if (summary.currentTopics.length > 0) {
-    parts.push("", "TEMAS ACTUALES:", summary.currentTopics.map((t) => `- ${t}`).join("\n"));
-  }
-  if (summary.verifiedToolActions.length > 0) {
-    parts.push("", "ACCIONES CONFIRMADAS:", summary.verifiedToolActions.map((a) => `- ${a}`).join("\n"));
-  }
-  if (summary.unverifiedClaims.length > 0) {
-    parts.push("", "SOLICITUDES NO CONFIRMADAS:", summary.unverifiedClaims.map((c) => `- ${c}`).join("\n"));
-  }
-  if (summary.pendingTasks.length > 0) {
-    parts.push("", "TAREAS PENDIENTES:", summary.pendingTasks.map((t) => `- ${t}`).join("\n"));
-  }
-  if (summary.decisions.length > 0) {
-    parts.push("", "DECISIONES:", summary.decisions.map((d) => `- ${d}`).join("\n"));
-  }
-  if (summary.importantConstraints.length > 0) {
-    parts.push("", "RESTRICCIONES:", summary.importantConstraints.map((c) => `- ${c}`).join("\n"));
-  }
-  if (summary.recentState) {
-    parts.push("", "ESTADO RECIENTE:", summary.recentState);
-  }
-  if (summary.unresolvedQuestions.length > 0) {
-    parts.push("", "PREGUNTAS SIN RESOLVER:", summary.unresolvedQuestions.map((q) => `- ${q}`).join("\n"));
+  const append = (title: string, values: unknown[], limit: number, itemChars = 260): void => {
+    const rows = values
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .slice(0, limit)
+      .map((value) => `- ${value.replace(/\s+/g, " ").trim().slice(0, itemChars)}`);
+    if (!rows.length) return;
+    const block = `\n\n${title}:\n${rows.join("\n")}`;
+    const remaining = maxBodyChars - chars;
+    if (remaining <= title.length + 8) return;
+    const bounded = block.length <= remaining ? block : block.slice(0, remaining).replace(/\s+\S*$/, "") + "\n- [...resumen recortado...]";
+    parts.push(bounded);
+    chars += bounded.length;
+  };
+
+  append("DATOS IMPORTANTES", summary.durableFacts, 10);
+  append("PREFERENCIAS", summary.preferences, 8, 220);
+  append("TEMAS ACTUALES", summary.currentTopics, 5, 220);
+  append("ACCIONES CONFIRMADAS", summary.verifiedToolActions, 8);
+  append("SOLICITUDES NO CONFIRMADAS", summary.unverifiedClaims, 5);
+  append("TAREAS PENDIENTES", summary.pendingTasks, 8);
+  append("DECISIONES", summary.decisions, 8);
+  append("RESTRICCIONES", summary.importantConstraints, 10);
+
+  if (summary.recentState && chars < maxBodyChars) {
+    const remaining = maxBodyChars - chars;
+    const block = `\n\nESTADO RECIENTE:\n${summary.recentState.trim().slice(0, Math.min(1_800, Math.max(0, remaining - 20)))}`;
+    if (block.length <= remaining) {
+      parts.push(block);
+      chars += block.length;
+    }
   }
 
-  parts.push("", "=== FIN DEL RESUMEN COMPACTADO ===");
-
-  return parts.join("\n");
+  append("PREGUNTAS SIN RESOLVER", summary.unresolvedQuestions, 6);
+  const body = parts.join("").slice(0, maxBodyChars);
+  return `${body}\n\n${footer}`;
 }

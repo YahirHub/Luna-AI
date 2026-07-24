@@ -101,6 +101,36 @@ describe("spawn_agents", () => {
     expect(workspace.list("user", `${task?.taskPath}/agents`).length).toBe(2);
   });
 
+  it("persiste solicitud y contexto de origen para la continuación automática", async () => {
+    const { workspace, tasks } = setup();
+    const raw = await executeSpawnAgentsTool({
+      background: false,
+      agents: [{ agent_type: "researcher-web", prompt: "Busca el clima de Villahermosa" }],
+    }, {
+      jid: "origin-user",
+      model: "model",
+      llmConfig,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      workspace,
+      tasks,
+      resumePrompt: "Revisa Villahermosa y compáralo con Jalpa",
+      resumeContext: "Luna: Jalpa tendrá máxima de 36°C.",
+      agentRunner: async (options) => ({
+        agentType: options.definition.id,
+        agentName: options.definition.displayName,
+        prompt: options.prompt,
+        runId: options.runId,
+        status: "completed" as const,
+        result: "Villahermosa tendrá máxima de 38°C.",
+        toolsCalled: [],
+      }),
+    });
+    const parsed = JSON.parse(raw) as { task_id: string };
+    const task = tasks.get("origin-user", parsed.task_id);
+    expect(task?.originPrompt).toBe("Revisa Villahermosa y compáralo con Jalpa");
+    expect(task?.originContext).toContain("Jalpa tendrá máxima de 36°C");
+  });
+
   it("mantiene resultados parciales cuando un subagente falla", async () => {
     const { workspace, tasks } = setup();
     const raw = await executeSpawnAgentsTool({
@@ -186,6 +216,8 @@ describe("spawn_agents", () => {
     expect(observed).toHaveLength(1);
     expect(observed[0]?.type).toBe("browser-web");
     expect(observed[0]?.prompt).toContain("https://www.dogpile.com/");
+    expect(observed[0]?.prompt).toContain("https://commons.wikimedia.org/wiki/Special:MediaSearch");
+    expect(observed[0]?.prompt).toContain("https://archive.org/advancedsearch.php");
     expect(observed[0]?.prompt).toContain("fuentes originales");
   });
 

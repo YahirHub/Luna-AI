@@ -7,35 +7,35 @@ import {
 } from "./storage.ts";
 
 export const MAX_MEMORY_CHARS = 64_000;
+export const MAX_MEMORY_CONTEXT_CHARS = 4_000;
 
-const DEFAULT_MEMORY = `# Memoria personal de Luna 📝
+const DEFAULT_MEMORY = `# Perfil persistente
 
-Esta memoria pertenece únicamente a la persona de este chat y sobrevive a !clear.
-
-## Perfil de la persona
-
-- Nombre: pendiente de preguntar
+- Nombre: pendiente de conocer
 - Forma de trato preferida: pendiente de conocer
-- Datos y preferencias importantes: todavía no registrados
-
-## Instrucciones para Luna
-
-- Sé simpática, cálida y genuinamente interesada en conocer a la persona.
-- Si el nombre sigue como "pendiente de preguntar", pregúntalo de manera natural únicamente durante un saludo o charla casual sin una solicitud operativa.
-- Nunca anexes la pregunta del nombre a investigaciones, archivos, informes, errores, configuraciones, alarmas, recordatorios ni seguimientos de tareas.
-- Cuando la persona diga su nombre, usa memory_write para reemplazar este estado pendiente por el nombre real.
-- Guarda aquí únicamente el perfil compacto: nombre, forma de trato y preferencias estables.
-- Para fechas, cumpleaños, personas, proyectos, decisiones o listas que puedan crecer, usa la bóveda temática memory_vault_*.
-- Nunca inventes información personal ni des por conocido un nombre que no esté confirmado.
-
-## Ejemplo de memoria actualizada
-
-\`\`\`
-Nombre: Juan
-Le gusta que le hable de manera casual
-Le interesa la programación en JavaScript
-\`\`\`
+- Preferencias estables: ninguna registrada
 `;
+
+function buildCompactMemoryContext(content: string, maxChars = MAX_MEMORY_CONTEXT_CHARS): string {
+  const clean = content.trim();
+  if (clean.length <= maxChars) return clean;
+  const lines = clean.split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
+  const priorityPattern = /\b(?:nombre|trato|prefer|idioma|lengua|formato|estilo|zona horaria|timezone|correo|email|tel[eé]fono|numero|n[uú]mero|ubicaci[oó]n)\b/iu;
+  const prioritized = lines.filter((line) => priorityPattern.test(line));
+  const remainder = lines.filter((line) => !priorityPattern.test(line));
+  const selected: string[] = [];
+  let chars = 0;
+  for (const line of [...prioritized, ...remainder]) {
+    if (selected.includes(line)) continue;
+    if (chars + line.length + 1 > maxChars - 120) break;
+    selected.push(line);
+    chars += line.length + 1;
+  }
+  return [
+    ...selected,
+    `[Perfil recortado para contexto: ${clean.length} caracteres almacenados; usa memory_read si necesitas el contenido completo.]`,
+  ].join("\n").slice(0, maxChars);
+}
 
 /**
  * Gestor de la memoria persistente del bot, por usuario.
@@ -75,6 +75,11 @@ export class MemoryManager {
     }
     this.init(jid);
     return DEFAULT_MEMORY;
+  }
+
+  /** Devuelve solo el perfil que conviene inyectar en cada request. */
+  getContextContent(jid: string, maxChars = MAX_MEMORY_CONTEXT_CHARS): string {
+    return buildCompactMemoryContext(this.getContent(jid), Math.max(500, Math.min(MAX_MEMORY_CONTEXT_CHARS, maxChars)));
   }
 
   /**

@@ -22,6 +22,21 @@ const MAX_DYNAMIC_OUTPUT_CHARS = 40_000;
 const MAX_CATALOG_CHARS = 16_000;
 const MAX_CATALOG_SKILLS = 100;
 const DESCRIPTION_LIMIT = 1_536;
+const SEARCH_DESCRIPTION_LIMIT = 700;
+
+function normalizeSearchText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._+-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function searchTokens(value: string): string[] {
+  return normalizeSearchText(value).split(" ").filter((token) => token.length > 1);
+}
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -339,6 +354,39 @@ export class SkillManager {
       chars += row.length + 1;
     }
     return lines.join("\n");
+  }
+
+  searchForModel(query: string, limit = 5): string {
+    const cleanQuery = query.replace(/\s+/g, " ").trim();
+    if (!cleanQuery) return "Error: query es obligatorio para buscar skills.";
+    const normalizedQuery = normalizeSearchText(cleanQuery);
+    const queryTokens = new Set(searchTokens(cleanQuery));
+    const ranked = this.list({ includeManualOnly: false })
+      .map((skill) => {
+        const description = [skill.description, skill.whenToUse].filter(Boolean).join(" ").replace(/\s+/g, " ");
+        const haystack = normalizeSearchText([
+          skill.id,
+          skill.displayName,
+          description,
+          skill.paths.join(" "),
+        ].join(" "));
+        const tokens = new Set(searchTokens(haystack));
+        let overlap = 0;
+        for (const token of queryTokens) if (tokens.has(token)) overlap += 1;
+        const idExact = normalizedQuery === normalizeSearchText(skill.id) ? 8 : 0;
+        const phrase = haystack.includes(normalizedQuery) ? 5 : 0;
+        const prefix = normalizeSearchText(skill.id).startsWith(normalizedQuery) ? 3 : 0;
+        const coverage = queryTokens.size > 0 ? overlap / queryTokens.size : 0;
+        return { skill, description, score: idExact + phrase + prefix + coverage * 4 + overlap * 0.2 };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.skill.id.localeCompare(right.skill.id))
+      .slice(0, Math.max(1, Math.min(10, Math.trunc(limit))));
+    if (!ranked.length) return `No encontré skills relevantes para: ${cleanQuery}`;
+    return [
+      `Skills relevantes para "${cleanQuery}" (carga solo la necesaria con skill_load):`,
+      ...ranked.map(({ skill, description }) => `- ${skill.id}: ${description.slice(0, SEARCH_DESCRIPTION_LIMIT)}${skill.context === "fork" ? " [context: fork]" : ""}`),
+    ].join("\n");
   }
 
   formatListForUser(): string {

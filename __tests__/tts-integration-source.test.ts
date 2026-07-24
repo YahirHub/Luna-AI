@@ -17,12 +17,19 @@ describe("integración Piper Neo adaptativa", () => {
 
   it("solo fuerza voz automáticamente cuando la política lo exige", () => {
     expect(bot).toContain("ttsManager.shouldForceVoice(remoteJid, userText)");
+    expect(bot).toContain("ttsManager.shouldBlockVoiceTool(remoteJid, userText)");
+    expect(bot).toContain("voice_tool_blocked_by_text_preference");
+    expect(bot).toContain("ttsManager.applyPersistentPreferenceFromMessage(remoteJid, userText)");
+    expect(bot).toContain("persistent_mode_tool_blocked");
+    expect(bot).toContain("ttsManager.shouldForceDeferredVoice(jid, originPrompt)");
+    expect(manager).toContain("shouldForceDeferredVoice(jid: string, originMessage: string)");
     expect(manager).toContain("sanitizeTextForSpeech(rawText)");
   });
 
   it("expone modo adaptativo, texto y voz al orquestador", () => {
     expect(moduleSource).toContain('{ name: "tts_set_mode" }');
-    expect(moduleSource).toContain("always: true");
+    expect(moduleSource).not.toContain("always: true");
+    expect(moduleSource).toContain("activateWhen: (message) => isTranscribedAudioMessage(message)");
     expect(moduleSource.toLowerCase()).toContain("modo adaptativo");
   });
 });

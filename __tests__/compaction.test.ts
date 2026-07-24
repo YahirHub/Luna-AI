@@ -346,6 +346,24 @@ describe("summaryToTextBlock", () => {
     expect(block).toContain("Juan estaba preguntando");
     expect(block).toContain("FIN DEL RESUMEN");
   });
+
+  it("mantiene un presupuesto duro para el resumen inyectado", async () => {
+    const { MAX_COMPACTED_SUMMARY_CONTEXT_CHARS } = await import("../src/compaction.ts");
+    const summary = {
+      durableFacts: Array.from({ length: 50 }, (_, index) => `Dato ${index} ${"x".repeat(500)}`),
+      preferences: Array.from({ length: 30 }, (_, index) => `Preferencia ${index} ${"y".repeat(300)}`),
+      currentTopics: [],
+      verifiedToolActions: [],
+      unverifiedClaims: [],
+      pendingTasks: [],
+      decisions: [],
+      importantConstraints: [],
+      recentState: "z".repeat(10_000),
+      unresolvedQuestions: [],
+    };
+    const block = summaryToTextBlock(summary);
+    expect(block.length).toBeLessThanOrEqual(MAX_COMPACTED_SUMMARY_CONTEXT_CHARS);
+  });
 });
 
 // ─── Tests de integración del prompt builder ─────────────────────

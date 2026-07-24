@@ -43,7 +43,7 @@ interface BrowserCredentialProfileRecord extends BrowserCredentialProfile {
   encryptedPassword: string;
 }
 
-export type BrowserInputKind = "username" | "password" | "otp" | "text";
+export type BrowserInputKind = "username" | "password" | "otp" | "secret" | "text";
 
 export interface PendingBrowserInputRequest {
   jid: string;
@@ -65,7 +65,7 @@ export interface PendingBrowserInputRequest {
 export type BrowserInputResolution =
   | { kind: "username" | "text"; value: string }
   | { kind: "password"; credentialRef: string; url: string; username: string }
-  | { kind: "otp"; secretRef: string }
+  | { kind: "otp" | "secret"; secretRef: string }
   | { kind: "correction"; action: "retry_identity" | "retry_field"; message: string };
 
 interface PendingBrowserInputWaiter {
@@ -598,6 +598,41 @@ export function extractBrowserLoginIntent(text: string): BrowserLoginIntent {
     username,
     password,
   };
+}
+
+/**
+ * Una orden explícita de login necesita identidad confirmada. El número de
+ * perfiles guardados, el dominio visitado o una sesión preexistente no son
+ * autorización para elegir una cuenta.
+ */
+export function browserLoginRequiresIdentityConfirmation(
+  text: string,
+  confirmedUsername = "",
+  initialCredentialRef = "",
+): boolean {
+  const intent = extractBrowserLoginIntent(text);
+  const normalized = text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  // La detección usada para extraer credenciales históricamente es permisiva
+  // (por ejemplo, "entra" puede marcar intención de acceso). Para bloquear
+  // acciones exigimos además una señal inequívoca de autenticación y evitamos
+  // preguntar identidad en una navegación ordinaria como "entra a X y revisa".
+  const explicitAuthentication = /\b(?:inicia(?:r)?|haz|hacer)\s+(?:la\s+)?(?:sesion|login)\b/.test(normalized)
+    || /\b(?:login|log in|autentica|autenticar|autenticacion)\b/.test(normalized)
+    || /\b(?:accede|acceder|entra|entrar)\s+(?:a|en)\s+(?:mi|la|una)\s+cuenta\b/.test(normalized)
+    || /\b(?:usuario|username|correo|email).{0,80}(?:contrasena|password|credencial)\b/.test(normalized)
+    || /\b(?:contrasena|password|credencial).{0,80}(?:usuario|username|correo|email)\b/.test(normalized);
+  // browser-cred-* se crea a partir de una credencial temporal capturada para
+  // la petición actual. Un browser-profile-* persistente puede haber sido
+  // escogido por el orquestador y NO prueba que el usuario eligiera esa cuenta.
+  const explicitlyCapturedCredential = /^browser-cred-/i.test(initialCredentialRef.trim());
+  return intent.loginRequested
+    && explicitAuthentication
+    && !intent.username
+    && !confirmedUsername.trim()
+    && !explicitlyCapturedCredential;
 }
 
 export function sanitizeBrowserCredentialText(text: string, credential: BrowserCredential): string {

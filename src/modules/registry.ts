@@ -23,10 +23,20 @@ function promptAvailable(module: LunaModule, session: ModuleSession): boolean {
   return Boolean(module.prompt) && moduleAvailable(module, session) && conditionPasses(module.prompt?.availableWhen, session);
 }
 
+function moduleHasAvailableTools(module: LunaModule, session: ModuleSession): boolean {
+  return (module.tools ?? []).some((tool) =>
+    allowed(tool.access ?? module.access, session) && conditionPasses(tool.availableWhen, session)
+  );
+}
+
+function capabilityAvailable(module: LunaModule, session: ModuleSession): boolean {
+  return moduleAvailable(module, session) && (moduleHasAvailableTools(module, session) || promptAvailable(module, session));
+}
+
 export class ModuleRegistry {
   private readonly modules = new Map<string, LunaModule>();
   private readonly commands = new Map<string, ResolvedModuleCommand>();
-  private readonly tools = new Map<string, { moduleId: string; access: ModuleAccess; availableWhen?: (session: ModuleSession) => boolean }>();
+  private readonly tools = new Map<string, { moduleId: string; access: ModuleAccess; defer: boolean; availableWhen?: (session: ModuleSession) => boolean }>();
   private readonly contextProviders = new Map<string, (message: string, session: ModuleSession) => string | Promise<string>>();
 
   register(module: LunaModule): void {
@@ -49,7 +59,12 @@ export class ModuleRegistry {
     }
     for (const tool of module.tools ?? []) {
       if (this.tools.has(tool.name)) throw new Error(`Tool duplicada: ${tool.name}`);
-      this.tools.set(tool.name, { moduleId: module.id, access: tool.access ?? module.access, availableWhen: tool.availableWhen });
+      this.tools.set(tool.name, {
+        moduleId: module.id,
+        access: tool.access ?? module.access,
+        defer: tool.defer === true,
+        availableWhen: tool.availableWhen,
+      });
     }
   }
 
@@ -91,9 +106,130 @@ export class ModuleRegistry {
     return { tools, rejected };
   }
 
+  /**
+   * Filtra tools por permisos Y por las capacidades realmente necesarias para
+   * este turno. Los módulos detectados por intención se cargan automáticamente;
+   * loadedModuleIds permite añadir capacidades de forma explícita mediante
+   * capability_load sin reconstruir la conversación.
+   */
+  filterToolsForTurn(
+    definitions: readonly ToolDefinition[],
+    message: string,
+    session: ModuleSession,
+    loadedModuleIds: Iterable<string> = [],
+    activatedModuleIds: Iterable<string> = [],
+  ): ModuleToolFilterResult {
+    if (!session.authenticated) return { tools: [], rejected: definitions.map((tool) => tool.function.name) };
+    const activeIds = new Set(this.getActiveModuleIds(message, session));
+    const fullyLoadedIds = new Set<string>();
+
+    // activatedModuleIds mantiene vivas capacidades con estado (goal/agente) sin
+    // convertir automáticamente toda su superficie avanzada en eager.
+    for (const rawModuleId of activatedModuleIds) {
+      const moduleId = rawModuleId.trim().toLowerCase();
+      const module = this.modules.get(moduleId);
+      if (module && moduleAvailable(module, session)) activeIds.add(module.id);
+    }
+
+    // loadedModuleIds proviene de capability_load: aquí sí se expone la
+    // capacidad completa, incluidas las tools marcadas como defer.
+    for (const rawModuleId of loadedModuleIds) {
+      const moduleId = rawModuleId.trim().toLowerCase();
+      const module = this.modules.get(moduleId);
+      if (module && moduleAvailable(module, session)) {
+        activeIds.add(module.id);
+        fullyLoadedIds.add(module.id);
+      }
+    }
+
+    const tools: ToolDefinition[] = [];
+    const rejected: string[] = [];
+    for (const definition of definitions) {
+      const binding = this.tools.get(definition.function.name);
+      const owner = binding ? this.modules.get(binding.moduleId) : undefined;
+      const deferredButNotLoaded = Boolean(binding?.defer && owner && !fullyLoadedIds.has(owner.id));
+      if (
+        !binding || !owner || !activeIds.has(owner.id) || deferredButNotLoaded || !moduleAvailable(owner, session)
+        || !allowed(binding.access, session) || !conditionPasses(binding.availableWhen, session)
+      ) {
+        rejected.push(definition.function.name);
+        continue;
+      }
+      tools.push(definition);
+    }
+    return { tools, rejected };
+  }
+
   getModuleForTool(toolName: string): LunaModule | null {
     const binding = this.tools.get(toolName);
     return binding ? this.modules.get(binding.moduleId) ?? null : null;
+  }
+
+  getActiveModuleIds(message: string, session: ModuleSession): string[] {
+    return this.selectActiveModules(message, session).map((module) => module.id);
+  }
+
+  canLoadCapability(moduleId: string, session: ModuleSession): boolean {
+    const module = this.modules.get(moduleId.trim().toLowerCase());
+    return Boolean(module && capabilityAvailable(module, session));
+  }
+
+  buildCapabilityLoadTool(session: ModuleSession): ToolDefinition {
+    const capabilities = this.listModules(session)
+      .filter((module) => module.id !== "core")
+      .filter((module) => capabilityAvailable(module, session))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const ids = capabilities.map((module) => module.id);
+    const compactCatalog = capabilities
+      .map((module) => `${module.id}=${module.description}`)
+      .join("; ");
+    return {
+      type: "function",
+      function: {
+        name: "capability_load",
+        description: [
+          "Carga para ESTE TURNO una capacidad adicional y expone sus tools en la siguiente ronda. Úsala solo cuando la herramienta necesaria no esté disponible todavía.",
+          compactCatalog ? `Capacidades: ${compactCatalog}.` : "No hay capacidades adicionales disponibles.",
+        ].join(" "),
+        parameters: {
+          type: "object",
+          properties: {
+            capability: ids.length > 0
+              ? { type: "string", enum: ids, description: "ID de la capacidad que falta." }
+              : { type: "string", description: "ID de la capacidad que falta." },
+          },
+          required: ["capability"],
+          additionalProperties: false,
+        },
+      },
+    };
+  }
+
+  async buildLoadedCapabilityContext(
+    moduleId: string,
+    message: string,
+    session: ModuleSession,
+    includeInstructions = true,
+  ): Promise<string> {
+    const module = this.modules.get(moduleId.trim().toLowerCase());
+    if (!module || !moduleAvailable(module, session)) return `Error: capacidad no disponible: ${moduleId}`;
+    const lines = [`Capacidad cargada: ${module.id} (${module.name}).`];
+    if (promptAvailable(module, session)) {
+      if (includeInstructions) {
+        for (const instruction of module.prompt?.instructions ?? []) lines.push(`- ${instruction}`);
+      }
+      for (const instruction of module.prompt?.loadInstructions ?? []) lines.push(`- ${instruction}`);
+    }
+    const provider = this.contextProviders.get(module.id);
+    if (provider) {
+      try {
+        const context = (await provider(message, session)).trim();
+        if (context) lines.push("", "Contexto actual:", context);
+      } catch {
+        // El contexto auxiliar no debe impedir cargar las tools.
+      }
+    }
+    return lines.join("\n");
   }
 
 
@@ -102,9 +238,13 @@ export class ModuleRegistry {
     this.contextProviders.set(moduleId, provider);
   }
 
-  async buildRuntimeContext(message: string, session: ModuleSession): Promise<string> {
+  async buildRuntimeContext(message: string, session: ModuleSession, loadedModuleIds: Iterable<string> = []): Promise<string> {
     if (!session.authenticated) return "";
     const selectedIds = new Set(this.selectActiveModules(message, session).map((module) => module.id));
+    for (const rawModuleId of loadedModuleIds) {
+      const module = this.modules.get(rawModuleId.trim().toLowerCase());
+      if (module && moduleAvailable(module, session)) selectedIds.add(module.id);
+    }
     const blocks: string[] = [];
     for (const moduleId of selectedIds) {
       const provider = this.contextProviders.get(moduleId);
@@ -129,23 +269,24 @@ export class ModuleRegistry {
       return prompt.patterns?.some((pattern) => { pattern.lastIndex = 0; return pattern.test(message); }) ?? false;
     });
   }
-  buildCapabilityPrompt(message: string, session: ModuleSession): string {
-    const modules = this.listModules(session);
-    if (modules.length === 0) return "";
-    const active = this.selectActiveModules(message, session);
-
-    const lines = [
-      "=== CAPACIDADES MODULARES DISPONIBLES ===",
-      ...modules.filter((module) => promptAvailable(module, session)).map((module) => `- ${module.id}: ${module.prompt!.summary}`),
-    ];
-    if (active.length > 0) {
-      lines.push("", "=== INSTRUCCIONES DE MÓDULOS ACTIVOS ===");
-      for (const module of active) {
-        lines.push(`[${module.id}] ${module.name}`);
-        for (const instruction of module.prompt?.instructions ?? []) lines.push(`- ${instruction}`);
-      }
+  buildCapabilityPrompt(message: string, session: ModuleSession, loadedModuleIds: Iterable<string> = []): string {
+    const activeById = new Map(this.selectActiveModules(message, session).map((module) => [module.id, module]));
+    for (const rawModuleId of loadedModuleIds) {
+      const module = this.modules.get(rawModuleId.trim().toLowerCase());
+      if (module && moduleAvailable(module, session) && promptAvailable(module, session)) activeById.set(module.id, module);
     }
-    lines.push("=== FIN DE CAPACIDADES MODULARES ===");
+    const active = [...activeById.values()];
+    if (active.length === 0) return "";
+    const lines = ["=== INSTRUCCIONES DE CAPACIDADES ACTIVAS ==="];
+    for (const module of active) {
+      lines.push(`[${module.id}] ${module.name}`);
+      for (const instruction of module.prompt?.instructions ?? []) lines.push(`- ${instruction}`);
+    }
+    lines.push(
+      "",
+      "Si durante este turno necesitas una capacidad cuya tool no esté disponible, usa capability_load; no inventes una herramienta ausente.",
+      "=== FIN DE CAPACIDADES ACTIVAS ===",
+    );
     return lines.join("\n");
   }
 

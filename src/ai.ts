@@ -579,6 +579,74 @@ export interface ToolChatRuntimeOptions {
   terminalTools?: string[];
   /** Asocia las métricas del provider/estimador con un usuario y propósito. */
   usage?: LlmUsageContext;
+  /**
+   * Permite cambiar el toolset entre rondas (por ejemplo después de
+   * capability_load) sin reiniciar la conversación ni perder tool results.
+   */
+  resolveTools?: () => ToolDefinition[];
+  /** Resultados mayores a este umbral se virtualizan y se leen por chunks. */
+  maxInlineToolResultChars?: number;
+}
+
+const TOOL_RESULT_READ_TOOL: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "tool_result_read",
+    description: "Lee por fragmentos un resultado grande de una tool previamente virtualizado en esta misma ejecución. Usa el result_ref exacto devuelto por la tool original.",
+    parameters: {
+      type: "object",
+      properties: {
+        result_ref: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Posición inicial en caracteres; por defecto 0." },
+        max_chars: { type: "integer", minimum: 500, maximum: 12000, description: "Máximo de caracteres a leer; por defecto 8000." },
+      },
+      required: ["result_ref"],
+      additionalProperties: false,
+    },
+  },
+};
+
+function uniqueToolDefinitions(definitions: readonly ToolDefinition[]): ToolDefinition[] {
+  const byName = new Map<string, ToolDefinition>();
+  for (const definition of definitions) byName.set(definition.function.name, definition);
+  return [...byName.values()];
+}
+
+function orderResolvedTools(
+  definitions: readonly ToolDefinition[],
+  previousOrder: readonly string[],
+): { tools: ToolDefinition[]; order: string[] } {
+  const unique = uniqueToolDefinitions(definitions);
+  const byName = new Map(unique.map((definition) => [definition.function.name, definition]));
+  const orderedNames = previousOrder.filter((name) => byName.has(name));
+  const seen = new Set(orderedNames);
+  for (const definition of unique) {
+    const name = definition.function.name;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    orderedNames.push(name);
+  }
+  return {
+    tools: orderedNames.flatMap((name) => {
+      const definition = byName.get(name);
+      return definition ? [definition] : [];
+    }),
+    order: orderedNames,
+  };
+}
+
+function virtualizedToolResult(ref: string, value: string): string {
+  const previewHead = value.slice(0, 5_000);
+  const previewTail = value.length > 6_500 ? value.slice(-1_500) : "";
+  return [
+    `[RESULTADO GRANDE VIRTUALIZADO] result_ref=${ref} chars=${value.length}`,
+    "Se conserva completo solo durante esta ejecución. Usa tool_result_read(result_ref, offset, max_chars) para leer las secciones que necesites.",
+    "",
+    "Vista previa inicial:",
+    previewHead,
+    previewTail ? "\n[...contenido intermedio omitido...]\n" : "",
+    previewTail ? `Vista previa final:\n${previewTail}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 
@@ -667,16 +735,26 @@ export async function chatCompletionWithTools(
   let currentMessages = [...messages];
   const toolsCalled: string[] = [];
   const maxRounds = Math.min(200, Math.max(1, runtimeOptions.maxRounds ?? 16));
+  const maxInlineToolResultChars = Math.max(8_000, Math.min(80_000, runtimeOptions.maxInlineToolResultChars ?? 20_000));
+  const largeToolResults = new Map<string, string>();
   let latestToolResult = "";
+  let stableToolOrder = uniqueToolDefinitions(tools).map((definition) => definition.function.name);
 
   for (let round = 0; round < maxRounds; round++) {
+    const resolvedTools = runtimeOptions.resolveTools?.() ?? tools;
+    const ordered = orderResolvedTools([
+      ...resolvedTools,
+      ...(largeToolResults.size > 0 ? [TOOL_RESULT_READ_TOOL] : []),
+    ], stableToolOrder);
+    const roundTools = ordered.tools;
+    stableToolOrder = ordered.order;
     let result: Awaited<ReturnType<typeof rawChatRequest>>;
     try {
       result = await rawChatRequest(
         {
           model,
           messages: currentMessages,
-          tools,
+          tools: roundTools,
           max_tokens: runtimeOptions.maxTokens,
           signal: runtimeOptions.signal,
           usage: runtimeOptions.usage,
@@ -701,7 +779,7 @@ export async function chatCompletionWithTools(
           {
             model,
             messages: currentMessages,
-            tools,
+            tools: roundTools,
             max_tokens: runtimeOptions.maxTokens,
             signal: runtimeOptions.signal,
             usage: runtimeOptions.usage,
@@ -761,7 +839,37 @@ export async function chatCompletionWithTools(
         } catch {
           args = {};
         }
-        toolResult = await executeTool(call.function.name, args);
+        if (call.function.name === "tool_result_read") {
+          const ref = typeof args.result_ref === "string" ? args.result_ref.trim() : "";
+          const stored = largeToolResults.get(ref);
+          if (!ref || !stored) {
+            toolResult = `Error: result_ref no existe o ya expiró: ${ref || "(vacío)"}`;
+          } else {
+            const offset = typeof args.offset === "number" && Number.isFinite(args.offset)
+              ? Math.max(0, Math.min(stored.length, Math.trunc(args.offset)))
+              : 0;
+            const maxChars = typeof args.max_chars === "number" && Number.isFinite(args.max_chars)
+              ? Math.max(500, Math.min(12_000, Math.trunc(args.max_chars)))
+              : 8_000;
+            const slice = stored.slice(offset, offset + maxChars);
+            toolResult = [
+              `[${ref}] chars ${offset}-${offset + slice.length} de ${stored.length}`,
+              slice,
+              offset + slice.length < stored.length
+                ? `Quedan ${stored.length - (offset + slice.length)} caracteres; continúa con offset=${offset + slice.length} solo si son necesarios.`
+                : "Fin del resultado.",
+            ].join("\n\n");
+          }
+        } else {
+          const rawToolResult = String(await executeTool(call.function.name, args));
+          if (!terminalTools.has(call.function.name) && rawToolResult.length > maxInlineToolResultChars) {
+            const ref = `tool-result-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+            largeToolResults.set(ref, rawToolResult);
+            toolResult = virtualizedToolResult(ref, rawToolResult);
+          } else {
+            toolResult = rawToolResult;
+          }
+        }
         const normalizedResult = String(toolResult).trim();
         if (normalizedResult) latestToolResult = normalizedResult;
         toolsCalled.push(call.function.name);

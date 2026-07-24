@@ -10,7 +10,7 @@ describe("integración goal + coding agent", () => {
     const moduleSource = read("src/modules/goals/module.ts");
     expect(moduleSource).toContain('name: "goal"');
     expect(moduleSource).not.toContain('name: "tasklist"');
-    expect(moduleSource).toContain('{ name: "tasklist_create" }');
+    expect(moduleSource).toContain('{ name: "tasklist_create", defer: true }');
     expect(moduleSource).toContain('{ name: "goal_start" }');
   });
 

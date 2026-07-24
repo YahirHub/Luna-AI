@@ -111,6 +111,9 @@ import {
 } from "./search/search-storage.ts";
 import { isApiSearchCapabilityAvailable } from "./search/search-routing.ts";
 import { testSearchProvider } from "./search/search-runtime.ts";
+import { PUBLIC_WEB_TOOLS } from "./public-web/public-web-tools.ts";
+import { executePublicWebTool } from "./public-web/public-web-runtime.ts";
+import { shouldPreferDirectPublicWeb } from "./public-web/routing.ts";
 import {
   ADMIN_TOOLS,
   executeUserAdminTool,
@@ -153,6 +156,8 @@ import {
   executeArtifactTool,
 } from "./artifacts/artifact-tools.ts";
 import { TaskRuntime } from "./orchestration/task-runtime.ts";
+import { CompletionQueue } from "./orchestration/completion-queue.ts";
+import { buildTaskOriginContext, buildTaskPostDelegationContext } from "./orchestration/task-continuation.ts";
 import {
   MESSAGING_TOOLS,
   executeMessagingTool,
@@ -270,8 +275,8 @@ interface ForegroundAiRunState {
 /** Estado ligero para responder progreso/cancelación sin esperar el lock del chat. */
 const activeAiRunStates = new Map<string, ForegroundAiRunState>();
 
-/** Serializa revisiones automáticas por chat para no mezclar resultados simultáneos. */
-const backgroundReviewChains = new Map<string, Promise<void>>();
+/** Integra resultados background en FIFO según el orden real de finalización. */
+const backgroundCompletionQueue = new CompletionQueue();
 
 /** Tools base y herramientas opcionales según /config. */
 const BASE_TOOLS = [
@@ -289,6 +294,7 @@ const BASE_TOOLS = [
   ...GOAL_TOOLS,
   ...ARTIFACT_TOOLS,
   ...MESSAGING_TOOLS,
+  ...PUBLIC_WEB_TOOLS,
   ...USER_CONTROL_TOOLS,
 ];
 
@@ -297,18 +303,61 @@ function getModuleSession(jid?: string): ModuleSession {
   return { authenticated: true, isAdmin: isAdminSession(jid), jid };
 }
 
-function getAvailableTools(jid?: string): import("./ai.ts").ToolDefinition[] {
+function getPinnedModuleIds(jid?: string): Set<string> {
+  const pinned = new Set<string>();
+  if (!jid) return pinned;
+  const activeGoal = goalRuntime?.list(jid).some((goal) => ["queued", "running", "waiting_user"].includes(goal.status));
+  if (activeGoal) pinned.add("goals");
+  const agents = taskRuntime.listAgents(jid);
+  if (agents.some((agent) => ["queued", "running", "waiting_user"].includes(agent.status) || agent.reviewStatus === "pending")) {
+    pinned.add("agents");
+  }
+  return pinned;
+}
+
+function getAvailableTools(
+  jid?: string,
+  message = "",
+  loadedModuleIds: Iterable<string> = [],
+): import("./ai.ts").ToolDefinition[] {
   const session = getModuleSession(jid);
   if (!session.authenticated) return [];
   const pool = [
     ...BASE_TOOLS,
+    moduleRegistry.buildCapabilityLoadTool(session),
     ...getMainAgentTools(agentConfig, isApiSearchCapabilityAvailable()),
     ...ADMIN_TOOLS,
     ...ADMIN_CONTROL_TOOLS,
   ];
-  const filtered = moduleRegistry.filterTools(pool, session);
+  const pinned = getPinnedModuleIds(jid);
+  const loaded = new Set<string>(loadedModuleIds);
+  const filtered = moduleRegistry.filterToolsForTurn(pool, message, session, loaded, pinned);
+  // Ruta rápida pública: para búsquedas/descargas simples el orquestador no
+  // necesita pagar un browser-agent. browser_agent reaparece si el modelo carga
+  // explícitamente la capacidad browser después de que HTTP/API directa falle.
+  if (shouldPreferDirectPublicWeb(message)) {
+    const blocked = new Set<string>();
+    if (!loaded.has("browser")) blocked.add("browser_agent");
+    if (!loaded.has("search")) blocked.add("researcher_web");
+    if (!loaded.has("agents")) blocked.add("spawn_agents");
+    const kept = filtered.tools.filter((tool) => !blocked.has(tool.function.name));
+    if (kept.length !== filtered.tools.length) {
+      for (const toolName of blocked) {
+        if (filtered.tools.some((tool) => tool.function.name === toolName)) filtered.rejected.push(`${toolName}:prefer-public-web`);
+      }
+      filtered.tools = kept;
+    }
+  }
   if (filtered.rejected.length > 0) {
-    debugInfo("modules.tools", "filtered", { jid, isAdmin: session.isAdmin, rejected: filtered.rejected });
+    debugInfo("modules.tools", "lazy_filtered", {
+      jid,
+      isAdmin: session.isAdmin,
+      activeModules: moduleRegistry.getActiveModuleIds(message, session),
+      pinnedModules: [...pinned],
+      loadedModules: [...loaded],
+      exposed: filtered.tools.map((tool) => tool.function.name),
+      rejectedCount: filtered.rejected.length,
+    });
   }
   return filtered.tools;
 }
@@ -361,10 +410,10 @@ moduleRegistry.bindContextProvider("workspace", () => {
 });
 
 moduleRegistry.bindContextProvider("skills", (_message, session) => {
-  if (!session.jid) return "No hay sesión de usuario.";
+  if (!session.jid) return "";
   // Garantiza también que el workdir actual tenga su alias .skills.
   workspaceManager.getWorkdir(session.jid);
-  return skillManager.buildCatalogForModel();
+  return "Usa skill_search para descubrir únicamente las skills relevantes; el catálogo completo no se inyecta en contexto.";
 });
 
 moduleRegistry.bindContextProvider("processes", (_message, session) => {
@@ -373,17 +422,23 @@ moduleRegistry.bindContextProvider("processes", (_message, session) => {
 });
 
 moduleRegistry.bindContextProvider("goals", (_message, session) => {
-  if (!session.jid || !goalRuntime) return "No hay goal activo.";
+  if (!session.jid || !goalRuntime) return "";
   return goalRuntime.buildContextSummary(session.jid);
 });
 
-function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
+function getGoalRuntimeTools(
+  jid: string,
+  message: string,
+  loadedModuleIds: Iterable<string> = [],
+): import("./ai.ts").ToolDefinition[] {
+  const session = getModuleSession(jid);
   const allowedAgentToolNames = new Set([
     "spawn_agents", "task_list", "task_status", "task_inspect", "agent_list", "agent_status",
   ]);
   const agentTools = getMainAgentTools(agentConfig, isApiSearchCapabilityAvailable())
     .filter((tool) => allowedAgentToolNames.has(tool.function.name));
   const pool = [
+    moduleRegistry.buildCapabilityLoadTool(session),
     ...TASKLIST_TOOLS,
     ...WORKSPACE_TOOLS,
     ...AGENTIC_WORKSPACE_TOOLS,
@@ -393,9 +448,10 @@ function getGoalRuntimeTools(jid: string): import("./ai.ts").ToolDefinition[] {
     ...PROCESS_TOOLS,
     ...ARTIFACT_TOOLS,
     ...MESSAGING_TOOLS,
+    ...PUBLIC_WEB_TOOLS,
     ...agentTools,
   ];
-  return moduleRegistry.filterTools(pool, getModuleSession(jid)).tools;
+  return moduleRegistry.filterToolsForTurn(pool, message, session, loadedModuleIds).tools;
 }
 
 
@@ -468,6 +524,9 @@ async function executeGoalRuntimeTool(
   if (ARTIFACT_TOOLS.some((tool) => tool.function.name === name)) {
     return executeArtifactTool(name, args, workspaceManager, jid);
   }
+  if (PUBLIC_WEB_TOOLS.some((tool) => tool.function.name === name)) {
+    return executePublicWebTool(name, args, { workspace: workspaceManager, jid, signal });
+  }
   if (MESSAGING_TOOLS.some((tool) => tool.function.name === name)) {
     if (!currentTransport) return "Error: no hay transporte activo para enviar el archivo o mensaje.";
     return executeMessagingTool(args, { transport: currentTransport, jid, workspace: workspaceManager });
@@ -521,7 +580,14 @@ goalRuntime = new GoalRuntime({
   tasklists: tasklistManager,
   getModel: (jid) => contextManager?.getModel(jid) ?? null,
   getLlmConfig: () => llmConfig,
-  getTools: (jid) => getGoalRuntimeTools(jid),
+  getTools: (jid, message, loadedModuleIds) => getGoalRuntimeTools(jid, message, loadedModuleIds),
+  loadCapability: async (jid, capability, message) => {
+    const session = getModuleSession(jid);
+    if (!moduleRegistry.canLoadCapability(capability, session)) {
+      return `Error: la capacidad '${capability}' no está disponible para este goal.`;
+    }
+    return moduleRegistry.buildLoadedCapabilityContext(capability, message, session);
+  },
   executeTool: executeGoalRuntimeTool,
   getDelegatedTaskContext: (jid, taskIds) => buildGoalDelegatedTaskContext(jid, taskIds),
   onProgress: async (jid, text) => {
@@ -570,6 +636,9 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
   ["spawn_agents", "🤖 Preparando subagentes paralelos..."],
   ["researcher_web", "🕵️ Preparando investigador web..."],
   ["browser_agent", "🌐 Preparando agente de navegador..."],
+  ["public_media_search", "🔎 Buscando contenido público directamente..."],
+  ["public_web_extract_urls", "🧩 Inspeccionando enlaces públicos..."],
+  ["public_media_download", "⬇️ Descargando archivo directamente..."],
   ["create_pdf_from_markdown", "📄 Generando PDF..."],
   ["archive_folder", "🗜️ Comprimiendo carpeta..."],
   ["gitzip", "🗜️ Empaquetando código fuente con reglas .gitignore..."],
@@ -601,7 +670,7 @@ const TOOL_NOTIFICATION_TEXTS = new Map<string, string>([
 /** Función externa (inyectada) para obtener la memoria de un JID. */
 function getMemoryContent(jid: string): string {
   try {
-    return memoryManager.getContent(jid);
+    return memoryManager.getContextContent(jid);
   } catch {
     return "";
   }
@@ -696,13 +765,13 @@ interface CompactionPlan {
   modelId: string;
 }
 
-function buildCompactionPlan(jid: string, mode: "automatic" | "manual"): CompactionPlan | null {
+function buildCompactionPlan(jid: string, mode: "automatic" | "manual", currentMessage = ""): CompactionPlan | null {
   if (!contextManager || !llmConfig) return null;
   const snapshot = structuredClone(contextManager.getMessages(jid));
   if (snapshot.length <= 2) return null;
   const modelId = contextManager.getModel(jid);
   const currentTokens = estimateTokensAccurate(snapshot);
-  const toolsTokens = estimateRequestTokens([], getAvailableTools(jid));
+  const toolsTokens = estimateRequestTokens([], getAvailableTools(jid, currentMessage));
   const effectiveBudget = modelCatalog.getEffectiveBudget(modelId, toolsTokens);
   const triggerTokens = Math.floor(effectiveBudget * 0.85);
   if (mode === "automatic" && currentTokens < triggerTokens) return null;
@@ -743,13 +812,14 @@ function startContextCompaction(
   transport: MessagingTransport,
   jid: string,
   mode: "automatic" | "manual",
+  currentMessage = "",
 ): { started: boolean; reason?: string; tokensBefore?: number; triggerTokens?: number } {
   if (!contextManager || !llmConfig) return { started: false, reason: "El proveedor LLM todavía no está disponible." };
   const active = compactionJobs.get(jid);
   if (active) {
     return { started: false, reason: "Ya hay una compactación en curso.", tokensBefore: active.tokensBefore, triggerTokens: active.triggerTokens };
   }
-  const plan = buildCompactionPlan(jid, mode);
+  const plan = buildCompactionPlan(jid, mode, currentMessage);
   if (!plan) {
     const messages = contextManager.getMessages(jid);
     const tokens = estimateTokensAccurate(messages);
@@ -863,9 +933,9 @@ function startContextCompaction(
   return { started: true, tokensBefore: plan.currentTokens, triggerTokens: plan.triggerTokens };
 }
 
-function maybeStartAutomaticCompaction(transport: MessagingTransport, jid: string): void {
+function maybeStartAutomaticCompaction(transport: MessagingTransport, jid: string, currentMessage: string): void {
   if (compactionJobs.has(jid)) return;
-  startContextCompaction(transport, jid, "automatic");
+  startContextCompaction(transport, jid, "automatic", currentMessage);
 }
 
 /** Actualiza modelos desde el endpoint y aplica el fallback del proveedor activo. */
@@ -1143,7 +1213,7 @@ function formatSpawnAgentsProgress(event: SpawnAgentsProgress): string[] {
     case "task_completed": {
       if (event.status === "cancelled") return [];
       if (event.background) {
-        return [`🧠 Tarea ${event.taskId} ${event.status === "partial" ? "terminó parcialmente" : event.status === "failed" ? "terminó con errores" : "terminó"}. Luna revisará automáticamente resultados, carpeta y archivos antes de responderte.`];
+        return [`🧠 Tarea ${event.taskId} ${event.status === "partial" ? "terminó parcialmente" : event.status === "failed" ? "terminó con errores" : "terminó"}. Luna integrará el resultado con la solicitud original y completará la parte que quedó pendiente.`];
       }
       return [`✅ Tarea ${event.taskId} ${event.status === "partial" ? "completada parcialmente" : event.status === "failed" ? "fallida" : "completada"}.`];
     }
@@ -1167,8 +1237,7 @@ function buildDeterministicTaskSummary(taskId: string, title: string, status: st
 }
 
 async function reviewBackgroundTask(sock: MessagingTransport, jid: string, taskId: string): Promise<void> {
-  const previous = backgroundReviewChains.get(jid) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(async () => {
+  await backgroundCompletionQueue.enqueue(jid, async () => {
     const cm = contextManager;
     const cfg = llmConfig;
     if (!cm || !cfg) return;
@@ -1195,22 +1264,66 @@ async function reviewBackgroundTask(sock: MessagingTransport, jid: string, taskI
       const payload = compactReviewText(JSON.stringify({
         task: { id: task.id, title: task.title, status: finalStatus, taskPath: task.taskPath }, agents, files, artifacts,
       }, null, 2), 45_000);
+      const originPrompt = task.originPrompt?.trim() || task.title;
+      const originContext = task.originContext?.trim()
+        || buildTaskOriginContext(cm.getMessages(jid), originPrompt);
+      // Espera el turno foreground que ya tenga el lock, toma un snapshot breve
+      // de lo que se completó después de delegar y lo libera antes de llamar al
+      // LLM. Así un resultado background no se adelanta ni duplica una respuesta
+      // foreground que terminó prácticamente al mismo tiempo.
+      let postDelegationContext = "";
+      await cm.withLock(jid, async () => {
+        postDelegationContext = buildTaskPostDelegationContext(cm.getMessages(jid), originPrompt);
+      });
 
       let summary = "";
       try {
         summary = (await chatCompletion([
-          { role: "system", content: `${STATIC_SYSTEM_PROMPT_CONTENT}\n\nREVISIÓN AUTOMÁTICA DE TAREA:\n- Revisa resultados, errores, carpeta y artefactos reales.\n- No afirmes que sigue activa si el estado es terminal.\n- Explica exactamente qué se logró y qué faltó.\n- No lances nuevas tareas ni inventes contenido.` },
-          { role: "user", content: `[Resultado de tarea de fondo confirmado por el sistema]\n\n${payload}` },
-        ], cm.getModel(jid), cfg, 3, 3500, { jid, purpose: "task-review" })).trim();
+          {
+            role: "system",
+            content: `${STATIC_SYSTEM_PROMPT_CONTENT}\n\nCONTINUACIÓN AUTORITATIVA DE UNA TAREA BACKGROUND:\n- No hagas una mera reseña del subagente: completa la parte pendiente de la SOLICITUD ORIGINAL que dependía de este resultado.\n- Usa el CONTEXTO CONGELADO para recuperar datos previos necesarios. Si el usuario pidió comparar, decidir, recomendar, cruzar datos o sacar una conclusión, debes hacerlo explícitamente.\n- Usa el CONTEXTO POST-DELEGACIÓN para conocer trabajo foreground o continuaciones FIFO que ya terminaron. Combina lo relacionado y no lo repitas; mensajes nuevos no relacionados no cambian la solicitud original.\n- El resultado del subagente es evidencia/subpaso, no necesariamente la respuesta final.\n- No repitas acciones independientes que el turno principal ya completó mientras el agente trabajaba.\n- No lances nuevos agentes ni tareas desde esta revisión. No inventes datos ausentes.\n- Si la tarea falló, explica exactamente qué parte quedó sin resolver y aprovecha cualquier resultado parcial real.\n- Devuelve solo la continuación útil para el usuario; evita hablar de IDs, carpetas o mecánica interna salvo que sea necesario.`,
+          },
+          {
+            role: "user",
+            content: [
+              "[SOLICITUD ORIGINAL]",
+              originPrompt,
+              "",
+              "[CONTEXTO CONGELADO AL DELEGAR]",
+              originContext || "(sin contexto conversacional adicional)",
+              "",
+              "[CONTEXTO POST-DELEGACIÓN YA CONFIRMADO]",
+              postDelegationContext || "(no hay trabajo posterior relacionado registrado todavía)",
+              "",
+              "[RESULTADO CONFIRMADO DE LA TAREA BACKGROUND]",
+              payload,
+            ].join("\n"),
+          },
+        ], cm.getModel(jid), cfg, 3, 3500, { jid, purpose: "task-continuation" })).trim();
       } catch (error) {
         debugError("agents.review", "llm_review_failed", error, { jid, taskId });
       }
       if (!summary) summary = buildDeterministicTaskSummary(task.id, task.title, finalStatus, agents);
       await cm.withLock(jid, async () => {
-        cm.addMessage(jid, { role: "user", content: `[Resultado de tarea de fondo confirmado por el sistema]\nTarea ${task.id} (${task.title}) terminó con estado ${finalStatus}.` });
+        cm.addMessage(jid, {
+          role: "user",
+          content: `[Resultado background confirmado para continuar la solicitud original]\nTarea ${task.id} (${task.title}) terminó con estado ${finalStatus}.`,
+        });
         cm.addMessage(jid, { role: "assistant", content: summary });
       });
-      await sendWithTyping(sock, jid, summary, 1_000, 2_000);
+      if (ttsManager.shouldForceDeferredVoice(jid, originPrompt)) {
+        try {
+          const voice = await ttsManager.synthesize(jid, summary);
+          await sock.send(jid, { audio: voice.audio, mimetype: voice.mimetype, ptt: voice.ptt }, { minDelayMs: 500, maxDelayMs: 1_200, waitForDelivery: false });
+        } catch (error) {
+          debugError("tts", "background_voice_failed", error, { jid, taskId });
+          await sendWithTyping(sock, jid, `${summary}
+
+⚠️ No pude convertir este resultado a voz con Piper Neo.`, 1_000, 2_000);
+        }
+      } else {
+        await sendWithTyping(sock, jid, summary, 1_000, 2_000);
+      }
       for (const artifact of artifacts) {
         try { await sendWorkspacePath(sock, jid, workspaceManager, artifact.path, `Resultado de ${task.title}`); }
         catch (error) { debugError("agents.review", "artifact_send_failed", error, { jid, taskId, path: artifact.path }); }
@@ -1218,18 +1331,14 @@ async function reviewBackgroundTask(sock: MessagingTransport, jid: string, taskI
       taskRuntime.update(jid, taskId, { status: finalStatus });
       taskRuntime.reviewTask(jid, taskId);
       reviewDelivered = true;
-      debugInfo("agents.review", "completed", { jid, taskId, artifactsSent: artifacts.length });
+      debugInfo("agents.review", "continuation_completed", { jid, taskId, artifactsSent: artifacts.length });
     } catch (error) {
       debugError("agents.review", "automatic_review_failed", error, { jid, taskId });
     } finally {
       taskRuntime.update(jid, taskId, { status: finalStatus });
       if (!reviewDelivered) debugWarn("agents.review", "left_pending_for_retry", { jid, taskId, finalStatus });
     }
-  }).finally(() => {
-    if (backgroundReviewChains.get(jid) === current) backgroundReviewChains.delete(jid);
   });
-  backgroundReviewChains.set(jid, current);
-  await current;
 }
 
 function formatAgentEventAge(timestamp?: string): string {
@@ -2850,7 +2959,7 @@ function extractPendingBrowserSecret(text: string): string {
   if (fenced?.[1]) value = fenced[1].trim();
   value = value.replace(/^[`"']+|[`"']+$/g, "").trim();
 
-  const labeled = /(?:contrase(?:ñ|n)a|password|codigo|código|otp)\s*(?:es|:|=)?\s*(.+)$/iu.exec(value);
+  const labeled = /(?:contrase(?:ñ|n)a|password|codigo|código|otp|api[ -]?key|token|secreto|secret|pin|respuesta(?: de)? seguridad|security answer)\s*(?:es|is|:|=)?\s*(.+)$/iu.exec(value);
   if (labeled?.[1]) value = labeled[1].trim();
 
   // Ejemplo: "Pepe_123! (la cambié por seguridad)" -> "Pepe_123!".
@@ -3171,7 +3280,7 @@ export async function handleMessage(
 
     const normalizedPendingText = normalizeNaturalText(text);
     if (["continua", "continuar", "sigue", "seguir"].includes(normalizedPendingText)) {
-      const secret = pendingBrowserInput.kind === "password" || pendingBrowserInput.kind === "otp";
+      const secret = pendingBrowserInput.kind === "password" || pendingBrowserInput.kind === "otp" || pendingBrowserInput.kind === "secret";
       const targetLines = [
         secret ? "🔐 MENSAJE DEL SISTEMA" : "🧩 MENSAJE DEL SISTEMA",
         "",
@@ -3230,22 +3339,22 @@ export async function handleMessage(
         return;
       }
 
-      if (pendingBrowserInput.kind === "otp") {
+      if (pendingBrowserInput.kind === "otp" || pendingBrowserInput.kind === "secret") {
         const value = extractPendingBrowserSecret(text);
         if (!value) {
-          await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el código solicitado. La misma tarea permanece pausada.");
+          await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía ahora el dato secreto solicitado. La misma tarea permanece pausada.");
           return;
         }
-        const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
+        const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: pendingBrowserInput.kind, value });
         await deleteSensitiveIncomingMessage(sock, message);
-        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: "otp", secretRef: secret.ref });
+        const resumed = browserCredentialStore.resolvePendingInput(remoteJid, { kind: pendingBrowserInput.kind, secretRef: secret.ref });
         if (!resumed) {
           browserCredentialStore.delete(secret.ref);
           await sendWithTyping(sock, remoteJid, "⚠️ La espera del navegador ya no estaba activa.");
           return;
         }
         await sendWhatsAppMessage(sock, remoteJid, {
-          text: "🔐 MENSAJE DEL SISTEMA\n\nCódigo recibido de forma segura. La misma tarea del navegador continúa ahora.",
+          text: "🔐 MENSAJE DEL SISTEMA\n\nDato secreto recibido de forma segura. La misma tarea del navegador continúa ahora.",
         }, { waitForDelivery: false });
         return;
       }
@@ -3293,13 +3402,13 @@ export async function handleMessage(
       return;
     }
 
-    if (pendingBrowserInput.kind === "otp") {
+    if (pendingBrowserInput.kind === "otp" || pendingBrowserInput.kind === "secret") {
       const value = extractPendingBrowserSecret(text);
       if (!value) {
         await sendWithTyping(sock, remoteJid, "🔐 MENSAJE DEL SISTEMA\n\nEnvía el código o secreto solicitado para continuar.");
         return;
       }
-      const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: "otp", value });
+      const secret = browserCredentialStore.createSecret({ jid: remoteJid, kind: pendingBrowserInput.kind, value });
       browserCredentialStore.clearPendingInput(remoteJid);
       await deleteSensitiveIncomingMessage(sock, message);
       await handleAiChat(
@@ -3596,9 +3705,11 @@ function parseDetachedBackgroundTaskResult(
   content: string,
   toolsCalled: string[],
 ): { taskId: string; title?: string; status: string; kind: "task" | "goal" } | null {
+  // Solo los goals siguen siendo terminales. Los subagentes background deben
+  // volver al modelo para que el turno principal complete trabajo independiente;
+  // nunca interpretes un eco JSON del modelo como motivo para cortar ese flujo.
   const goalStarted = toolsCalled.includes("goal_start");
-  const agentStarted = toolsCalled.some((name) => name === "spawn_agents" || name === "researcher_web" || name === "browser_agent");
-  if (!goalStarted && !agentStarted) return null;
+  if (!goalStarted) return null;
   try {
     const parsed = JSON.parse(content) as {
       task_id?: unknown;
@@ -3615,14 +3726,6 @@ function parseDetachedBackgroundTaskResult(
         title: typeof parsed.objective === "string" && parsed.objective.trim() ? parsed.objective.trim() : undefined,
         status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
         kind: "goal",
-      };
-    }
-    if (agentStarted && typeof parsed.task_id === "string" && parsed.task_id.trim()) {
-      return {
-        taskId: parsed.task_id.trim(),
-        title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
-        status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status.trim() : "queued",
-        kind: "task",
       };
     }
     return null;
@@ -3656,21 +3759,27 @@ async function handleAiChat(
   const cm = contextManager;
   const cfg = llmConfig;
   const agentConfigSnapshot = { ...agentConfig };
-  // Todas las herramientas permitidas por rol permanecen disponibles. La presencia
-  // de una URL o credential_ref no enruta ni oculta herramientas automáticamente;
-  // el agente principal decide qué capacidad usar. Las acciones sensibles mantienen
-  // sus validaciones autoritativas en el ejecutor.
-  const activeTools = getAvailableTools(remoteJid);
+  // Lazy Capabilities: el router local expone solo módulos relevantes para el
+  // mensaje. capability_load puede ampliar este set durante el mismo turno.
+  const loadedCapabilities = new Set<string>();
+  const pinnedCapabilities = getPinnedModuleIds(remoteJid);
+  const activeTools = getAvailableTools(remoteJid, userText, loadedCapabilities);
   await cm.withLock(remoteJid, async () => {
+
+  const explicitPersistentTtsMode = ttsManager.applyPersistentPreferenceFromMessage(remoteJid, userText);
+  if (explicitPersistentTtsMode) {
+    debugInfo("tts", "persistent_mode_from_message", { jid: remoteJid, mode: explicitPersistentTtsMode });
+  }
 
   const userMessage = { role: "user" as const, content: userText };
   cm.addMessage(remoteJid, userMessage);
 
   // La compactación automática se ejecuta sobre un snapshot y nunca bloquea
   // esta conversación. El turno actual continúa mientras el resumen se genera.
-  maybeStartAutomaticCompaction(sock, remoteJid);
+  maybeStartAutomaticCompaction(sock, remoteJid, userText);
 
   const messages = cm.getMessages(remoteJid);
+  const backgroundResumeContext = buildTaskOriginContext(messages, userText);
   const memoryIntent = detectMemoryPersistenceIntent(userText);
 
   // Inyectar contexto dinámico (hora + memoria) en el último user message,
@@ -3680,8 +3789,8 @@ async function handleAiChat(
   const compactedSummary = cm.getCompactionSummaryText(remoteJid);
   const supervisorContext = taskRuntime.buildContextSummary(remoteJid);
   const moduleSession = getModuleSession(remoteJid);
-  const modularContext = moduleRegistry.buildCapabilityPrompt(userText, moduleSession);
-  const modularRuntimeContext = await moduleRegistry.buildRuntimeContext(userText, moduleSession);
+  const modularContext = moduleRegistry.buildCapabilityPrompt(userText, moduleSession, pinnedCapabilities);
+  const modularRuntimeContext = await moduleRegistry.buildRuntimeContext(userText, moduleSession, pinnedCapabilities);
   const dynamicCtx = `${cm.buildDynamicContext(remoteJid)}
 
 ${modularContext}
@@ -3777,6 +3886,44 @@ ${supervisorContext}`;
         moduleName: toolModule?.name ?? "Sin módulo",
         tool: name,
       });
+
+      if (name === "capability_load") {
+        const capability = typeof args.capability === "string" ? args.capability.trim().toLowerCase() : "";
+        if (!capability) {
+          const failure = "Error: capability es obligatorio.";
+          toolResults.push({ name, result: failure });
+          return failure;
+        }
+        if (!moduleRegistry.canLoadCapability(capability, moduleSession)) {
+          const failure = `Error: la capacidad '${capability}' no está disponible para esta sesión.`;
+          toolResults.push({ name, result: failure });
+          return failure;
+        }
+        const alreadyFullyLoaded = loadedCapabilities.has(capability);
+        const wasAlreadyActive = moduleRegistry.getActiveModuleIds(userText, moduleSession).includes(capability)
+          || pinnedCapabilities.has(capability);
+        loadedCapabilities.add(capability);
+        const activationContext = await moduleRegistry.buildLoadedCapabilityContext(
+          capability,
+          userText,
+          moduleSession,
+          !wasAlreadyActive,
+        );
+        const result = [
+          alreadyFullyLoaded
+            ? `La capacidad '${capability}' ya estaba cargada completamente.`
+            : `Capacidad '${capability}' cargada completamente para este turno; sus tools avanzadas ya estarán disponibles en la siguiente ronda.`,
+          activationContext,
+          "Continúa ahora usando sus tools; no vuelvas a cargarla salvo que el runtime indique lo contrario.",
+        ].join("\n\n");
+        toolResults.push({ name, result });
+        debugInfo("modules.tools", "capability_loaded", {
+          jid: remoteJid,
+          capability,
+          loadedCapabilities: [...loadedCapabilities],
+        });
+        return result;
+      }
       if (TOOL_NOTIFICATION_TEXTS.has(name) && !shownNotifs.has(name)) {
         shownNotifs.add(name);
         const notification = name === "researcher_web"
@@ -3918,15 +4065,6 @@ ${supervisorContext}`;
 
       if (SKILL_TOOLS.some((tool) => tool.function.name === name)) {
         result = await executeSkillTool(name, args, skillManager, workspaceManager, remoteJid, runController.signal);
-        if (name === "skill_load" && !result.startsWith("Error:")) {
-          const skillName = typeof args.skill === "string" ? args.skill.trim().toLowerCase() : "skill";
-          const persistedSkillMessage = `[SKILL GLOBAL CARGADA: ${skillName}]\n${result}`;
-          // Igual que Claude Code, el contenido cargado permanece en el contexto
-          // entre turnos. Evitamos duplicar una invocación idéntica.
-          if (!cm.getMessages(remoteJid).some((message) => message.role === "user" && message.content === persistedSkillMessage)) {
-            cm.addMessage(remoteJid, { role: "user", content: persistedSkillMessage });
-          }
-        }
         await recordToolResult(name, result);
         return result;
       }
@@ -3942,6 +4080,25 @@ ${supervisorContext}`;
       }
 
       if (TTS_TOOLS.some((tool) => tool.function.name === name)) {
+        if (name === "tts_speak" && ttsManager.shouldBlockVoiceTool(remoteJid, userText)) {
+          result = "Error: la política autoritativa de este turno exige texto. tts_speak fue bloqueada y no se envió ningún audio.";
+          toolResults.push({ name, result });
+          debugWarn("tts", "voice_tool_blocked_by_text_preference", { jid: remoteJid });
+          return result;
+        }
+        if (name === "tts_set_mode" || name === "tts_set_enabled") {
+          const requestedMode = name === "tts_set_mode"
+            ? (args.mode === "voice" || args.mode === "text" || args.mode === "adaptive" ? args.mode : null)
+            : typeof args.enabled === "boolean"
+              ? (args.enabled ? "voice" : "text")
+              : null;
+          if (requestedMode && !ttsManager.canMutateResponseModeFromTool(userText, requestedMode)) {
+            result = "Error: cambiar el modo TTS persistente requiere una petición persistente explícita del usuario. Una preferencia como 'ahora por voz/texto' solo aplica a este turno.";
+            toolResults.push({ name, result });
+            debugWarn("tts", "persistent_mode_tool_blocked", { jid: remoteJid, requestedMode });
+            return result;
+          }
+        }
         result = await executeTtsTool(name, args, {
           manager: ttsManager,
           transport: sock,
@@ -3957,6 +4114,16 @@ ${supervisorContext}`;
 
       if (PROCESS_TOOLS.some((tool) => tool.function.name === name)) {
         result = await executeProcessTool(name, args, processManager, remoteJid);
+        await recordToolResult(name, result);
+        return result;
+      }
+
+      if (PUBLIC_WEB_TOOLS.some((tool) => tool.function.name === name)) {
+        result = await executePublicWebTool(name, args, {
+          workspace: workspaceManager,
+          jid: remoteJid,
+          signal: runController.signal,
+        });
         await recordToolResult(name, result);
         return result;
       }
@@ -3997,6 +4164,7 @@ ${supervisorContext}`;
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
+          resumeContext: backgroundResumeContext,
           onSystemMessage: async (text) => {
             // Mensaje emitido por una tarea background: no depende del typing
             // session del turno que la lanzó, porque ese turno puede haber
@@ -4035,6 +4203,7 @@ ${supervisorContext}`;
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
+          resumeContext: backgroundResumeContext,
           onSystemMessage: async (text) => {
             // Mensaje emitido por una tarea background: no depende del typing
             // session del turno que la lanzó, porque ese turno puede haber
@@ -4106,6 +4275,7 @@ ${supervisorContext}`;
           tasks: taskRuntime,
           browserCredentials: browserCredentialStore,
           resumePrompt: userText,
+          resumeContext: backgroundResumeContext,
           onSystemMessage: async (text) => {
             // Mensaje emitido por una tarea background: no depende del typing
             // session del turno que la lanzó, porque ese turno puede haber
@@ -4192,15 +4362,16 @@ ${supervisorContext}`;
         truncationRecoveryAttempts: 1,
         signal: runController.signal,
         usage: { jid: remoteJid, purpose: "chat" },
-        // Los lanzadores de subagentes son terminales para el turno principal:
-        // en la superficie pública siempre crean tareas background. Una vez
-        // registrada la tarea no se hace otra llamada al LLM dentro del lock de
-        // conversación; el supervisor/revisor continuará por fuera.
-        terminalTools: ["goal_start", "goal_instruction", "spawn_agents", "researcher_web", "browser_agent", "tts_speak"],
+        resolveTools: () => getAvailableTools(remoteJid, userText, loadedCapabilities),
+        // Los subagentes background NO son terminales: después de registrarlos el
+        // orquestador puede completar en paralelo cualquier obligación del turno
+        // que no dependa de su resultado. El supervisor integrará después la
+        // parte dependiente usando la solicitud y el contexto congelados.
+        terminalTools: ["goal_start", "goal_instruction", "tts_speak"],
         onToolRoundComplete: async () => {
-          // Igual que Codewolf: la deduplicación semántica solo aplica a las
-          // solicitudes repetidas dentro de una misma respuesta del modelo.
-          spawnDeduper.reset();
+          // La deduplicación de subagentes vive durante TODO este turno. Tras
+          // un lanzamiento background el modelo puede seguir trabajando, pero
+          // no debe volver a registrar la misma misión en una ronda posterior.
           updateForegroundState({ phase: "model", toolName: undefined });
         },
       },
@@ -4223,10 +4394,9 @@ ${supervisorContext}`;
       } catch { /* si no fue un resultado TTS válido, sigue el flujo normal */ }
     }
 
-    // Una tarea background ya fue registrada y su progreso visible se envió
-    // desde onProgress. No pedimos un segundo cierre al LLM ni enviamos el JSON
-    // interno como respuesta: persistimos solo un acuse compacto y liberamos el
-    // lock inmediatamente para que el siguiente mensaje del usuario pueda entrar.
+    // goal_start sí es terminal: su progreso visible se envió desde el runtime.
+    // Los subagentes normales no pasan por esta ruta porque deben permitir una
+    // segunda ronda que complete trabajo foreground independiente.
     const detachedBackgroundTask = parseDetachedBackgroundTaskResult(result.content, result.toolsCalled);
     if (detachedBackgroundTask) {
       cm.addMessage(remoteJid, {

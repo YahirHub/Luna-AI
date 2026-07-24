@@ -12,7 +12,7 @@ describe("/compact y /uso", () => {
   it("registra los comandos y no bloquea mensajes mientras compacta", () => {
     expect(bot).toContain('registerCommand(\n  "compact"');
     expect(bot).toContain('registerCommand(\n  "uso"');
-    expect(bot).toContain("maybeStartAutomaticCompaction(sock, remoteJid)");
+    expect(bot).toContain("maybeStartAutomaticCompaction(sock, remoteJid, userText)");
     expect(bot).not.toContain("if (compactingJids.has(remoteJid))");
     expect(bot).toContain("applyCompactionSnapshot");
   });

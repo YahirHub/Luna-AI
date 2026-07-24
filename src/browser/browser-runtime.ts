@@ -12,9 +12,17 @@ import {
   supportsManagedAgentBrowserChrome,
 } from "./browser-discovery.ts";
 import type { WorkspaceManager } from "../workspace/workspace-manager.ts";
-import type { BrowserCredentialStore, BrowserInputKind } from "./browser-credentials.ts";
+import {
+  browserLoginRequiresIdentityConfirmation,
+  extractBrowserLoginIntent,
+  type BrowserCredentialStore,
+  type BrowserInputKind,
+  type BrowserInputResolution,
+} from "./browser-credentials.ts";
+import { detectBrowserHumanInputNeed, normalizeBrowserRequestedInputKind } from "./browser-human-input.ts";
 import { debugInfo, debugLog, debugWarn } from "../debug.ts";
 import { createProcessOutputCollector } from "./process-output.ts";
+import { extractPublicUrls } from "../public-web/public-web-runtime.ts";
 
 import { writeJsonFileAtomically } from "../storage.ts";
 export function resolveAgentBrowserBinary(): string {
@@ -63,6 +71,14 @@ function runtimeDirName(value: string): string {
   return `${readable}-${stableHash(value).slice(0, 12)}`;
 }
 
+export interface BrowserAutomaticInputRequest {
+  kind: BrowserInputKind;
+  field_name: string;
+  url?: string;
+  username?: string;
+  message: string;
+}
+
 export interface BrowserExecutionOptions {
   jid: string;
   runId: string;
@@ -74,6 +90,8 @@ export interface BrowserExecutionOptions {
   credentials: BrowserCredentialStore;
   /** Texto original del usuario que debe reanudarse si el subagente necesita un dato humano. */
   resumePrompt?: string;
+  /** Referencia segura entregada explícitamente al crear esta ejecución. Autoriza esa identidad sin inferirla por dominio. */
+  initialCredentialRef?: string;
   /** Canal de sistema para pedir datos sin hacer que el LLM formule o reciba secretos. */
   onUserInputRequest?: (request: {
     kind: BrowserInputKind;
@@ -340,8 +358,13 @@ export class BrowserAgentExecution {
   private sessionTouched = false;
   private cancelled = false;
   private finalizing = false;
+  private waitingForUser = false;
+  /** Identidad elegida explícitamente en la misión original o por una respuesta humana durante esta ejecución. */
+  private confirmedLoginUsername = "";
 
   constructor(private readonly options: BrowserExecutionOptions) {
+    const initialLoginIntent = extractBrowserLoginIntent(options.resumePrompt ?? "");
+    this.confirmedLoginUsername = initialLoginIntent.username.trim();
     const id = stableHash(`${options.jid}:${options.runId}`);
     const userState = stableHash(options.jid);
     this.sessionBase = `luna-${id}`;
@@ -363,6 +386,28 @@ export class BrowserAgentExecution {
     mkdirSync(this.persistentHome, { recursive: true });
     mkdirSync(this.currentProfileDir(), { recursive: true });
     mkdirSync(dirname(this.stateFile), { recursive: true });
+  }
+
+  /**
+   * Una orden explícita de iniciar sesión no autoriza a Luna a escoger una
+   * cuenta por heurística. Si el usuario no indicó identidad y tampoco llegó
+   * una credential_ref capturada explícitamente, primero debe preguntarla.
+   */
+  private requiresExplicitLoginIdentity(): boolean {
+    return browserLoginRequiresIdentityConfirmation(
+      this.options.resumePrompt ?? "",
+      this.confirmedLoginUsername,
+      this.options.initialCredentialRef ?? "",
+    );
+  }
+
+  private identityRequiredResult(): string {
+    return JSON.stringify({
+      ok: false,
+      recoverable: true,
+      reason: "login_identity_required",
+      instruction: "El usuario pidió iniciar sesión pero no indicó qué cuenta usar. No infieras ni reutilices un correo por el dominio, por una cuenta guardada, por un único perfil disponible ni por un valor prellenado en la página. Usa browser_request_user_input con kind=username y continúa únicamente después de que el usuario confirme la identidad.",
+    }, null, 2);
   }
 
   private currentProfileDir(): string {
@@ -870,8 +915,94 @@ ${snapshot}
     }
   }
 
+  isWaitingForUser(): boolean {
+    return this.waitingForUser;
+  }
+
+  /**
+   * Última barrera de seguridad contra cierres prematuros del LLM. Si el
+   * subagente intenta terminar diciendo que le falta una credencial, OTP,
+   * CAPTCHA u otro dato humano, construye una solicitud segura usando el
+   * estado real de la sesión. No extrae ni inventa secretos.
+   */
+  async resolveAutomaticInputRequest(
+    finalOutput: string,
+    mission: string,
+    signal: AbortSignal,
+  ): Promise<BrowserAutomaticInputRequest | null> {
+    const missionIntent = extractBrowserLoginIntent(mission);
+    const identityPending = this.requiresExplicitLoginIdentity();
+    const need = detectBrowserHumanInputNeed(finalOutput, mission);
+    // Incluso si el navegador abrió una sesión persistida y el modelo afirma
+    // que el login ya está listo, una nueva orden explícita de autenticación no
+    // puede finalizar hasta saber qué identidad eligió realmente el usuario.
+    if (!need && !identityPending) return null;
+
+    const outputIntent = extractBrowserLoginIntent(finalOutput);
+    let url = missionIntent.url || outputIntent.url;
+    // Para una misión que pide login, solo confiamos en la identidad escrita
+    // por el usuario o confirmada mediante browser_request_user_input. El texto
+    // final del modelo no puede convertir una inferencia suya en autorización.
+    let username = identityPending ? "" : (this.confirmedLoginUsername || missionIntent.username);
+    if (!identityPending && !missionIntent.loginRequested && !username) username = outputIntent.username;
+
+    if (this.sessionTouched) {
+      try {
+        const current = await this.run(["get", "url", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        url = extractCurrentUrl(current) || url;
+      } catch {
+        // Si la página dejó de responder conservamos la URL de la misión.
+      }
+    }
+
+    let kind: BrowserInputKind = identityPending ? "username" : need!.kind;
+    let fieldName = identityPending ? "usuario o correo" : need!.fieldName;
+    let message = identityPending
+      ? "Antes de iniciar o aceptar una sesión existente, necesito que confirmes qué usuario/correo debo usar para esta tarea."
+      : need!.message;
+
+    // Una contraseña siempre debe quedar asociada a URL + identidad. Si falta
+    // una de esas piezas pedimos primero la información no secreta y dejamos
+    // que la misma ejecución solicite la contraseña en el paso siguiente.
+    if (kind === "password" && !username) {
+      kind = "username";
+      fieldName = "usuario o correo";
+      message = "Antes de solicitar la contraseña, el sistema necesita identificar la cuenta correcta para continuar esta misma tarea.";
+    } else if (kind === "password" && !url) {
+      kind = "text";
+      fieldName = "sitio o URL";
+      message = "Antes de solicitar la contraseña, el sistema necesita saber a qué sitio pertenece la cuenta.";
+    }
+
+    return {
+      kind,
+      field_name: fieldName,
+      url: url || undefined,
+      username: username || undefined,
+      message,
+    };
+  }
+
   async executeTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     if (this.cancelled || this.finalizing) throw new Error("browser-agent-cancelled");
+
+    // Cuando el usuario ordenó iniciar sesión sin indicar la cuenta, ninguna
+    // acción capaz de avanzar/autocompletar el login puede ejecutarse todavía.
+    // Se permite abrir/inspeccionar la página y, por supuesto, pedir el dato.
+    // Esto impide que el modelo use un correo guardado, prellenado o inferido.
+    if (this.requiresExplicitLoginIdentity() && new Set([
+      "browser_click",
+      "browser_fill",
+      "browser_type",
+      "browser_press",
+      "browser_auth_profiles",
+      "browser_auth_login",
+      "browser_fill_secret",
+      "browser_auth_confirm",
+    ]).has(name)) {
+      return this.identityRequiredResult();
+    }
+
     switch (name) {
       case "browser_open": {
         const url = typeof args.url === "string" ? args.url.trim() : "";
@@ -906,6 +1037,44 @@ ${snapshot}
         const relative = `${this.options.agentDir}/browser/html/${safeName(requested.endsWith(".html") ? requested : `${requested}.html`)}`;
         this.options.workspace.writeText(this.options.jid, relative, html);
         return `${html.slice(0, 12_000)}${html.length > 12_000 ? "\n\n[...HTML completo guardado en el archivo...]" : ""}\n\n[SISTEMA: HTML guardado en ${relative}; ${html.length} caracteres]`;
+      }
+      case "browser_find_html": {
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) return "Error: query es obligatorio.";
+        const mode = ["text", "urls", "media"].includes(String(args.mode)) ? String(args.mode) as "text" | "urls" | "media" : "text";
+        const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "html";
+        const maxMatches = Number.isInteger(args.max_matches) ? Math.max(1, Math.min(100, Number(args.max_matches))) : 30;
+        const output = await this.run(["get", "html", selector, "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+        const value = extractJsonCommandData(output);
+        const html = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        let result: Record<string, unknown>;
+        if (mode === "urls" || mode === "media") {
+          let pageUrl = "https://invalid.local/";
+          try {
+            const current = await this.run(["get", "url", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+            pageUrl = extractCurrentUrl(current) || pageUrl;
+          } catch { /* conserva base neutra si la URL actual no pudo leerse */ }
+          const matches = extractPublicUrls(html, pageUrl, mode === "media" ? "media" : "all", query, maxMatches);
+          result = { query, mode, selector, html_chars: html.length, match_count: matches.length, matches };
+        } else {
+          const lower = html.toLowerCase();
+          const needleText = query.toLowerCase();
+          const matches: Array<{ index: number; snippet: string }> = [];
+          let offset = 0;
+          while (matches.length < maxMatches) {
+            const index = lower.indexOf(needleText, offset);
+            if (index < 0) break;
+            const start = Math.max(0, index - 180);
+            const end = Math.min(html.length, index + query.length + 260);
+            matches.push({ index, snippet: html.slice(start, end).replace(/\s+/g, " ").trim() });
+            offset = index + Math.max(1, query.length);
+          }
+          result = { query, mode, selector, html_chars: html.length, match_count: matches.length, matches };
+        }
+        const relative = `${this.options.agentDir}/browser/inspection/find-html-${Date.now()}.json`;
+        const serialized = `${JSON.stringify(result, null, 2)}\n`;
+        this.options.workspace.writeText(this.options.jid, relative, serialized);
+        return `${serialized.slice(0, 14_000)}\n[SISTEMA: coincidencias completas guardadas en ${relative}]`;
       }
       case "browser_eval": {
         const script = typeof args.script === "string" ? args.script.trim() : "";
@@ -1063,16 +1232,48 @@ ${snapshot}
       }
       case "browser_request_user_input": {
         const kindRaw = typeof args.kind === "string" ? args.kind : "text";
-        const kind: BrowserInputKind = ["username", "password", "otp", "text"].includes(kindRaw)
+        let kind: BrowserInputKind = ["username", "password", "otp", "secret", "text"].includes(kindRaw)
           ? kindRaw as BrowserInputKind
           : "text";
-        const fieldName = typeof args.field_name === "string" ? args.field_name.trim() : "";
-        const url = typeof args.url === "string" ? args.url.trim() : "";
-        const username = typeof args.username === "string" ? args.username.trim() : "";
-        const message = typeof args.message === "string" ? args.message.trim() : "";
+        let fieldName = typeof args.field_name === "string" ? args.field_name.trim() : "";
+        let url = typeof args.url === "string" ? args.url.trim() : "";
+        let username = typeof args.username === "string" ? args.username.trim() : "";
+        let message = typeof args.message === "string" ? args.message.trim() : "";
         if (!fieldName) return "Error: field_name es obligatorio.";
-        if (kind === "password" && (!url || !username)) {
-          return "Error: para solicitar una contraseña debes indicar url y username. Si falta o quieres confirmar el usuario, solicítalo primero con kind=username.";
+
+        // La clasificación del modelo no es una frontera de seguridad. Si el
+        // nombre o explicación del campo revela que es un secreto, elevamos el
+        // tipo antes de pedirlo para que la respuesta nunca vuelva al LLM.
+        kind = normalizeBrowserRequestedInputKind(kind, fieldName, message);
+
+        if (this.requiresExplicitLoginIdentity() && kind !== "username") {
+          kind = "username";
+          fieldName = "usuario o correo";
+          username = "";
+          message = "El usuario pidió iniciar sesión pero todavía no confirmó qué cuenta usar. Indica el usuario/correo antes de solicitar cualquier contraseña o reutilizar una sesión guardada.";
+        }
+
+        if (kind === "password") {
+          const missionIntent = extractBrowserLoginIntent(this.options.resumePrompt ?? "");
+          url ||= missionIntent.url;
+          username ||= this.confirmedLoginUsername || missionIntent.username;
+          if (!url && this.sessionTouched) {
+            try {
+              const current = await this.run(["get", "url", "--json"], signal, undefined, BROWSER_COMMAND_TIMEOUT_MS.inspect);
+              url = extractCurrentUrl(current) ?? "";
+            } catch {
+              // La página actual puede haber dejado de responder.
+            }
+          }
+          if (!username) {
+            kind = "username";
+            fieldName = "usuario o correo";
+            message = message || "Necesito identificar la cuenta antes de solicitar su contraseña de forma segura.";
+          } else if (!url) {
+            kind = "text";
+            fieldName = "sitio o URL";
+            message = message || "Necesito asociar la credencial con el sitio correcto antes de solicitar la contraseña.";
+          }
         }
 
         const requestId = `browser-input-${crypto.randomUUID()}`;
@@ -1081,6 +1282,7 @@ ${snapshot}
         // Registrar la espera ANTES de emitir el mensaje evita una carrera si el
         // usuario responde inmediatamente. Cada agente conserva su requestId para
         // soportar varias solicitudes simultáneas dentro del mismo chat.
+        this.waitingForUser = true;
         await this.options.onStateChange?.("waiting_user");
         const pending = this.options.credentials.waitForInput({
           jid: this.options.jid,
@@ -1108,6 +1310,7 @@ ${snapshot}
             screenshotPath,
           });
         } catch (error) {
+          this.waitingForUser = false;
           this.options.credentials.cancelPendingInput(this.options.jid, error, requestId);
           throw error;
         }
@@ -1121,7 +1324,12 @@ ${snapshot}
           username: username || undefined,
         });
 
-        const resolution = await pending;
+        let resolution: BrowserInputResolution;
+        try {
+          resolution = await pending;
+        } finally {
+          this.waitingForUser = false;
+        }
         await this.options.onStateChange?.("running");
         debugInfo("browser-agent.runtime", "user_input_resumed", {
           runId: this.options.runId,
@@ -1137,6 +1345,12 @@ ${snapshot}
             instruction: "El usuario corrigió el dato solicitado. No abortes: vuelve a inspeccionar el formulario y solicita nuevamente usuario/correo y después contraseña según corresponda, conservando esta misma sesión.",
           });
         }
+        if (resolution.kind === "username") {
+          this.confirmedLoginUsername = resolution.value.trim();
+        } else if (resolution.kind === "password") {
+          this.confirmedLoginUsername = resolution.username.trim();
+        }
+
         if (resolution.kind === "password") {
           return JSON.stringify({
             status: "received",
@@ -1147,20 +1361,23 @@ ${snapshot}
             instruction: "La misma tarea y sesión del navegador continúan activas. Usa credential_ref con browser_auth_login y sigue desde la página actual.",
           });
         }
-        if (resolution.kind === "otp") {
+        if (resolution.kind === "otp" || resolution.kind === "secret") {
           return JSON.stringify({
             status: "received",
-            kind: "otp",
+            kind: resolution.kind,
             secret_ref: resolution.secretRef,
-            instruction: "La misma tarea y sesión del navegador continúan activas. Usa secret_ref con browser_fill_secret en el campo correspondiente.",
+            instruction: "La misma tarea y sesión del navegador continúan activas. Usa secret_ref con browser_fill_secret en el campo correspondiente; nunca solicites ni muestres el valor en texto plano.",
           });
         }
-        return JSON.stringify({
-          status: "received",
-          kind: resolution.kind,
-          value: resolution.value,
-          instruction: "La misma tarea y sesión del navegador continúan activas. Usa el dato y sigue desde la página actual; no abras una nueva tarea.",
-        });
+        if (resolution.kind === "username" || resolution.kind === "text") {
+          return JSON.stringify({
+            status: "received",
+            kind: resolution.kind,
+            value: resolution.value,
+            instruction: "La misma tarea y sesión del navegador continúan activas. Usa el dato y sigue desde la página actual; no abras una nueva tarea.",
+          });
+        }
+        return "Error: respuesta humana no reconocida por browser-web.";
       }
       case "browser_fill_secret": {
         const selector = typeof args.selector === "string" ? args.selector.trim() : "";
@@ -1219,23 +1436,82 @@ ${snapshot}
         let ref = typeof args.credential_ref === "string" ? args.credential_ref.trim() : "";
         const requestedUrl = typeof args.url === "string" ? args.url.trim() : "";
         const requestedUsername = typeof args.username === "string" ? args.username.trim() : "";
+        const missionIntent = extractBrowserLoginIntent(this.options.resumePrompt ?? "");
+        const authorizedUsername = this.confirmedLoginUsername || missionIntent.username;
+
+        // URL sola jamás selecciona una identidad. Incluso con un único perfil
+        // guardado, el usuario debe haber indicado/confirmado la cuenta.
+        if (!ref && requestedUrl && !requestedUsername && !authorizedUsername) {
+          return this.identityRequiredResult();
+        }
+
+        // En una orden explícita de login, un username inventado por el modelo
+        // no sustituye la confirmación humana.
+        if (missionIntent.loginRequested && authorizedUsername && requestedUsername
+          && requestedUsername.toLowerCase() !== authorizedUsername.toLowerCase()) {
+          return JSON.stringify({
+            ok: false,
+            recoverable: true,
+            reason: "login_identity_mismatch",
+            confirmed_username: authorizedUsername,
+            instruction: "El usuario confirmó otra identidad. No cambies de cuenta por inferencia; usa únicamente el usuario/correo confirmado o vuelve a solicitar kind=username si el usuario quiere corregirlo.",
+          }, null, 2);
+        }
 
         if (!ref && requestedUrl) {
+          const effectiveUsername = authorizedUsername || requestedUsername;
+          if (!effectiveUsername) return this.identityRequiredResult();
           const profiles = this.options.credentials.listProfiles(
             this.options.jid,
             requestedUrl,
-            requestedUsername || undefined,
+            effectiveUsername,
           );
           if (profiles.length === 1) ref = profiles[0]!.ref;
           else if (profiles.length > 1) {
-            return `Error: hay ${profiles.length} cuentas guardadas para ese sitio. Usa browser_auth_profiles y selecciona credential_ref según el usuario correcto.`;
+            return JSON.stringify({
+              ok: false,
+              recoverable: true,
+              reason: "ambiguous_account",
+              accounts: profiles.map((profile) => ({
+                credential_ref: profile.ref,
+                username: profile.username,
+                url: profile.url,
+                label: profile.label,
+              })),
+              instruction: "Hay varias credenciales para la identidad ya confirmada. No elijas una por heurística; solicita una aclaración al usuario y después reintenta browser_auth_login.",
+            }, null, 2);
           } else {
-            return "Error: no hay una credencial guardada para esa cuenta. Usa browser_request_user_input para solicitar primero el usuario o la contraseña que falte.";
+            return JSON.stringify({
+              ok: false,
+              recoverable: true,
+              reason: "missing_credentials",
+              url: requestedUrl,
+              username: effectiveUsername,
+              instruction: "No hay una credencial guardada para esa cuenta confirmada. No termines la tarea: solicita la contraseña con browser_request_user_input y continúa en esta misma sesión.",
+            }, null, 2);
           }
         }
 
         const credential = this.options.credentials.resolve(ref, this.options.jid);
-        if (!credential) return "Error: la referencia de credencial segura no existe, expiró o pertenece a otro usuario.";
+        if (!credential) {
+          return JSON.stringify({
+            ok: false,
+            recoverable: true,
+            reason: "credential_reference_unavailable",
+            instruction: "La referencia segura expiró, fue eliminada o no pertenece a este usuario. No termines la tarea: consulta browser_auth_profiles o solicita nuevamente el dato con browser_request_user_input.",
+          }, null, 2);
+        }
+        if (missionIntent.loginRequested && authorizedUsername
+          && credential.username.toLowerCase() !== authorizedUsername.toLowerCase()) {
+          return JSON.stringify({
+            ok: false,
+            recoverable: true,
+            reason: "login_identity_mismatch",
+            confirmed_username: authorizedUsername,
+            credential_username: credential.username,
+            instruction: "La credencial seleccionada pertenece a otra cuenta. No la uses: conserva la identidad confirmada por el usuario y solicita la contraseña correspondiente si hace falta.",
+          }, null, 2);
+        }
         const profile = `luna-temp-${stableHash(`${this.options.jid}:${credential.url}:${credential.username}:${this.options.runId}`)}`;
         await this.run([
           "auth", "save", profile,

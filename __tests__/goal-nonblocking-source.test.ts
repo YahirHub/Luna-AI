@@ -14,7 +14,9 @@ describe("goal no bloqueante", () => {
   });
 
   it("goal_instruction es terminal para no ejecutar una cadena pesada en el turno principal", () => {
-    expect(source).toContain('terminalTools: ["goal_start", "goal_instruction", "spawn_agents", "researcher_web", "browser_agent"]');
+    const terminalTools = /terminalTools:\s*\[([^\]]+)\]/s.exec(source)?.[1] ?? "";
+    expect(terminalTools).toContain('"goal_start"');
+    expect(terminalTools).toContain('"goal_instruction"');
     expect(source).toContain("goalRuntime.addInstruction(remoteJid, instruction");
   });
 

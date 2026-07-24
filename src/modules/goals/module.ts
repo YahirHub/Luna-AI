@@ -15,11 +15,13 @@ export const GOALS_MODULE: LunaModule = {
     },
   ],
   tools: [
-    { name: "tasklist_create" },
-    { name: "tasklist_read" },
-    { name: "tasklist_replace" },
-    { name: "tasklist_update" },
-    { name: "tasklist_add" },
+    // El agente principal solo necesita iniciar/controlar goals. El tasklist
+    // completo se carga dentro de GoalRuntime o mediante capability_load.
+    { name: "tasklist_create", defer: true },
+    { name: "tasklist_read", defer: true },
+    { name: "tasklist_replace", defer: true },
+    { name: "tasklist_update", defer: true },
+    { name: "tasklist_add", defer: true },
     { name: "goal_start" },
     { name: "goal_status" },
     { name: "goal_cancel" },
@@ -27,17 +29,19 @@ export const GOALS_MODULE: LunaModule = {
     { name: "goal_instruction" },
   ],
   prompt: {
-    always: true,
     summary: "Mantiene tasklists internas y ejecuta goals autónomos hasta que un verifier confirme el resultado.",
-    keywords: ["goal", "objetivo", "hasta terminar", "no pares", "continua hasta", "continúa hasta", "tasklist", "plan de trabajo"],
+    keywords: ["goal", "objetivo", "hasta terminar", "no pares", "continua hasta", "continúa hasta", "tasklist", "plan de trabajo", "implementa", "refactoriza", "corrige el proyecto", "crea el proyecto"],
+    patterns: [
+      /\b(?:investiga|analiza).{0,80}\b(?:implementa|corrige|crea|edita).{0,80}\b(?:prueba|test|build|compila|valida)\b/iu,
+      /\b(?:implementa|refactoriza|corrige|crea).{0,100}\b(?:proyecto|repositorio|repo|c[oó]digo|aplicaci[oó]n).{0,100}\b(?:prueba|test|build|compila|valida)\b/iu,
+    ],
     instructions: [
-      "Para trabajos normales de 3 o más pasos usa una tasklist interna; no existe ni debes sugerir un comando /tasklist.",
-      "Si la petición exige múltiples fases dependientes (por ejemplo investigar documentación, implementar, ejecutar tests y corregir hasta pasar) o el usuario dice que continúes hasta terminar, inicia goal_start en vez de abandonar después de delegar una sola investigación.",
-      "También usa goal_start para crear, convertir o refactorizar proyectos cuando previsiblemente requieran varias escrituras de archivos más validación/ejecución; evita cadenas largas de tools dentro del lock conversacional.",
-      "Mantén la tasklist actualizada y registra evidencia al marcar completed; no uses completed como simple intención.",
-      "Cuando el usuario use /goal, el runtime autónomo corre en segundo plano y el verifier decide cuándo está realmente completo.",
-      "No bloquees la conversación esperando un goal activo; el usuario puede seguir hablando mientras progresa.",
-      "Si existe un goal activo y el usuario corrige requisitos, tecnología, formato o comportamiento de ese trabajo, usa goal_instruction para enviárselo al runtime en vez de rehacer el proyecto dentro del turno conversacional.",
+      "Para trabajos de varias fases dependientes o proyectos que requieren editar + validar, usa goal_start y libera el chat; el verifier decide cuándo termina.",
+      "Si ya existe un goal activo y el usuario corrige requisitos, usa goal_instruction en vez de rehacer el trabajo en el turno principal.",
+      "No existe comando /tasklist público; la tasklist detallada pertenece al GoalRuntime.",
+    ],
+    loadInstructions: [
+      "Las tasklist_* son internas: conserva el plan, actualiza evidencia y no marques completed como simple intención.",
     ],
   },
 };

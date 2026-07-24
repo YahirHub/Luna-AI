@@ -4,13 +4,16 @@ export const AGENTS_MODULE: LunaModule = {
   access: "authenticated", scope: "user",
   commands: [{ name: "config", description: "Configura herramientas y subagentes", access: "admin" }],
   tools: [
-    { name: "spawn_agents" }, { name: "task_list" }, { name: "task_status" }, { name: "task_inspect" }, { name: "task_review" },
-    { name: "task_cancel" }, { name: "task_cancel_all" }, { name: "agent_list" }, { name: "agent_status" }, { name: "agent_review" }, { name: "agent_cancel" },
-    { name: "agent_config_status", access: "admin" }, { name: "agent_config_update", access: "admin" },
+    { name: "spawn_agents" }, { name: "task_list" }, { name: "task_status" }, { name: "agent_list" }, { name: "agent_status" },
+    { name: "task_inspect", defer: true }, { name: "task_review", defer: true }, { name: "task_cancel", defer: true },
+    { name: "task_cancel_all", defer: true }, { name: "agent_review", defer: true }, { name: "agent_cancel", defer: true },
+    { name: "agent_config_status", access: "admin", defer: true }, { name: "agent_config_update", access: "admin", defer: true },
   ],
   prompt: { summary: "Delega tareas aisladas, supervisa progreso y revisa resultados persistentes.", keywords: ["agente", "agentes", "tarea", "tareas", "segundo plano", "paralelo"], instructions: [
-    "Usa spawn_agents para dos o más trabajos independientes; las tareas de fondo no bloquean el chat.",
-    "Los estados del supervisor son autoritativos: no contradigas agent_started, waiting_user o estados terminales.",
-    "Revisa resultados y artefactos contra la solicitud original; si falta evidencia, delega únicamente el hueco necesario.",
+    "Usa spawn_agents para trabajos independientes; registrar un subagente NO termina el turno principal. Continúa en paralelo cualquier parte de la solicitud que no dependa de su resultado y no relances la misma misión.",
+    "Cuando el resultado background llegue, el supervisor lo integrará con la solicitud original y el contexto congelado; no inventes antes comparaciones o conclusiones que dependan de ese resultado.",
+    "Consulta task_status/agent_status para progreso. Para inspección, revisión, cancelación o configuración avanzada carga completamente agents con capability_load.",
+  ], loadInstructions: [
+    "Revisa resultados/artefactos contra la solicitud original y cancela solo la tarea/agente indicado; no contradigas estados terminales confirmados.",
   ] },
 };

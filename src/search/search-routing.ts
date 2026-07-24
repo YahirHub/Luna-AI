@@ -2,6 +2,8 @@ import { isApiSearchAvailable } from "./search-storage.ts";
 import { loadAgentConfig } from "../agent-config.ts";
 
 export const BROWSER_SEARCH_FALLBACK_URL = "https://www.dogpile.com/";
+export const WIKIMEDIA_COMMONS_SEARCH_URL = "https://commons.wikimedia.org/wiki/Special:MediaSearch";
+export const INTERNET_ARCHIVE_SEARCH_URL = "https://archive.org/advancedsearch.php";
 
 function normalize(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -27,8 +29,12 @@ export function shouldActivateBrowserSearchFallback(message: string): boolean {
 export function buildDogpileSearchFallbackPrompt(prompt: string): string {
   return [
     "[SISTEMA: api-search no está disponible en esta ejecución porque no hay un proveedor utilizable o la capacidad de investigación está deshabilitada.]",
-    `Realiza la búsqueda con browser-agent. Abre ${BROWSER_SEARCH_FALLBACK_URL} como buscador predeterminado, ejecuta allí la consulta y abre las fuentes originales que aparezcan en los resultados.`,
-    "Dogpile solo sirve para descubrir resultados: verifica los datos en las páginas originales y basa la respuesta final en esas fuentes, no en el agregador.",
+    "Usa fuentes públicas resistentes a automatización según el tipo de contenido:",
+    `- Búsqueda web general: ${BROWSER_SEARCH_FALLBACK_URL} para descubrir enlaces; después abre y verifica las fuentes originales.`,
+    `- Imágenes/medios reutilizables: ${WIKIMEDIA_COMMONS_SEARCH_URL}; conserva página File:, autor/creator, licencia y URL directa cuando estén disponibles.`,
+    `- Video, audio, libros y otros objetos públicos: ${INTERNET_ARCHIVE_SEARCH_URL}; abre el item original y prioriza sus enlaces /download/ directos cuando la misión requiera el archivo.`,
+    "Dogpile, Wikimedia Commons e Internet Archive son fuentes de descubrimiento/hosting; la respuesta final debe distinguir claramente la fuente original y no inventar licencia, autoría ni contenido visual.",
+    "Si la tarea solo necesita localizar/descargar un archivo público y el orquestador dispone de public_media_search/public_media_download, esa ruta directa es preferible al navegador.",
     "",
     prompt.trim(),
   ].join("\n");

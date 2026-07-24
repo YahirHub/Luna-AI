@@ -7,16 +7,20 @@ export const WORKSPACE_MODULE: LunaModule = {
     { name: "limpiar-workdir", description: "Alias en español para limpiar el workdir privado" },
   ],
   tools: [
-    { name: "workspace_list" }, { name: "workspace_append_text" }, { name: "workspace_edit_text" }, { name: "workspace_delete" },
-    { name: "workspace_read_text" }, { name: "workspace_write_text" }, { name: "workspace_list_artifacts" }, { name: "workspace_clear" },
-    { name: "workspace_mkdir" }, { name: "workspace_stat" }, { name: "workspace_move" }, { name: "workspace_copy" },
-    { name: "workspace_glob" }, { name: "workspace_search" }, { name: "workspace_read_files" }, { name: "workspace_apply_patch" },
-    { name: "workspace_runtime_status" }, { name: "workspace_exec" },
+    // Lectura/descubrimiento: superficie barata que el router puede exponer por intención.
+    { name: "workspace_list" }, { name: "workspace_read_text" }, { name: "workspace_list_artifacts" }, { name: "workspace_stat" },
+    { name: "workspace_glob" }, { name: "workspace_search" }, { name: "workspace_read_files" }, { name: "workspace_runtime_status" },
+    // Mutación/ejecución: se descubre mediante capability_load("workspace") cuando realmente hace falta.
+    { name: "workspace_append_text", defer: true }, { name: "workspace_edit_text", defer: true }, { name: "workspace_delete", defer: true },
+    { name: "workspace_write_text", defer: true }, { name: "workspace_clear", defer: true }, { name: "workspace_mkdir", defer: true },
+    { name: "workspace_move", defer: true }, { name: "workspace_copy", defer: true }, { name: "workspace_apply_patch", defer: true },
+    { name: "workspace_exec", defer: true },
   ],
-  prompt: { summary: "Lee, crea, edita y elimina archivos dentro del workdir privado del usuario.", keywords: ["archivo", "carpeta", "workdir", "markdown", ".md", "escribe", "edita", "elimina archivo"], instructions: [
-    "Usa las tools de workspace para operaciones físicas; no afirmes que un archivo existe sin resultado confirmado.",
-    "Para tareas de código inspecciona primero con workspace_list/glob/search/read_files, edita con write/edit/apply_patch y valida con workspace_exec cuando exista el runtime adecuado.",
-    "workspace_exec está confinado al workdir y debe usarse para tests, builds o scripts necesarios. No inventes salida ni asumas que Python/Node/Bun están instalados: consulta workspace_runtime_status/contexto dinámico.",
-    "workspace_clear es destructiva y requiere petición explícita de vaciar el workdir; para archivos individuales usa workspace_delete.",
+  prompt: { summary: "Lee, crea, edita y elimina archivos dentro del workdir privado del usuario.", keywords: ["archivo", "carpeta", "workdir", "markdown", ".md", "escribe", "edita", "elimina archivo", "proyecto", "repositorio", "repo", "código", "codigo", "implementa", "corrige", "refactoriza", "tests", "pruebas", "build", "compila"], instructions: [
+    "Inspecciona primero el workdir con list/glob/search/read_files y usa resultados confirmados como evidencia. Si necesitas modificar o ejecutar, carga completamente workspace con capability_load.",
+  ], loadInstructions: [
+    "Para editar usa write/edit/apply_patch y valida con workspace_exec cuando exista el runtime adecuado; no inventes salida.",
+    "workspace_exec está confinado al workdir. Consulta workspace_runtime_status antes de asumir Python/Node/Bun.",
+    "workspace_clear es destructiva y exige una petición explícita de vaciar el workdir; para archivos individuales usa workspace_delete.",
   ] },
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { detectTtsTurnPreference, isTranscribedAudioMessage, sanitizeTextForSpeech } from "../src/tts/text-sanitizer.ts";
+import { detectTtsPersistentModeIntent, detectTtsTurnPreference, isTranscribedAudioMessage, sanitizeTextForSpeech } from "../src/tts/text-sanitizer.ts";
 
 describe("filtro de texto para Piper Neo", () => {
   it("elimina Markdown, URLs, emojis y bloques de código sin destruir el texto natural", () => {
@@ -28,7 +28,18 @@ describe("filtro de texto para Piper Neo", () => {
   it("detecta preferencias explícitas de texto o voz", () => {
     expect(detectTtsTurnPreference("Respóndeme por mensaje de texto, no por audio")).toBe("text");
     expect(detectTtsTurnPreference("Mándame la respuesta en una nota de voz")).toBe("voice");
+    expect(detectTtsTurnPreference("No quiero audios, entiendes? envíame texto")).toBe("text");
+    expect(detectTtsTurnPreference("Ahora hablemos soloen texto")).toBe("text");
+    expect(detectTtsTurnPreference("Prueba la voz de Cortana")).toBe("voice");
+    expect(detectTtsTurnPreference("Ahora dame el resultado por voz")).toBe("voice");
     expect(detectTtsTurnPreference("Explícame cómo funciona")).toBeNull();
+  });
+
+  it("distingue cambios persistentes de preferencias de un solo turno", () => {
+    expect(detectTtsPersistentModeIntent("Ahora hablemos soloen texto")).toBe("text");
+    expect(detectTtsPersistentModeIntent("No quiero audios, entiendes?")).toBe("text");
+    expect(detectTtsPersistentModeIntent("A partir de ahora respóndeme por voz")).toBe("voice");
+    expect(detectTtsPersistentModeIntent("Ahora dame el resultado por voz")).toBeNull();
   });
 
   it("reconoce una entrada de audio transcrita o todavía pendiente como adjunto", () => {

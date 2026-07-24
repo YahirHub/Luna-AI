@@ -89,6 +89,14 @@ describe("SkillManager", () => {
     expect(skills.formatListForUser()).toContain("deploy-only");
   });
 
+  it("busca skills localmente sin cargar el catálogo completo", () => {
+    const { skills } = fixture();
+    const result = skills.searchForModel("diseñar interfaz CSS accesible", 3);
+    expect(result).toContain("web-design");
+    expect(result).not.toContain("deploy-only");
+    expect(result).toContain("skill_load");
+  });
+
   it("interpreta frontmatter Claude/Agent Skills, argumentos y variables compatibles", async () => {
     const { skills, workspace } = fixture();
     const definition = skills.get("web-design");

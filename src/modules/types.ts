@@ -25,13 +25,22 @@ export interface ModuleCommandDefinition {
 export interface ModuleToolDefinition {
   name: string;
   access?: ModuleAccess;
+  /**
+   * Si es true, la tool no se expone solo porque el router haya activado el
+   * módulo. Se incorpora cuando capability_load carga explícitamente la
+   * capacidad completa. Útil para superficies avanzadas, mutables o raras.
+   */
+  defer?: boolean;
   /** Permite retirar la tool del request cuando su backend/configuración no está disponible. */
   availableWhen?: ModuleCondition;
 }
 
 export interface ModulePromptDefinition {
   summary: string;
+  /** Instrucciones mínimas entregadas cuando el router activa el módulo. */
   instructions?: string[];
+  /** Instrucciones adicionales entregadas solo al cargar completamente la capacidad. */
+  loadInstructions?: string[];
   keywords?: string[];
   patterns?: RegExp[];
   always?: boolean;
@@ -65,4 +74,9 @@ export interface ResolvedModuleCommand extends ModuleCommandDefinition {
 export interface ModuleToolFilterResult {
   tools: ToolDefinition[];
   rejected: string[];
+}
+
+export interface ModuleActivationSnapshot {
+  activeModuleIds: string[];
+  loadedModuleIds: string[];
 }

@@ -26,10 +26,9 @@ describe("MemoryManager — init", () => {
     mm.init(TEST_JID);
 
     const content = mm.getContent(TEST_JID);
-    expect(content).toContain("Memoria personal de Luna");
-    expect(content).toContain("Nombre: pendiente de preguntar");
-    expect(content).toContain("pregúntalo de manera natural únicamente durante un saludo o charla casual");
-    expect(content).toContain("Nunca anexes la pregunta del nombre a investigaciones");
+    expect(content).toContain("Perfil persistente");
+    expect(content).toContain("Nombre: pendiente de conocer");
+    expect(content).not.toContain("Instrucciones para Luna");
   });
 
   it("init no sobreescribe si ya existe", () => {
@@ -45,7 +44,7 @@ describe("MemoryManager — init", () => {
   it("getContent retorna default si no se ha hecho init", () => {
     const mm = createIsolatedMemory();
     const content = mm.getContent(TEST_JID);
-    expect(content).toContain("Memoria personal de Luna");
+    expect(content).toContain("Perfil persistente");
   });
 });
 
@@ -66,7 +65,7 @@ describe("MemoryManager — escritura por JID", () => {
     mm.write(TEST_JID, "overwrite", "Usuario: Maria\nLe gusta el cafe");
     const content = mm.getContent(TEST_JID);
     expect(content).toBe("Usuario: Maria\nLe gusta el cafe\n");
-    expect(content).not.toContain("Memoria personal de Luna");
+    expect(content).not.toContain("Perfil persistente");
   });
 
   it("write append funciona sin init previo", () => {
@@ -131,7 +130,7 @@ describe("MemoryManager — executeMemoryTool con JID", () => {
 
     const content = mm.getContent(TEST_JID);
     expect(content).toBe("Solo esto\n");
-    expect(content).not.toContain("Memoria personal de Luna");
+    expect(content).not.toContain("Perfil persistente");
   });
 
   it("memory_read retorna el contenido actual del JID correcto", async () => {
@@ -203,5 +202,19 @@ describe("MemoryManager — límites", () => {
       TEST_JID,
     );
     expect(result).toContain("Error");
+  });
+
+  it("inyecta solo un perfil compacto aunque el archivo persistente sea grande", async () => {
+    const { MAX_MEMORY_CONTEXT_CHARS } = await import("../src/memory.ts");
+    const mm = createIsolatedMemory();
+    mm.write(TEST_JID, "overwrite", [
+      "Nombre: Ana",
+      "Forma de trato preferida: casual",
+      "x".repeat(MAX_MEMORY_CONTEXT_CHARS * 3),
+    ].join("\n"));
+    const context = mm.getContextContent(TEST_JID);
+    expect(context.length).toBeLessThanOrEqual(MAX_MEMORY_CONTEXT_CHARS);
+    expect(context).toContain("Nombre: Ana");
+    expect(context).toContain("Perfil recortado para contexto");
   });
 });

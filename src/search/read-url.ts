@@ -85,7 +85,7 @@ function isPrivateAddress(ip: string): boolean {
   return true;
 }
 
-async function validatePublicUrl(rawUrl: string): Promise<URL> {
+export async function validatePublicUrl(rawUrl: string): Promise<URL> {
   let url: URL;
   try {
     url = new URL(rawUrl);

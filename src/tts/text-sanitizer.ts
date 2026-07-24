@@ -77,28 +77,64 @@ export function sanitizeTextForSpeech(input: string): string {
 }
 
 export type TtsTurnPreference = "voice" | "text" | null;
+export type TtsPersistentModeIntent = "voice" | "text" | "adaptive" | null;
 
-/** Detecta una petición explícita de formato para el turno actual. */
-export function detectTtsTurnPreference(message: string): TtsTurnPreference {
-  const normalized = message
+function normalizeTtsIntentText(message: string): string {
+  return message
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/\s+/g, " ");
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Detecta una petición explícita de formato para el turno actual. */
+export function detectTtsTurnPreference(message: string): TtsTurnPreference {
+  const normalized = normalizeTtsIntentText(message);
 
   const textPatterns = [
-    /\b(?:responde|respondeme|contestame|mandame|enviame|dime)\b.{0,35}\b(?:por )?(?:texto|mensaje|escrito|chat)\b/,
-    /\b(?:solo|solamente|unicamente)\b.{0,12}\b(?:texto|mensaje|escrito)\b/,
-    /\b(?:no|sin)\b.{0,10}\b(?:audio|voz|nota de voz)\b/,
+    /\b(?:responde|respondeme|contestame|mandame|enviame|dime|dame)\b.{0,35}\b(?:por )?(?:texto|mensaje|escrito|chat)\b/,
+    /\b(?:solo|solamente|unicamente|soloen)\b.{0,14}\b(?:texto|mensaje|escrito)\b/,
+    /\bsolo\s*(?:en\s*)?texto\b/,
+    /\b(?:no|sin)\b.{0,18}\b(?:audio|audios|voz|voces|nota de voz|notas de voz)\b/,
+    /\bno quiero\b.{0,20}\b(?:audio|audios|voz|voces|nota de voz|notas de voz)\b/,
   ];
   if (textPatterns.some((pattern) => pattern.test(normalized))) return "text";
 
   const voicePatterns = [
-    /\b(?:responde|respondeme|contestame|mandame|enviame|dime)\b.{0,35}\b(?:en|por|con)?\s*(?:audio|voz|nota de voz)\b/,
+    /\b(?:responde|respondeme|contestame|mandame|enviame|dime|dame)\b.{0,35}\b(?:en|por|con)?\s*(?:audio|voz|nota de voz)\b/,
     /\b(?:solo|solamente|unicamente)\b.{0,12}\b(?:audio|voz|nota de voz)\b/,
     /\b(?:quiero|prefiero)\b.{0,25}\b(?:audio|voz|nota de voz)\b/,
+    /\b(?:prueba|reproduce|pronuncia|haz sonar)\b.{0,30}\b(?:audio|voz|nota de voz)\b/,
   ];
   return voicePatterns.some((pattern) => pattern.test(normalized)) ? "voice" : null;
+}
+
+/**
+ * Detecta cambios persistentes inequívocos. "Ahora respóndeme por voz" sigue
+ * siendo una preferencia de un solo turno; "no quiero audios" o "hablemos
+ * solo en texto" cambia el modo guardado sin depender de una tool del modelo.
+ */
+export function detectTtsPersistentModeIntent(message: string): TtsPersistentModeIntent {
+  const normalized = normalizeTtsIntentText(message);
+  const persistentText = [
+    /\b(?:a partir de ahora|desde ahora|de ahora en adelante|en adelante)\b.{0,45}\b(?:texto|sin audio|sin voz)\b/,
+    /\b(?:hablemos|conversemos)\b.{0,30}\b(?:solo\s*(?:en\s*)?texto|soloen\s*texto|por texto|sin audio|sin voz)\b/,
+    /\bno quiero\b.{0,20}\b(?:mas\s+)?(?:audio|audios|voz|voces|nota de voz|notas de voz)\b/,
+    /\b(?:respondeme|contesta|responde)\b.{0,20}\bsiempre\b.{0,25}\b(?:texto|por texto|sin audio|sin voz)\b/,
+  ];
+  if (persistentText.some((pattern) => pattern.test(normalized))) return "text";
+
+  const persistentVoice = [
+    /\b(?:a partir de ahora|desde ahora|de ahora en adelante|en adelante)\b.{0,45}\b(?:audio|voz|nota de voz)\b/,
+    /\b(?:respondeme|contesta|responde)\b.{0,20}\bsiempre\b.{0,25}\b(?:audio|voz|nota de voz)\b/,
+  ];
+  if (persistentVoice.some((pattern) => pattern.test(normalized))) return "voice";
+
+  if (/\b(?:modo )?adaptativo\b/.test(normalized) && /\b(?:vuelve|usa|activa|dejalo|dejalo)\b/.test(normalized)) {
+    return "adaptive";
+  }
+  return null;
 }
 
 export function isTranscribedAudioMessage(message: string): boolean {

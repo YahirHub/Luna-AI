@@ -197,7 +197,7 @@ export class ContextManager {
   /** Obtiene el contenido de memoria de un usuario específico. */
   private getMemoryContent(jid: string): string {
     try {
-      return this.memoryManager?.getContent(jid) ?? "";
+      return this.memoryManager?.getContextContent(jid) ?? "";
     } catch {
       return "";
     }

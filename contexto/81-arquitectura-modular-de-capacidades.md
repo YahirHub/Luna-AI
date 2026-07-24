@@ -50,7 +50,7 @@ Una tool no declarada explícitamente por un módulo se rechaza por defecto.
 
 El system prompt estático queda limitado a personalidad, seguridad, veracidad, transcripciones, orquestación y formato. Los detalles específicos de memoria, search, browser, agentes, Whisper, administración, etc. se inyectan desde su módulo únicamente cuando son relevantes.
 
-Todos los módulos autorizados aportan un resumen corto para descubrimiento de capacidades. Solo los módulos activados por la petición añaden instrucciones detalladas y, cuando existe, contexto dinámico seguro.
+Solo los módulos activados por intención/estado aportan instrucciones y contexto dinámico. El catálogo global dejó de inyectarse en cada turno: `capability_load` ofrece descubrimiento compacto y puede ampliar el toolset en la ronda siguiente. Las tools poco frecuentes o mutables pueden declararse `defer: true`, de modo que la activación automática expone una superficie mínima y la carga explícita desbloquea el resto durante ese turno.
 
 # Ayuda
 

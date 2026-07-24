@@ -15,6 +15,7 @@ export const CORE_MODULE: LunaModule = {
     { name: "cambiar-password", description: "Cambia la contraseña de tu cuenta" },
   ],
   tools: [
+    { name: "capability_load" },
     { name: "control_help" }, { name: "control_ping" }, { name: "control_get_id" },
     { name: "control_cancel" }, { name: "account_password_change_start" },
   ],

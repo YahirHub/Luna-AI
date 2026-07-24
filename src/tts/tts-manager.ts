@@ -9,7 +9,7 @@ import { loadFfmpegRuntime } from "../media-processing/ffmpeg-native.ts";
 import { PiperNeoRuntimeManager } from "./piper-neo-runtime.ts";
 import { PiperVoiceCatalog, type PiperVoiceDefinition } from "./voice-catalog.ts";
 import { loadUserTtsConfig, saveUserTtsConfig, type TtsResponseMode, type TtsVoiceSelection, type UserTtsConfig } from "./tts-config.ts";
-import { detectTtsTurnPreference, isTranscribedAudioMessage, sanitizeTextForSpeech } from "./text-sanitizer.ts";
+import { detectTtsPersistentModeIntent, detectTtsTurnPreference, isTranscribedAudioMessage, sanitizeTextForSpeech } from "./text-sanitizer.ts";
 
 export interface TtsAudioResult {
   audio: Buffer;
@@ -89,6 +89,26 @@ export class TtsManager {
     }
   }
 
+
+  applyPersistentPreferenceFromMessage(jid: string, message: string): TtsResponseMode | null {
+    const intent = detectTtsPersistentModeIntent(message);
+    if (!intent) return null;
+    this.setResponseMode(jid, intent);
+    return intent;
+  }
+
+  shouldBlockVoiceTool(jid: string, message: string): boolean {
+    const explicit = detectTtsTurnPreference(message);
+    if (explicit === "text") return true;
+    if (explicit === "voice") return false;
+    return this.getConfig(jid).responseMode === "text";
+  }
+
+  canMutateResponseModeFromTool(message: string, target: TtsResponseMode): boolean {
+    const persistent = detectTtsPersistentModeIntent(message);
+    return persistent !== null && persistent === target;
+  }
+
   buildTurnGuidance(jid: string, message: string): string {
     const config = this.getConfig(jid);
     const explicit = detectTtsTurnPreference(message);
@@ -113,6 +133,16 @@ export class TtsManager {
     if (explicit === "text") return false;
     if (explicit === "voice") return true;
     return this.getConfig(jid).responseMode === "voice";
+  }
+
+  /** Para resultados diferidos, un modo texto actual puede detener audios antiguos. */
+  shouldForceDeferredVoice(jid: string, originMessage: string): boolean {
+    const explicit = detectTtsTurnPreference(originMessage);
+    if (explicit === "text") return false;
+    const mode = this.getConfig(jid).responseMode;
+    if (mode === "text") return false;
+    if (mode === "voice") return true;
+    return explicit === "voice";
   }
 
   formatStatus(jid: string): string {

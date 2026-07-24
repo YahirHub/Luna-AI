@@ -1,9 +1,42 @@
 import { spawn } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const forwardedArgs = process.argv.slice(2);
 const bunCommand = process.versions?.bun ? process.execPath : (process.platform === "win32" ? "bun.exe" : "bun");
+
+
+function dependencyPackageJsonPath(packageName) {
+  const parts = packageName.split("/");
+  return packageName.startsWith("@")
+    ? join(process.cwd(), "node_modules", parts[0] ?? "", parts[1] ?? "", "package.json")
+    : join(process.cwd(), "node_modules", packageName, "package.json");
+}
+
+function listMissingDependencies() {
+  try {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+    const required = {
+      ...(packageJson.dependencies ?? {}),
+      ...(packageJson.devDependencies ?? {}),
+    };
+    return Object.keys(required)
+      .filter((name) => !existsSync(dependencyPackageJsonPath(name)))
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+function printMissingDependenciesAndExit(missing) {
+  console.error("\n========== DEPENDENCIAS FALTANTES ==========");
+  console.error("No se ejecutaron los tests porque faltan paquetes declarados en package.json:");
+  for (const name of missing) console.error(`- ${name}`);
+  console.error("\nEjecuta primero: bun install");
+  console.error("Después repite: bun run test");
+  console.error("========== FIN DEPENDENCIAS FALTANTES ==========\n");
+  process.exit(1);
+}
 
 function stripAnsi(value) {
   return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
@@ -52,6 +85,7 @@ function buildFailureSummary(rawOutput) {
   let currentFileStart = 0;
   let summaryStarted = false;
   const failures = [];
+  const loaderErrors = [];
   const byTestName = new Map();
   const lastBoundaryByFile = new Map();
 
@@ -63,6 +97,14 @@ function buildFailureSummary(rawOutput) {
       currentFileStart = index;
       lastBoundaryByFile.set(currentFile, index);
       continue;
+    }
+
+    if (/^(?:error:|SyntaxError:|TypeError:|ReferenceError:|RangeError:)/.test(line.trim())) {
+      const details = lines.slice(Math.max(currentFileStart, index - 2), Math.min(lines.length, index + 12))
+        .filter((entry) => entry.trim() !== "")
+        .filter((entry) => !/^\[LUNA (?:DEBUG|INFO|WARN|ERROR)\]/.test(entry))
+        .filter((entry) => !/^(?:✓|\(pass\))\s/.test(entry));
+      loaderErrors.push({ file: currentFile, details });
     }
 
     if (/^\d+\s+tests?\s+failed:\s*$/.test(line)) {
@@ -109,10 +151,27 @@ function buildFailureSummary(rawOutput) {
     if (!summaryStarted) lastBoundaryByFile.set(resolvedFile, index);
   }
 
+  if (failures.length === 0 && loaderErrors.length > 0) {
+    const unique = [];
+    const seen = new Set();
+    for (const error of loaderErrors) {
+      const key = `${error.file}\n${error.details[0] ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(error);
+    }
+    return unique.map((error, index) => [
+      `ERROR DE CARGA ${index + 1}/${unique.length}`,
+      `Archivo: ${error.file}`,
+      "Detalle:",
+      ...error.details,
+    ].join("\n")).join("\n\n----------------------------------------\n\n");
+  }
+
   if (failures.length === 0) {
     const tail = lines.filter(Boolean).slice(-60);
     return [
-      "No pude identificar un test fallido concreto. Últimas líneas de la ejecución:",
+      "El proceso falló sin una aserción identificable. Últimas líneas de la ejecución:",
       ...tail,
     ].join("\n");
   }
@@ -128,6 +187,9 @@ function buildFailureSummary(rawOutput) {
   });
   return output.join("\n");
 }
+
+const missingDependencies = listMissingDependencies();
+if (missingDependencies.length > 0) printMissingDependenciesAndExit(missingDependencies);
 
 const child = spawn(bunCommand, ["test", ...forwardedArgs], {
   cwd: process.cwd(),

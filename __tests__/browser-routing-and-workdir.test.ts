@@ -28,7 +28,7 @@ describe("enrutamiento browser-agent/api-search", () => {
 describe("herramientas completas de navegador", () => {
   it("incluye HTML, consola, red, assets, PDF y descarga masiva", () => {
     for (const name of [
-      "browser_get_html", "browser_eval", "browser_console", "browser_errors",
+      "browser_get_html", "browser_find_html", "browser_eval", "browser_console", "browser_errors",
       "browser_network_requests", "browser_network_request", "browser_extract_assets",
       "browser_download_assets", "browser_pdf",
     ]) expect(BROWSER_AGENT_TOOL_NAMES).toContain(name as never);

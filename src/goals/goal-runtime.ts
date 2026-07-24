@@ -63,7 +63,8 @@ export interface GoalRuntimeDependencies {
   tasklists: TasklistManager;
   getModel: (jid: string) => string | null;
   getLlmConfig: () => LlmConfig | null;
-  getTools: (jid: string) => ToolDefinition[];
+  getTools: (jid: string, message: string, loadedModuleIds?: Iterable<string>) => ToolDefinition[];
+  loadCapability?: (jid: string, capability: string, message: string) => Promise<string>;
   executeTool: (jid: string, goalId: string, tasklistId: string, name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<string>;
   getDelegatedTaskContext?: (jid: string, taskIds: string[]) => string;
   onProgress?: (jid: string, text: string) => void | Promise<void>;
@@ -388,7 +389,7 @@ export class GoalRuntime {
 
   buildContextSummary(jid: string): string {
     const goal = this.list(jid).find((item) => isActive(item.status));
-    if (!goal) return "[GOAL]\nNo hay goal activo.";
+    if (!goal) return "";
     const tasklist = this.deps.tasklists.get(jid, goal.tasklistId);
     return [
       "[GOAL ACTIVO — estado autoritativo]",
@@ -481,7 +482,8 @@ export class GoalRuntime {
       const iteration = goal.iteration + 1;
       goal = this.patch(goal.jid, goal.id, { iteration, status: "running", currentPhase: "executing", currentActivity: `Ejecutando iteración ${iteration}/${goal.maxIterations}`, currentTool: undefined, lastEventAt: new Date().toISOString() })!;
       const pendingInstructions = [...(goal.pendingInstructions ?? [])];
-      const tools = this.deps.getTools(goal.jid);
+      const loadedCapabilities = new Set<string>(["goals", "workspace"]);
+      const tools = this.deps.getTools(goal.jid, goal.objective, loadedCapabilities);
       const trace: GoalToolTrace[] = [];
       const delegatedContext = this.deps.getDelegatedTaskContext?.(goal.jid, goal.delegatedTaskIds ?? []) ?? "";
       const iterationStartProgress = this.deps.tasklists.progress(tasklist);
@@ -495,7 +497,8 @@ export class GoalRuntime {
             "Al inicio inspecciona la tasklist. Si todavía es genérica, reemplázala UNA SOLA VEZ con tasklist_replace por pasos específicos, verificables y completos. Después de concretarla, conserva el plan existente: usa tasklist_update y tasklist_add; no reinicies ni reemplaces la lista para esconder pendientes o evidencia.",
             "Actualiza tasklist_update después de cada avance importante. No marques completed sin evidencia concreta en evidence. Prioriza cerrar pasos existentes antes de ampliar el plan.",
             "Puedes crear/leer/editar/buscar/mover/copiar archivos en el workdir y ejecutar Bash/Python/Node/Bun cuando el runtime esté disponible. Usa workspace_exec para tests, builds y scripts finitos; no inventes su resultado.",
-            "Antes de improvisar una metodología o framework, consulta skill_list y carga con skill_load cualquier skill global que encaje con el objetivo. Usa skill_read_resource para referencias y skill_run_script para helpers incluidos en la skill; los scripts se ejecutan en una copia privada dentro del sandbox del usuario.",
+            "Antes de improvisar una metodología o framework, usa skill_search con términos concretos y carga con skill_load únicamente la skill que encaje con el objetivo. skill_search/skill_load/skill_read_resource son la superficie inicial; si realmente necesitas enumerar, copiar recursos o ejecutar helpers de una skill, carga primero la capacidad skills con capability_load y luego usa skill_list/skill_copy_resource/skill_run_script.",
+            "El toolset también es progresivo: si una capacidad necesaria no está disponible, usa capability_load y continúa en la siguiente ronda con sus tools. No cargues módulos por si acaso.",
             "Si el objetivo requiere dejar un bot, servidor o servicio ejecutándose después de este turno, usa process_start. Verifica process_status/process_logs, corrige errores y reinicia cuando sea necesario; no mantengas un workspace_exec infinito.",
             "Cuando falte documentación o información actual, primero revisa RESULTADOS DE INVESTIGACIONES PREVIAS. Solo si ahí no está la respuesta, delega con spawn_agents. Usa researcher-web si api-search está disponible y browser-web en caso contrario o para navegación/scraping. Pide al investigador guardar documentación útil en Markdown dentro de su carpeta de tarea cuando vaya a ser necesaria para continuar la implementación.",
             "No repitas una investigación ya realizada con otra redacción. Si después de consumir sus resultados aún falta un dato, formula una segunda investigación enfocada únicamente en un hueco factual nuevo y específico.",
@@ -539,7 +542,16 @@ export class GoalRuntime {
           const currentGoal = this.get(goal.jid, goal.id) ?? goal;
           const currentTasklist = this.deps.tasklists.get(goal.jid, goal.tasklistId)!;
 
-          if (name === "tasklist_create") {
+          if (name === "capability_load") {
+            const capability = typeof args.capability === "string" ? args.capability.trim().toLowerCase() : "";
+            if (!capability || !this.deps.loadCapability) {
+              toolResult = "Error: capability_load no está disponible en este runtime.";
+            } else {
+              const loaded = await this.deps.loadCapability(goal.jid, capability, goal.objective);
+              if (!loaded.startsWith("Error:")) loadedCapabilities.add(capability);
+              toolResult = loaded;
+            }
+          } else if (name === "tasklist_create") {
             toolResult = `Error: este goal ya tiene la tasklist autoritativa ${goal.tasklistId}. Usa tasklist_read/update/add sobre esa lista.`;
           } else if (name === "tasklist_replace" && !this.tasklistStillGeneric(currentTasklist)) {
             toolResult = "Error: tasklist_replace solo está permitido durante la planificación inicial. El plan ya está concretado; conserva evidencia y progreso con tasklist_update/tasklist_add.";
@@ -582,7 +594,14 @@ export class GoalRuntime {
         },
         3,
         undefined,
-        { maxRounds: 36, maxTokens: 7000, truncationRecoveryAttempts: 2, signal, usage: { jid: goal.jid, purpose: "goal" } },
+        {
+          maxRounds: 36,
+          maxTokens: 7000,
+          truncationRecoveryAttempts: 2,
+          signal,
+          usage: { jid: goal.jid, purpose: "goal" },
+          resolveTools: () => this.deps.getTools(goal.jid, goal.objective, loadedCapabilities),
+        },
       );
       if (signal.aborted) break;
       if (pendingInstructions.length) {

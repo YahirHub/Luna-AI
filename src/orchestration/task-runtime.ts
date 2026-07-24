@@ -20,6 +20,10 @@ export interface AgentTaskRecord {
   totalWorkers: number;
   error?: string;
   artifacts: string[];
+  /** Petición del usuario que originó la tarea background. */
+  originPrompt?: string;
+  /** Contexto reciente congelado al lanzar la tarea para completar comparaciones/síntesis. */
+  originContext?: string;
 }
 
 export interface AgentRunRecord {
@@ -146,7 +150,12 @@ export class TaskRuntime {
     }
   }
 
-  create(jid: string, title: string, totalWorkers: number): { record: AgentTaskRecord; signal: AbortSignal } {
+  create(
+    jid: string,
+    title: string,
+    totalWorkers: number,
+    origin?: { prompt?: string; context?: string },
+  ): { record: AgentTaskRecord; signal: AbortSignal } {
     const created = this.workspace.createTask(jid, title);
     const now = new Date().toISOString();
     const record: AgentTaskRecord = {
@@ -161,6 +170,8 @@ export class TaskRuntime {
       completedWorkers: 0,
       totalWorkers,
       artifacts: [],
+      originPrompt: origin?.prompt?.trim().slice(0, 16_000) || undefined,
+      originContext: origin?.context?.trim().slice(0, 20_000) || undefined,
     };
     const file = this.load(jid);
     file.tasks.push(record);
@@ -345,8 +356,7 @@ export class TaskRuntime {
     const agents = this.listAgents(jid);
     const active = agents.filter((agent) => ["queued", "running", "waiting_user"].includes(agent.status)).slice(0, 8);
     const pending = agents.filter((agent) => isTerminalAgent(agent.status) && agent.reviewStatus === "pending").slice(0, 8);
-    const reviewed = agents.filter((agent) => isTerminalAgent(agent.status) && agent.reviewStatus === "reviewed").slice(0, 5);
-    if (active.length === 0 && pending.length === 0 && reviewed.length === 0) return "[TAREAS DE FONDO]\nNo hay agentes registrados.";
+    if (active.length === 0 && pending.length === 0) return "";
     const lines = ["[TAREAS DE FONDO — estado autoritativo]"];
     if (active.length > 0) {
       lines.push("Activos:");
@@ -361,12 +371,6 @@ export class TaskRuntime {
       lines.push("Terminados pendientes de revisión:");
       for (const agent of pending) {
         lines.push(`- ${agent.id} "${agent.name}" | ${agent.status} | tarea ${agent.taskId} | resultado: ${agent.resultPath ?? "registrado en la tarea"}`);
-      }
-    }
-    if (reviewed.length > 0) {
-      lines.push("Revisados recientemente:");
-      for (const agent of reviewed) {
-        lines.push(`- ${agent.id} "${agent.name}" | ${agent.status}/reviewed | tarea ${agent.taskId}`);
       }
     }
     lines.push("Usa task_status para estado exacto y task_inspect para leer resultados, eventos, carpeta y artefactos. También están task_cancel/task_cancel_all y agent_status/agent_cancel. El sistema revisa automáticamente las tareas al terminar; no afirmes que siguen activas si aquí aparecen terminales.");
